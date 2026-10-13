@@ -1,7 +1,7 @@
 # telebot-maverick
 
 Слушает закрытый Telegram-канал (от вашего аккаунта, через Telethon) и при
-`Deep Local >= 1.65` и `Deep Scalp >= 2.0` открывает лонг 0.1 BTC, если такой позиции ещё нет.
+`Deep Local >= 1.65` и `Deep Scalp >= 2.0` в двух отчётах подряд (`CONFIRM_REPORTS`) открывает лонг 0.1 BTC, если такой позиции ещё нет.
 
     pip install -r requirements.txt
     cp .env.example .env   # заполнить

@@ -1,7 +1,7 @@
 """Бэктест: python backtest.py history.csv [--exchange bybit] [--symbol BTC/USDT:USDT] [--sweep]
 
 Правила симуляции (те же, что у бота):
-  * сигнал: deep_local >= local_min И deep_scalp >= scalp_min
+  * сигнал: deep_local >= local_min И deep_scalp >= scalp_min в --confirm отчётах подряд (по умолчанию 2)
   * вход по open первой свечи, начавшейся не раньше сообщения
   * пока позиция открыта, новые сигналы игнорируются
   * SL / TP от цены входа; если в одной свече достигнуты оба — считаем, что сработал SL
@@ -13,6 +13,8 @@ import os
 import time
 from bisect import bisect_left
 from datetime import datetime
+
+from signal_parser import Confirmer
 
 
 def load_signals(path):
@@ -79,13 +81,14 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
     return candles
 
 
-def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0):
+def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1):
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, free = [], 0
+    conf = Confirmer(local_min, scalp_min, confirm)
     for sts, loc, scalp in signals:
-        if loc < local_min or scalp < scalp_min:
-            continue
+        if not conf.update({"local": loc, "scalp": scalp}):
+            continue  # условие не выполнено или ещё не набралось подряд
         i = bisect_left(ts, sts)
         if i >= n:
             break
@@ -150,6 +153,7 @@ def main():
     ap.add_argument("--sl", type=float, default=1.0)
     ap.add_argument("--fee", type=float, default=0.0005, help="taker-комиссия за сторону, доля")
     ap.add_argument("--slip", type=float, default=0.0, help="проскальзывание, доля")
+    ap.add_argument("--confirm", type=int, default=2, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
     ap.add_argument("--out", default="trades.csv")
     ap.add_argument("--sweep", action="store_true", help="сетка порогов local/scalp")
@@ -159,7 +163,7 @@ def main():
     print(f"Сигналов с Deep-значениями: {len(signals)}, "
           f"{datetime.utcfromtimestamp(signals[0][0]/1000):%Y-%m-%d} .. {datetime.utcfromtimestamp(signals[-1][0]/1000):%Y-%m-%d}")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
-    common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip)
+    common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm)
 
     if a.sweep:
         print("\nlocal  scalp | результат")

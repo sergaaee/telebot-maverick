@@ -39,3 +39,12 @@ def test_ignores_signals_while_open_then_reenters():
 def test_stats():
     s = stats([{"pnl_usd": 3, "pnl_pct": 3, "reason": "TP"}, {"pnl_usd": -1, "pnl_pct": -1, "reason": "SL"}])
     assert s["trades"] == 2 and s["total_usd"] == 2 and s["max_dd_usd"] == 1 and s["profit_factor"] == 3
+
+
+def test_confirm_two_reports_in_a_row():
+    cs = [c(i, 100, 100, 100, 100) for i in range(10)] + [c(10, 100, 104, 100, 104)]
+    ok, bad = (2, 2.5), (1, 1)
+    sigs = [(0, *ok), (M, *bad), (2 * M, *ok), (3 * M, *ok)]
+    t = simulate(sigs, cs, 1.65, 2.0, confirm=2, **KW)
+    assert len(t) == 1 and t[0]["signal_ts"] == 3 * M and t[0]["entry_ts"] == 3 * M
+    assert len(simulate(sigs, cs, 1.65, 2.0, confirm=1, **KW)) >= 1

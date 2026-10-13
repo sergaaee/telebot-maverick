@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import PeerChannel
 
-from signal_parser import parse_signal, should_long
+from signal_parser import Confirmer, parse_signal
 from trader import Trader
 
 load_dotenv()
@@ -15,6 +15,7 @@ log = logging.getLogger("bot")
 
 LOCAL_MIN = float(os.getenv("DEEP_LOCAL_MIN", "1.65"))
 SCALP_MIN = float(os.getenv("DEEP_SCALP_MIN", "2.0"))
+CONFIRM = int(os.getenv("CONFIRM_REPORTS", "2"))
 
 
 async def main():
@@ -31,6 +32,7 @@ async def main():
     )
     client = TelegramClient(os.getenv("TG_SESSION", "maverick"), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
     lock = asyncio.Lock()  # чтобы два быстрых сообщения не открыли две позы
+    conf = Confirmer(LOCAL_MIN, SCALP_MIN, CONFIRM)
     channel = PeerChannel(int(os.getenv("TG_CHANNEL_ID", "3217240841")))
 
     @client.on(events.NewMessage(chats=channel))
@@ -39,7 +41,9 @@ async def main():
         if not sig:
             return
         log.info("Сигнал: %s", sig)
-        if not should_long(sig, LOCAL_MIN, SCALP_MIN):
+        confirmed = conf.update(sig)
+        log.info("Серия подряд: %s из %s", conf.streak, CONFIRM)
+        if not confirmed:
             return
         async with lock:
             try:
@@ -49,6 +53,13 @@ async def main():
 
     await client.start()  # при первом запуске спросит телефон и код
     await client.get_dialogs()  # прогрев кеша, иначе закрытый канал не резолвится
+    # после рестарта восстанавливаем серию по последним отчётам (ордер по ним не открываем)
+    recent = [m async for m in client.iter_messages(channel, limit=50)]
+    for m in reversed(recent):
+        s = parse_signal(m.raw_text or "")
+        if s:
+            conf.update(s)
+    log.info("Серия на старте: %s из %s", conf.streak, CONFIRM)
     log.info("Слушаю канал %s (DRY_RUN=%s)", channel.channel_id, trader.dry_run)
     try:
         await client.run_until_disconnected()
