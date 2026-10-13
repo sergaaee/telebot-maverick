@@ -26,6 +26,8 @@ async def main():
         os.environ["SYMBOL"],
         float(os.getenv("ORDER_SIZE", "0.1")),
         os.getenv("DRY_RUN", "true").lower() != "false",
+        float(os.getenv("TP_PCT", "3")),
+        float(os.getenv("SL_PCT", "1")),
     )
     client = TelegramClient(os.getenv("TG_SESSION", "maverick"), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
     lock = asyncio.Lock()  # чтобы два быстрых сообщения не открыли две позы
