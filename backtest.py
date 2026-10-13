@@ -110,7 +110,7 @@ def _close(trade, exit_p, reason, idx, candles, fee, size):
 
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None):
+             short=None, liq=None, cool=None, cooldown_h=0.0):
     """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
     Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
     (закрытие по open свечи входа + новая позиция)."""
@@ -123,6 +123,8 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
         if i >= n:
             break
         if cur is not None and cur["_j"] < i:
+            if cooldown_h and cur["reason"] == "SL" and sts < cur["exit_ts"] + cooldown_h * 3.6e6:
+                continue  # пауза после стопа
             cur = None  # закрылась сама по SL/TP
         if cur is not None:
             if cur["side"] == side:
@@ -177,7 +179,10 @@ def wilson_low(wins, n, z=1.96):
 
 def filter_grid(kind):
     grid = []
-    if kind == "liq":
+    if kind == "cd":
+        for hours in (1, 2, 4, 6, 12, 24, 48):
+            grid.append((f"пауза {hours}ч после стопа", dict(cooldown_h=hours)))
+    elif kind == "liq":
         for hours in (2, 6, 12, 24):
             for frac in (0.5, 0.25, 0.1):
                 for pct in (0, 75, 90):
@@ -270,6 +275,8 @@ def main():
     ap.add_argument("--liq-max-age", type=float, default=3.0, help="макс. возраст записи ликвидаций из --liq-file, ч")
     ap.add_argument("--sweep-liq", action="store_true", help="свип фильтра «ликвидации закончились»")
     ap.add_argument("--sweep-cool", action="store_true", help="свип фильтра «метрики остывают»")
+    ap.add_argument("--sweep-cooldown", action="store_true", help="контроль: простая пауза после стопа (без ликвидаций)")
+    ap.add_argument("--cooldown-h", type=float, default=0.0, help="пауза после стопа, ч")
     ap.add_argument("--min-trades", type=int, default=15, help="минимум сделок для попадания в топ свипа")
     ap.add_argument("--liq-hours", type=float, help="применить фильтр ликвидаций: окно, ч")
     ap.add_argument("--liq-frac", type=float, default=0.25, help="...спад до доли от максимума окна")
@@ -302,14 +309,16 @@ def main():
                 print(f"{lm:5.2f} {sm:5.2f} | {fmt(stats(simulate(signals, candles, lm, sm, **common)))}")
         print("\nОсторожно: подбор порогов по одной и той же истории — это переобучение.")
         return
-    if a.sweep_liq or a.sweep_cool:
+    if a.sweep_liq or a.sweep_cool or a.sweep_cooldown:
         base_kw = dict(local_min=a.local_min, scalp_min=a.scalp_min, **common)
-        for kind, on in (("liq", a.sweep_liq), ("cool", a.sweep_cool)):
+        for kind, on in (("liq", a.sweep_liq), ("cool", a.sweep_cool), ("cd", a.sweep_cooldown)):
             if on:
                 run_filter_sweep(kind, signals, candles, base_kw, short, a.min_trades)
         return
 
     extra = {}
+    if a.cooldown_h:
+        extra["cooldown_h"] = a.cooldown_h
     if a.liq_hours:
         extra["liq"] = dict(hours=a.liq_hours, frac=a.liq_frac, pct=a.liq_pct)
     if a.cool_drop is not None:

@@ -83,3 +83,13 @@ def test_same_side_signal_ignored_while_open():
     cs = [c(0, 100, 100, 100, 100), c(1, 100, 101, 100, 101), c(2, 101, 101, 101, 101)]
     t = simulate([(0, 2, 2.5), (M, 2, 2.5)], cs, 1.65, 2.0, short=(1.05, 0.65), **KW)
     assert len(t) == 1 and t[0]["reason"] == "OPEN"
+
+
+def test_cooldown_after_stop():
+    H = 60  # свечи по минуте; пауза 1 час = 60 свечей
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 100, 98, 98)] + [c(i, 98, 98, 98, 98) for i in range(2, 200)]
+    sigs = [(0, 2, 2.5), (10 * M, 2, 2.5), (100 * M, 2, 2.5)]
+    kw = dict(tp_pct=3, sl_pct=1, fee=0, size=0.1)
+    assert [x["signal_ts"] for x in simulate(sigs, cs, 1.65, 2.0, **kw)] == [0, 10 * M]  # 3-й сигнал: позиция уже открыта
+    t = simulate(sigs, cs, 1.65, 2.0, cooldown_h=1, **kw)
+    assert [x["signal_ts"] for x in t] == [0, 100 * M]
