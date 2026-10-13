@@ -36,3 +36,9 @@ class Confirmer:
     def update(self, sig: dict) -> bool:
         self.streak = self.streak + 1 if self.predicate(sig) else 0
         return self.streak >= self.confirm
+
+
+def parse_liquidation(text: str) -> Optional[dict]:
+    """'Long 3494.9k $ | Short 58288.3k $' -> {'long': 3494.9, 'short': 58288.3} (в тыс. $)."""
+    m = re.search(rf"Long\s*{_NUM}\s*k\s*\$\s*\|\s*Short\s*{_NUM}\s*k", text, re.IGNORECASE)
+    return {"long": float(m.group(1).replace(",", ".")), "short": float(m.group(2).replace(",", "."))} if m else None

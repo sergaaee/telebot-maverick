@@ -10,12 +10,13 @@
 По умолчанию `DRY_RUN=true` — ордера только логируются. Поставьте `DRY_RUN=false` для реальной торговли.
 После входа выставляются стоп (−1%) и тейк (+3%) от цены входа (`SL_PCT`, `TP_PCT`), reduce-only. Если стоп выставить не удалось — позиция сразу закрывается.
 
-## Выгрузка истории канала
+## Выгрузка истории
 
-    python export_history.py history.csv
+    python export_history.py history.csv                                     # канал из TG_CHANNEL_ID
+    TG_SESSION=export python export_history.py history_binance.csv --chat 2119980662   # или --chat maverickBinance
 
-Все сообщения от старых к новым: id, дата (UTC), Deep Global/Local/Scalp и полный текст.
-Бот при этом можно не останавливать, но для двух процессов лучше отдельная сессия: `TG_SESSION=export python export_history.py`.
+Источник — id (канал, бот, группа) или часть названия/username из ваших диалогов. Все сообщения от старых к новым:
+id, дата (UTC), Deep Global/Local/Scalp, ликвидации Long/Short (тыс. $) и полный текст.
 
 ## Бэктест
 

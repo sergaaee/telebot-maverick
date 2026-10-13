@@ -33,3 +33,12 @@ def test_confirmer_and_short():
     assert should_short({"local": 1.05, "scalp": 0.65}, 1.05, 0.65)
     assert not should_short({"local": 1.06, "scalp": 0.5}, 1.05, 0.65)
     assert not should_short({"local": 1.0, "scalp": 0.7}, 1.05, 0.65)
+
+
+def test_liquidation_and_second_bot_format():
+    from signal_parser import parse_liquidation
+    msg = "Deep Global = 0.87\nDeep Local = 1.43\nDeep Scalp = 1.26\n\nLiquidation\nLong 3494.9k $ | Short 58288.3k $\n\nTop Coin\nWBETHUSDT | 12.40"
+    assert parse_signal(msg) == {"local": 1.43, "scalp": 1.26, "global": 0.87}
+    assert parse_liquidation(msg) == {"long": 3494.9, "short": 58288.3}
+    assert parse_liquidation("Long 0.0k $ | Short 0.0k $") == {"long": 0.0, "short": 0.0}
+    assert parse_liquidation("nope") is None
