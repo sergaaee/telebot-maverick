@@ -206,6 +206,32 @@ def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
           " Верьте только тем, у кого плюс в ОБЕИХ половинах и достаточно сделок.")
 
 
+def explain(signals, candles, a, short, common, extra, trades):
+    """Сравнивает сделки с фильтром и без: что убрано, что появилось из-за каскада (иной порядок позиций)."""
+    base = simulate(signals, candles, a.local_min, a.scalp_min, short=short, **common)
+    kept = {t["signal_ts"] for t in trades}
+    base_ts = {t["signal_ts"] for t in base}
+    rep = {s[0]: s for s in signals}
+
+    def line(t):
+        r = rep.get(t["signal_ts"])
+        liq = f"liq L/S {r[3]:.0f}/{r[4]:.0f}k" if r and r[3] is not None else "liq -"
+        return (f"  {datetime.fromtimestamp(t['signal_ts'] / 1000, timezone.utc):%Y-%m-%d %H:%M} {t['side']:5} "
+                f"{t['reason']:4} {t['pnl_usd']:>+7.0f}$  {liq}")
+
+    removed = [t for t in base if t["signal_ts"] not in kept]
+    added = [t for t in trades if t["signal_ts"] not in base_ts]
+    for title, part in (("УБРАНО фильтром", removed), ("ДОБАВИЛОСЬ из-за каскада позиций", added)):
+        w = sum(t["pnl_usd"] > 0 for t in part)
+        print(f"\n{title}: {len(part)} сделок, из них прибыльных {w}, сумма {sum(t['pnl_usd'] for t in part):+.0f}$")
+        for t in part:
+            print(line(t))
+    for side in ("long", "short"):
+        b_ = [t for t in base if t["side"] == side]
+        f_ = [t for t in trades if t["side"] == side]
+        print(f"\n{side}: база {fmt(stats(b_))}\n{side}: фильтр {fmt(stats(f_))}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("history")
@@ -233,6 +259,7 @@ def main():
     ap.add_argument("--liq-hours", type=float, help="применить фильтр ликвидаций: окно, ч")
     ap.add_argument("--liq-frac", type=float, default=0.25, help="...спад до доли от максимума окна")
     ap.add_argument("--liq-pct", type=float, default=0, help="...всплеск не ниже этого перцентиля прошлых значений")
+    ap.add_argument("--explain", action="store_true", help="показать, какие сделки базы фильтр убрал/добавил и их ликвидации")
     ap.add_argument("--cool-metric", choices=["scalp", "local"], default="scalp")
     ap.add_argument("--cool-drop", type=float, help="применить фильтр остывания: падение от максимума серии")
     ap.add_argument("--cool-declines", type=int, help="...или: столько отчётов подряд вниз")
@@ -280,6 +307,8 @@ def main():
         part = [t for t in trades if t["side"] == side]
         if part:
             print(f"{side:6}: " + fmt(stats(part)))
+    if a.explain and extra:
+        explain(signals, candles, a, short, common, extra, trades)
     if trades:
         with open(a.out, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=[x for x in trades[0] if not x.startswith('_')], extrasaction='ignore')

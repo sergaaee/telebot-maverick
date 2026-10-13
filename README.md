@@ -53,4 +53,6 @@ SL +1% / TP −3% от входа. Одновременно открыта ма�
     python backtest.py history.csv --liq-file history_binance.csv --liq-hours 6 --liq-frac 0.25 --liq-pct 75
     python backtest.py history.csv --cool-metric scalp --cool-drop 0.2      # или --cool-declines 2
 
+Флаг `--explain` к одиночному прогону показывает, какие сделки базы фильтр убрал (дата, сторона, результат, ликвидации).
+
 Фильтры пока только в бэктесте; в бот их стоит переносить только после подтверждения на данных.
