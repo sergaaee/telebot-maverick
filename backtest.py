@@ -13,7 +13,7 @@ import csv
 import os
 import time
 from bisect import bisect_left
-from datetime import datetime
+from datetime import datetime, timezone
 
 from signal_parser import Confirmer, should_long, should_short
 
@@ -193,7 +193,7 @@ def main():
 
     signals = load_signals(a.history)
     print(f"Сигналов с Deep-значениями: {len(signals)}, "
-          f"{datetime.utcfromtimestamp(signals[0][0]/1000):%Y-%m-%d} .. {datetime.utcfromtimestamp(signals[-1][0]/1000):%Y-%m-%d}")
+          f"{datetime.fromtimestamp(signals[0][0]/1000, timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(signals[-1][0]/1000, timezone.utc):%Y-%m-%d}")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
     common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm)
     short = None if a.no_short else (a.short_local_max, a.short_scalp_max)
