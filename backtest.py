@@ -11,6 +11,7 @@
 import argparse
 import csv
 import os
+import shutil
 import time
 from bisect import bisect_left
 from datetime import datetime, timezone
@@ -18,24 +19,38 @@ from datetime import datetime, timezone
 from entries import attach_liq, entries, load_signals
 
 
-def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")  # не зависит от текущей папки запуска
+
+
+def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
     """Скачивает свечи [since_ms, now] с кешем в CSV. Возвращает [(ts,o,h,l,c)]."""
     import ccxt
 
     os.makedirs(cache_dir, exist_ok=True)
-    name = f"{exchange}_{symbol.replace('/', '').replace(':', '_')}_{tf}.csv"
+    key = "binanceusdm" if exchange == "binance" and ":" in symbol else exchange  # один и тот же рынок -> один кеш
+    name = f"{key}_{symbol.replace('/', '').replace(':', '_')}_{tf}.csv"
     path = os.path.join(cache_dir, name)
     candles = []
+    legacy = os.path.join(cache_dir, name.replace(key + "_", "binance_", 1))  # кеш старых запусков с --exchange binance
+    if not os.path.exists(path) and key != exchange and os.path.exists(legacy):
+        shutil.copy(legacy, path)
     if os.path.exists(path):
         with open(path, newline="") as f:
             candles = [tuple(float(x) if i else int(x) for i, x in enumerate(r)) for r in csv.reader(f)]
+        candles = candles[:-1]  # последняя могла быть записана незавершённой старой версией — перекачаем
     ex = getattr(ccxt, exchange)({"enableRateLimit": True})
     tf_ms = ex.parse_timeframe(tf) * 1000
     # докачиваем хвост; если кеш начинается позже нужного, качаем заново с нуля
     if candles and candles[0][0] > since_ms + tf_ms:
+        print(f"  кеш {os.path.basename(path)} начинается позже нужного — качаю заново")
         candles = []
+    elif candles:
+        print(f"  кеш {os.path.basename(path)}: {len(candles)} свечей, докачиваю хвост")
+    else:
+        print(f"  кеша нет ({os.path.basename(path)}), качаю с начала")
     cur = candles[-1][0] + tf_ms if candles else since_ms
     now = int(time.time() * 1000)
+    closed_before = now // tf_ms * tf_ms  # свеча, которая ещё формируется, в кеш не попадает
 
     def save():
         with open(path + ".tmp", "w", newline="") as f:
@@ -43,7 +58,7 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
         os.replace(path + ".tmp", path)
 
     pages = 0
-    while cur < now:
+    while cur < closed_before:
         for attempt in range(8):
             try:
                 batch = ex.fetch_ohlcv(symbol, tf, since=cur, limit=1000)
@@ -55,7 +70,7 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
         else:
             save()
             raise SystemExit("Биржа не отвечает; прогресс сохранён, запустите ещё раз — докачает с места остановки.")
-        batch = [tuple(c[:5]) for c in batch if c[0] >= cur]
+        batch = [tuple(c[:5]) for c in batch if cur <= c[0] < closed_before]
         if not batch:
             break
         candles.extend(batch)
