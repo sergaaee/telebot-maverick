@@ -3,3 +3,4 @@
 *.session-journal
 __pycache__/
 .pytest_cache/
+history*.csv
