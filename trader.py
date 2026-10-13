@@ -15,19 +15,37 @@ class Trader:
         self.symbol, self.size, self.dry_run = symbol, size, dry_run
         self.tp_pct, self.sl_pct = tp_pct, sl_pct
 
-    async def open_side(self):
-        """'long' / 'short', если по символу есть открытая позиция, иначе None."""
+    async def _position(self):
+        """(side, contracts) открытой позиции по символу или (None, 0)."""
         for p in await self.ex.fetch_positions([self.symbol]):
-            if p.get("symbol") == self.symbol and float(p.get("contracts") or 0) > 0:
-                return p.get("side")
-        return None
+            amount = abs(float(p.get("contracts") or 0))
+            if p.get("symbol") == self.symbol and amount > 0:
+                return p.get("side"), amount
+        return None, 0
+
+    async def _cancel_all(self):
+        # обычные и условные (SL/TP) ордера на Binance отменяются разными вызовами
+        for params in ({}, {"trigger": True}):
+            try:
+                await self.ex.cancel_all_orders(self.symbol, params)
+            except Exception as e:
+                log.warning("cancel_all_orders%s: %s", params or "", e)
 
     async def open_position(self, side: str) -> bool:
-        """Открывает лонг/шорт, если по символу нет позиции. True — если ордер отправлен."""
-        existing = await self.open_side()
-        if existing:
-            log.info("По %s уже открыт %s — сигнал %s пропускаю", self.symbol, existing, side)
+        """Открывает лонг/шорт. Та же сторона уже открыта — пропуск; противоположная — разворот
+        (закрываем по рынку, отменяем её SL/TP, открываем новую). True — если новая позиция открыта."""
+        existing, amount = await self._position()
+        if existing == side:
+            log.info("По %s уже открыт %s — сигнал пропускаю", self.symbol, side)
             return False
+        if existing:
+            if self.dry_run:
+                log.info("[DRY_RUN] закрыл бы %s %s по рынку (разворот в %s)", existing, amount, side)
+            else:
+                log.info("Разворот: закрываю %s %s по рынку", existing, amount)
+                await self._cancel_all()
+                await self.ex.create_order(self.symbol, "market", "sell" if existing == "long" else "buy",
+                                           amount, None, {"reduceOnly": True})
         d = 1 if side == "long" else -1
         close_side = "sell" if side == "long" else "buy"
         if self.dry_run:
@@ -52,7 +70,7 @@ class Trader:
             # позиция без стопа недопустима — закрываем и отменяем что успели выставить
             log.exception("Не удалось выставить SL/TP — закрываю позицию")
             try:
-                await self.ex.cancel_all_orders(self.symbol)
+                await self._cancel_all()
             finally:
                 await self.ex.create_order(self.symbol, "market", close_side, self.size, None, {"reduceOnly": True})
             raise

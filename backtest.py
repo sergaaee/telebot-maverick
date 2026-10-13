@@ -4,7 +4,7 @@
   * шорт: deep_local <= --short-local-max И deep_scalp <= --short-scalp-max (0 сделок с --no-short)
   * лонг: deep_local >= local_min И deep_scalp >= scalp_min в --confirm отчётах подряд (по умолчанию 2)
   * вход по open первой свечи, начавшейся не раньше сообщения
-  * пока позиция открыта, новые сигналы игнорируются
+  * сигнал в ту же сторону при открытой позиции игнорируется; в противоположную — разворот: закрытие по open свечи входа
   * SL / TP от цены входа; если в одной свече достигнуты оба — считаем, что сработал SL
   * комиссия taker берётся за каждую сторону сделки
 """
@@ -82,12 +82,37 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
     return candles
 
 
+def _scan(candles, i, d, tp, sl, slip):
+    """Естественный выход позиции, открытой на open свечи i: (reason, exit_price, idx)."""
+    for k in range(i, len(candles)):
+        _, o, h, l, _ = candles[k]
+        if d == 1:
+            if l <= sl:
+                return "SL", min(sl, o) * (1 - slip), k
+            if h >= tp:
+                return "TP", max(tp, o), k
+        else:
+            if h >= sl:
+                return "SL", max(sl, o) * (1 + slip), k
+            if l <= tp:
+                return "TP", min(tp, o), k
+    return "OPEN", candles[-1][4], len(candles) - 1
+
+
+def _close(trade, exit_p, reason, idx, candles, fee, size):
+    d = 1 if trade["side"] == "long" else -1
+    pnl = d * (exit_p / trade["entry"] - 1) - 2 * fee
+    trade.update(exit=exit_p, reason=reason, exit_ts=candles[idx][0], _j=idx,
+                 pnl_pct=pnl * 100, pnl_usd=pnl * trade["entry"] * size)
+
+
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
              short=None):
-    """short=(local_max, scalp_max) включает шорты; одновременно открыта максимум одна позиция."""
+    """short=(local_max, scalp_max) включает шорты. Одна позиция одновременно: сигнал в ту же сторону
+    игнорируется, в противоположную — разворот (закрытие по open свечи входа + новая позиция)."""
     ts = [c[0] for c in candles]
     n = len(candles)
-    trades, free = [], 0
+    trades, cur = [], None
     c_long = Confirmer(lambda s: should_long(s, local_min, scalp_min), confirm)
     c_short = Confirmer(lambda s: short is not None and should_short(s, *short), confirm)
     for sts, loc, scalp in signals:
@@ -96,41 +121,29 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
         if not (long_ok or short_ok):
             continue  # условие не выполнено или ещё не набралось подряд
         d = 1 if long_ok else -1
+        side = "long" if d == 1 else "short"
         i = bisect_left(ts, sts)
         if i >= n:
             break
-        if i < free:
-            continue  # позиция ещё открыта
+        if cur is not None and cur["_j"] < i:
+            cur = None  # закрылась сама по SL/TP
+        if cur is not None:
+            if cur["side"] == side:
+                continue  # такая позиция уже открыта
+            o = candles[i][1]
+            _close(cur, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), "REV", i, candles, fee, size)
         entry = candles[i][1] * (1 + d * slip)
         tp, sl = entry * (1 + d * tp_pct / 100), entry * (1 - d * sl_pct / 100)
-        reason, exit_p, j = "OPEN", candles[-1][4], n - 1
-        for k in range(i, n):
-            _, o, h, l, _ = candles[k]
-            if d == 1:
-                if l <= sl:
-                    reason, exit_p, j = "SL", min(sl, o) * (1 - slip), k
-                    break
-                if h >= tp:
-                    reason, exit_p, j = "TP", max(tp, o), k
-                    break
-            else:
-                if h >= sl:
-                    reason, exit_p, j = "SL", max(sl, o) * (1 + slip), k
-                    break
-                if l <= tp:
-                    reason, exit_p, j = "TP", min(tp, o), k
-                    break
-        free = j + 1
-        pnl = d * (exit_p / entry - 1) - 2 * fee
-        trades.append({"side": "long" if d == 1 else "short", "signal_ts": sts, "entry_ts": candles[i][0],
-                       "exit_ts": candles[j][0], "entry": entry, "exit": exit_p, "reason": reason,
-                       "pnl_pct": pnl * 100, "pnl_usd": pnl * entry * size})
+        cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry}
+        reason, exit_p, j = _scan(candles, i, d, tp, sl, slip)
+        _close(cur, exit_p, reason, j, candles, fee, size)
+        trades.append(cur)
     return trades
 
 
 def stats(trades):
     if not trades:
-        return {"trades": 0, "tp": 0, "sl": 0, "open": 0, "winrate": 0, "total_usd": 0,
+        return {"trades": 0, "tp": 0, "sl": 0, "open": 0, "rev": 0, "winrate": 0, "total_usd": 0,
                 "avg_pct": 0, "profit_factor": 0, "max_dd_usd": 0}
     wins = [t["pnl_usd"] for t in trades if t["pnl_usd"] > 0]
     losses = [-t["pnl_usd"] for t in trades if t["pnl_usd"] <= 0]
@@ -143,6 +156,7 @@ def stats(trades):
             "tp": sum(t["reason"] == "TP" for t in trades),
             "sl": sum(t["reason"] == "SL" for t in trades),
             "open": sum(t["reason"] == "OPEN" for t in trades),
+            "rev": sum(t["reason"] == "REV" for t in trades),
             "winrate": 100 * len(wins) / len(trades),
             "total_usd": eq,
             "avg_pct": sum(t["pnl_pct"] for t in trades) / len(trades),
@@ -151,7 +165,7 @@ def stats(trades):
 
 
 def fmt(s):
-    return (f"сделок {s['trades']} (TP {s['tp']} / SL {s['sl']} / открыта {s['open']}), "
+    return (f"сделок {s['trades']} (TP {s['tp']} / SL {s['sl']} / разворот {s['rev']} / открыта {s['open']}), "
             f"winrate {s['winrate']:.1f}%, итого {s['total_usd']:+.0f} $, "
             f"средняя {s['avg_pct']:+.3f}%, PF {s['profit_factor']:.2f}, макс. просадка {s['max_dd_usd']:.0f} $")
 
@@ -200,7 +214,7 @@ def main():
             print(f"{side:6}: " + fmt(stats(part)))
     if trades:
         with open(a.out, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(trades[0]))
+            w = csv.DictWriter(f, fieldnames=[x for x in trades[0] if not x.startswith('_')], extrasaction='ignore')
             w.writeheader()
             w.writerows(trades)
         print(f"Сделки -> {a.out}")

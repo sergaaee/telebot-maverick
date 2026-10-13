@@ -65,3 +65,21 @@ def test_short_tp_and_sl():
 def test_short_disabled_by_default():
     cs = [c(0, 100, 100, 100, 100), c(1, 100, 100, 90, 90)]
     assert simulate([(0, 1.0, 0.5)], cs, 1.65, 2.0, **KW) == []
+
+
+def test_reversal_long_to_short():
+    sh = (1.05, 0.65)
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 101, 100, 101), c(2, 102, 102, 102, 102), c(3, 102, 102, 98, 98)]
+    sigs = [(0, 2, 2.5), (2 * M, 1.0, 0.5)]
+    t = simulate(sigs, cs, 1.65, 2.0, short=sh, **KW)
+    assert [x["side"] for x in t] == ["long", "short"]
+    assert t[0]["reason"] == "REV" and t[0]["exit"] == 102 and t[0]["exit_ts"] == 2 * M
+    assert round(t[0]["pnl_usd"], 6) == 0.2
+    assert t[1]["entry"] == 102 and t[1]["reason"] == "TP" and round(t[1]["exit"], 6) == 98.94
+    assert round(t[1]["pnl_usd"], 6) == 0.306
+
+
+def test_same_side_signal_ignored_while_open():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 101, 100, 101), c(2, 101, 101, 101, 101)]
+    t = simulate([(0, 2, 2.5), (M, 2, 2.5)], cs, 1.65, 2.0, short=(1.05, 0.65), **KW)
+    assert len(t) == 1 and t[0]["reason"] == "OPEN"
