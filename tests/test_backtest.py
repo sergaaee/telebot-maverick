@@ -1,0 +1,41 @@
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from backtest import simulate, stats
+
+M = 60_000
+def c(i, o, h, l, cl): return (i * M, o, h, l, cl)
+KW = dict(tp_pct=3, sl_pct=1, fee=0, size=0.1)
+
+
+def run(candles, sigs):
+    return simulate(sigs, candles, 1.65, 2.0, **KW)
+
+
+def test_tp_hit():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 104, 99.5, 103), c(2, 103, 103, 103, 103)]
+    t = run(cs, [(0, 2, 2.5)])
+    assert t[0]["reason"] == "TP" and round(t[0]["exit"], 6) == 103 and round(t[0]["pnl_usd"], 6) == 0.3
+
+
+def test_sl_hit_and_sl_wins_tie():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 104, 98.9, 100)]  # и TP, и SL в одной свече
+    t = run(cs, [(0, 2, 2.5)])
+    assert t[0]["reason"] == "SL" and round(t[0]["exit"], 6) == 99
+
+
+def test_no_signal_below_threshold():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 110, 100, 110)]
+    assert run(cs, [(0, 1.6, 2.5), (0, 2, 1.9)]) == []
+
+
+def test_ignores_signals_while_open_then_reenters():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 101, 100, 101), c(2, 101, 101, 101, 101),
+          c(3, 101, 105, 101, 105), c(4, 105, 105, 105, 105)]
+    t = run(cs, [(0, 2, 2.5), (M * 2, 2, 2.5), (M * 4, 2, 2.5)])
+    assert [x["reason"] for x in t] == ["TP", "OPEN"]
+    assert t[0]["exit_ts"] == 3 * M and t[1]["entry_ts"] == 4 * M
+
+
+def test_stats():
+    s = stats([{"pnl_usd": 3, "pnl_pct": 3, "reason": "TP"}, {"pnl_usd": -1, "pnl_pct": -1, "reason": "SL"}])
+    assert s["trades"] == 2 and s["total_usd"] == 2 and s["max_dd_usd"] == 1 and s["profit_factor"] == 3

@@ -16,3 +16,11 @@
 
 Все сообщения от старых к новым: id, дата (UTC), Deep Global/Local/Scalp и полный текст.
 Бот при этом можно не останавливать, но для двух процессов лучше отдельная сессия: `TG_SESSION=export python export_history.py`.
+
+## Бэктест
+
+    python backtest.py history.csv --exchange bybit --symbol BTC/USDT:USDT
+    python backtest.py history.csv --sweep      # сетка порогов Deep Local / Scalp
+
+Скачивает минутные свечи с публичного API биржи (кеш в `data/`), прогоняет те же правила, что и бот,
+печатает статистику и пишет сделки в `trades.csv`. Опции: `--tp --sl --fee --slip --local-min --scalp-min`.
