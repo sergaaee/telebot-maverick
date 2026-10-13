@@ -48,3 +48,20 @@ def test_confirm_two_reports_in_a_row():
     t = simulate(sigs, cs, 1.65, 2.0, confirm=2, **KW)
     assert len(t) == 1 and t[0]["signal_ts"] == 3 * M and t[0]["entry_ts"] == 3 * M
     assert len(simulate(sigs, cs, 1.65, 2.0, confirm=1, **KW)) >= 1
+
+
+def test_short_tp_and_sl():
+    sh = (1.05, 0.65)
+    low, hi = (1.0, 0.5), (1.0, 0.5)
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 100.5, 96.5, 97)]
+    t = simulate([(0, *low)], cs, 1.65, 2.0, short=sh, **KW)
+    assert t[0]["side"] == "short" and t[0]["reason"] == "TP" and round(t[0]["exit"], 6) == 97
+    assert round(t[0]["pnl_usd"], 6) == 0.3
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 101.5, 96, 97)]  # оба уровня в свече -> SL
+    t = simulate([(0, *low)], cs, 1.65, 2.0, short=sh, **KW)
+    assert t[0]["reason"] == "SL" and round(t[0]["exit"], 6) == 101 and round(t[0]["pnl_usd"], 6) == -0.1
+
+
+def test_short_disabled_by_default():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 100, 90, 90)]
+    assert simulate([(0, 1.0, 0.5)], cs, 1.65, 2.0, **KW) == []

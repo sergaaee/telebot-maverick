@@ -1,7 +1,8 @@
 """Бэктест: python backtest.py history.csv [--exchange bybit] [--symbol BTC/USDT:USDT] [--sweep]
 
 Правила симуляции (те же, что у бота):
-  * сигнал: deep_local >= local_min И deep_scalp >= scalp_min в --confirm отчётах подряд (по умолчанию 2)
+  * шорт: deep_local <= --short-local-max И deep_scalp <= --short-scalp-max (0 сделок с --no-short)
+  * лонг: deep_local >= local_min И deep_scalp >= scalp_min в --confirm отчётах подряд (по умолчанию 2)
   * вход по open первой свечи, начавшейся не раньше сообщения
   * пока позиция открыта, новые сигналы игнорируются
   * SL / TP от цены входа; если в одной свече достигнуты оба — считаем, что сработал SL
@@ -14,7 +15,7 @@ import time
 from bisect import bisect_left
 from datetime import datetime
 
-from signal_parser import Confirmer
+from signal_parser import Confirmer, should_long, should_short
 
 
 def load_signals(path):
@@ -81,34 +82,48 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
     return candles
 
 
-def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1):
+def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
+             short=None):
+    """short=(local_max, scalp_max) включает шорты; одновременно открыта максимум одна позиция."""
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, free = [], 0
-    conf = Confirmer(local_min, scalp_min, confirm)
+    c_long = Confirmer(lambda s: should_long(s, local_min, scalp_min), confirm)
+    c_short = Confirmer(lambda s: short is not None and should_short(s, *short), confirm)
     for sts, loc, scalp in signals:
-        if not conf.update({"local": loc, "scalp": scalp}):
+        sig = {"local": loc, "scalp": scalp}
+        long_ok, short_ok = c_long.update(sig), c_short.update(sig)
+        if not (long_ok or short_ok):
             continue  # условие не выполнено или ещё не набралось подряд
+        d = 1 if long_ok else -1
         i = bisect_left(ts, sts)
         if i >= n:
             break
         if i < free:
             continue  # позиция ещё открыта
-        entry = candles[i][1] * (1 + slip)
-        tp, sl = entry * (1 + tp_pct / 100), entry * (1 - sl_pct / 100)
+        entry = candles[i][1] * (1 + d * slip)
+        tp, sl = entry * (1 + d * tp_pct / 100), entry * (1 - d * sl_pct / 100)
         reason, exit_p, j = "OPEN", candles[-1][4], n - 1
         for k in range(i, n):
             _, o, h, l, _ = candles[k]
-            if l <= sl:
-                reason, exit_p, j = "SL", min(sl, o) * (1 - slip), k
-                break
-            if h >= tp:
-                reason, exit_p, j = "TP", max(tp, o), k
-                break
+            if d == 1:
+                if l <= sl:
+                    reason, exit_p, j = "SL", min(sl, o) * (1 - slip), k
+                    break
+                if h >= tp:
+                    reason, exit_p, j = "TP", max(tp, o), k
+                    break
+            else:
+                if h >= sl:
+                    reason, exit_p, j = "SL", max(sl, o) * (1 + slip), k
+                    break
+                if l <= tp:
+                    reason, exit_p, j = "TP", min(tp, o), k
+                    break
         free = j + 1
-        pnl = (exit_p / entry - 1) - 2 * fee
-        trades.append({"signal_ts": sts, "entry_ts": candles[i][0], "exit_ts": candles[j][0],
-                       "entry": entry, "exit": exit_p, "reason": reason,
+        pnl = d * (exit_p / entry - 1) - 2 * fee
+        trades.append({"side": "long" if d == 1 else "short", "signal_ts": sts, "entry_ts": candles[i][0],
+                       "exit_ts": candles[j][0], "entry": entry, "exit": exit_p, "reason": reason,
                        "pnl_pct": pnl * 100, "pnl_usd": pnl * entry * size})
     return trades
 
@@ -153,6 +168,9 @@ def main():
     ap.add_argument("--sl", type=float, default=1.0)
     ap.add_argument("--fee", type=float, default=0.0005, help="taker-комиссия за сторону, доля")
     ap.add_argument("--slip", type=float, default=0.0, help="проскальзывание, доля")
+    ap.add_argument("--short-local-max", type=float, default=1.05)
+    ap.add_argument("--short-scalp-max", type=float, default=0.65)
+    ap.add_argument("--no-short", action="store_true", help="только лонги")
     ap.add_argument("--confirm", type=int, default=2, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
     ap.add_argument("--out", default="trades.csv")
@@ -164,6 +182,7 @@ def main():
           f"{datetime.utcfromtimestamp(signals[0][0]/1000):%Y-%m-%d} .. {datetime.utcfromtimestamp(signals[-1][0]/1000):%Y-%m-%d}")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
     common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm)
+    short = None if a.no_short else (a.short_local_max, a.short_scalp_max)
 
     if a.sweep:
         print("\nlocal  scalp | результат")
@@ -173,8 +192,12 @@ def main():
         print("\nОсторожно: подбор порогов по одной и той же истории — это переобучение.")
         return
 
-    trades = simulate(signals, candles, a.local_min, a.scalp_min, **common)
-    print("\n" + fmt(stats(trades)))
+    trades = simulate(signals, candles, a.local_min, a.scalp_min, short=short, **common)
+    print("\nВсего:  " + fmt(stats(trades)))
+    for side in ("long", "short"):
+        part = [t for t in trades if t["side"] == side]
+        if part:
+            print(f"{side:6}: " + fmt(stats(part)))
     if trades:
         with open(a.out, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(trades[0]))

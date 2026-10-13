@@ -25,8 +25,11 @@ def test_thresholds():
     assert should_long({"local": 1.65, "scalp": 2.0}, 1.65, 2.0)
 
 
-def test_confirmer():
-    from signal_parser import Confirmer
-    c = Confirmer(1.65, 2.0, 2)
+def test_confirmer_and_short():
+    from signal_parser import Confirmer, should_short
+    c = Confirmer(lambda s: should_long(s, 1.65, 2.0), 2)
     ok, bad = {"local": 2, "scalp": 2.5}, {"local": 1, "scalp": 1}
     assert [c.update(x) for x in (ok, bad, ok, ok, ok, bad, ok)] == [False, False, False, True, True, False, False]
+    assert should_short({"local": 1.05, "scalp": 0.65}, 1.05, 0.65)
+    assert not should_short({"local": 1.06, "scalp": 0.5}, 1.05, 0.65)
+    assert not should_short({"local": 1.0, "scalp": 0.7}, 1.05, 0.65)
