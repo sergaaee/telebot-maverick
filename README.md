@@ -19,8 +19,14 @@
 
 ## Бэктест
 
-    python backtest.py history.csv --exchange bybit --symbol BTC/USDT:USDT
+    python backtest.py history.csv --exchange binanceusdm --symbol BTC/USDT:USDT
     python backtest.py history.csv --sweep      # сетка порогов Deep Local / Scalp
 
 Скачивает минутные свечи с публичного API биржи (кеш в `data/`), прогоняет те же правила, что и бот,
 печатает статистику и пишет сделки в `trades.csv`. Опции: `--tp --sl --fee --slip --local-min --scalp-min`.
+
+## Binance
+
+`EXCHANGE=binanceusdm`, `SYMBOL=BTC/USDT:USDT`. Ключ API: Futures включён, вывод выключен, лучше с привязкой к IP.
+Аккаунт должен быть в **One-way** режиме (не Hedge) — иначе `reduceOnly` отклоняется. Обновляйте ccxt (`pip install -U ccxt`):
+Binance меняет API условных ордеров, старые версии могут не ставить SL/TP.
