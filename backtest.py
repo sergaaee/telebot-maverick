@@ -15,19 +15,7 @@ import time
 from bisect import bisect_left
 from datetime import datetime, timezone
 
-from signal_parser import Confirmer, should_long, should_short
-
-
-def load_signals(path):
-    out = []
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            if not r["deep_local"] or not r["deep_scalp"]:
-                continue
-            ts = int(datetime.fromisoformat(r["date_utc"]).timestamp() * 1000)
-            out.append((ts, float(r["deep_local"]), float(r["deep_scalp"])))
-    out.sort()
-    return out
+from entries import attach_liq, entries, load_signals
 
 
 def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
@@ -107,20 +95,14 @@ def _close(trade, exit_p, reason, idx, candles, fee, size):
 
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None):
-    """short=(local_max, scalp_max) включает шорты. Одна позиция одновременно: сигнал в ту же сторону
-    игнорируется, в противоположную — разворот (закрытие по open свечи входа + новая позиция)."""
+             short=None, liq=None, cool=None):
+    """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
+    Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
+    (закрытие по open свечи входа + новая позиция)."""
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, cur = [], None
-    c_long = Confirmer(lambda s: should_long(s, local_min, scalp_min), confirm)
-    c_short = Confirmer(lambda s: short is not None and should_short(s, *short), confirm)
-    for sts, loc, scalp in signals:
-        sig = {"local": loc, "scalp": scalp}
-        long_ok, short_ok = c_long.update(sig), c_short.update(sig)
-        if not (long_ok or short_ok):
-            continue  # условие не выполнено или ещё не набралось подряд
-        d = 1 if long_ok else -1
+    for sts, d in entries(signals, local_min, scalp_min, confirm, short, liq, cool):
         side = "long" if d == 1 else "short"
         i = bisect_left(ts, sts)
         if i >= n:
@@ -170,6 +152,60 @@ def fmt(s):
             f"средняя {s['avg_pct']:+.3f}%, PF {s['profit_factor']:.2f}, макс. просадка {s['max_dd_usd']:.0f} $")
 
 
+def wilson_low(wins, n, z=1.96):
+    """Нижняя граница 95% доверительного интервала для доли побед — штраф за малую выборку."""
+    if n == 0:
+        return 0.0
+    p = wins / n
+    return ((p + z * z / (2 * n)) - z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)) / (1 + z * z / n)
+
+
+def filter_grid(kind):
+    grid = []
+    if kind == "liq":
+        for hours in (2, 6, 12, 24):
+            for frac in (0.5, 0.25, 0.1):
+                for pct in (0, 75, 90):
+                    grid.append((f"liq  окно {hours:>2}ч  спад до {frac:<4}  всплеск>=p{pct:<2}",
+                                 dict(liq=dict(hours=hours, frac=frac, pct=pct))))
+    else:
+        for metric in ("scalp", "local"):
+            for drop in (0.05, 0.1, 0.2, 0.3, 0.5):
+                grid.append((f"cool {metric:5} упала на >= {drop}", dict(cool=dict(metric=metric, drop=drop))))
+            for k_ in (1, 2, 3):
+                grid.append((f"cool {metric:5} {k_} отчёт(а) подряд вниз", dict(cool=dict(metric=metric, declines=k_))))
+    return grid
+
+
+def half_str(trades):
+    s = stats(trades)
+    return f"{s['trades']:>3} {s['winrate']:>3.0f}% {s['total_usd']:>+6.0f}$" if s["trades"] else "  0   -       -"
+
+
+def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
+    split_ts = signals[len(signals) // 2][0]
+    rows = []
+    for name, extra in [("БАЗА (без фильтра)", {})] + filter_grid(kind):
+        trades = simulate(signals, candles, short=short, **base_kw, **extra)
+        s = stats(trades)
+        h1 = [t for t in trades if t["entry_ts"] < split_ts]
+        h2 = [t for t in trades if t["entry_ts"] >= split_ts]
+        wins = sum(t["pnl_usd"] > 0 for t in trades)
+        rows.append((name, s, h1, h2, wilson_low(wins, s["trades"])))
+    print(f"\n{'конфигурация':<46}| всего: n  win%  PF  итого$ | 1-я половина        | 2-я половина")
+    for name, s, h1, h2, _ in rows:
+        print(f"{name:<46}| {s['trades']:>3} {s['winrate']:>5.1f} {s['profit_factor']:>5.2f} {s['total_usd']:>+7.0f} | "
+              f"{half_str(h1)} | {half_str(h2)}")
+    base_wr = rows[0][1]["winrate"]
+    good = [r for r in rows[1:] if r[1]["trades"] >= min_trades]
+    good.sort(key=lambda r: r[4], reverse=True)
+    print(f"\nТоп-5 по нижней границе доверительного интервала winrate (сделок >= {min_trades}); база: {base_wr:.1f}%")
+    for name, s, h1, h2, lo in good[:5]:
+        print(f"  {name:<46} n={s['trades']:>3} winrate {s['winrate']:.1f}% (нижняя граница {100*lo:.0f}%) итого {s['total_usd']:+.0f}$")
+    print(f"\nПроверено {len(rows) - 1} конфигураций на одной истории: лучшие из них частично просто повезло."
+          " Верьте только тем, у кого плюс в ОБЕИХ половинах и достаточно сделок.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("history")
@@ -188,10 +224,29 @@ def main():
     ap.add_argument("--confirm", type=int, default=2, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
     ap.add_argument("--out", default="trades.csv")
-    ap.add_argument("--sweep", action="store_true", help="сетка порогов local/scalp")
+    ap.add_argument("--sweep", action="store_true", help="сетка порогов local/scalp (только лонги)")
+    ap.add_argument("--liq-file", help="CSV с ликвидациями (например history_binance.csv); по умолчанию — основной файл")
+    ap.add_argument("--liq-max-age", type=float, default=3.0, help="макс. возраст записи ликвидаций из --liq-file, ч")
+    ap.add_argument("--sweep-liq", action="store_true", help="свип фильтра «ликвидации закончились»")
+    ap.add_argument("--sweep-cool", action="store_true", help="свип фильтра «метрики остывают»")
+    ap.add_argument("--min-trades", type=int, default=15, help="минимум сделок для попадания в топ свипа")
+    ap.add_argument("--liq-hours", type=float, help="применить фильтр ликвидаций: окно, ч")
+    ap.add_argument("--liq-frac", type=float, default=0.25, help="...спад до доли от максимума окна")
+    ap.add_argument("--liq-pct", type=float, default=0, help="...всплеск не ниже этого перцентиля прошлых значений")
+    ap.add_argument("--cool-metric", choices=["scalp", "local"], default="scalp")
+    ap.add_argument("--cool-drop", type=float, help="применить фильтр остывания: падение от максимума серии")
+    ap.add_argument("--cool-declines", type=int, help="...или: столько отчётов подряд вниз")
     a = ap.parse_args()
 
     signals = load_signals(a.history)
+    if a.liq_file:
+        signals, hit = attach_liq(signals, load_signals(a.liq_file), a.liq_max_age)
+        print(f"Ликвидации из {a.liq_file}: найдены для {hit} из {len(signals)} отчётов")
+    elif a.sweep_liq or a.liq_hours:
+        have = sum(s[3] is not None for s in signals)
+        print(f"Ликвидации в {a.history}: есть в {have} из {len(signals)} отчётов")
+        if not have:
+            raise SystemExit("В файле нет данных о ликвидациях — укажите --liq-file.")
     print(f"Сигналов с Deep-значениями: {len(signals)}, "
           f"{datetime.fromtimestamp(signals[0][0]/1000, timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(signals[-1][0]/1000, timezone.utc):%Y-%m-%d}")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
@@ -205,8 +260,21 @@ def main():
                 print(f"{lm:5.2f} {sm:5.2f} | {fmt(stats(simulate(signals, candles, lm, sm, **common)))}")
         print("\nОсторожно: подбор порогов по одной и той же истории — это переобучение.")
         return
+    if a.sweep_liq or a.sweep_cool:
+        base_kw = dict(local_min=a.local_min, scalp_min=a.scalp_min, **common)
+        for kind, on in (("liq", a.sweep_liq), ("cool", a.sweep_cool)):
+            if on:
+                run_filter_sweep(kind, signals, candles, base_kw, short, a.min_trades)
+        return
 
-    trades = simulate(signals, candles, a.local_min, a.scalp_min, short=short, **common)
+    extra = {}
+    if a.liq_hours:
+        extra["liq"] = dict(hours=a.liq_hours, frac=a.liq_frac, pct=a.liq_pct)
+    if a.cool_drop is not None:
+        extra["cool"] = dict(metric=a.cool_metric, drop=a.cool_drop)
+    elif a.cool_declines:
+        extra["cool"] = dict(metric=a.cool_metric, declines=a.cool_declines)
+    trades = simulate(signals, candles, a.local_min, a.scalp_min, short=short, **common, **extra)
     print("\nВсего:  " + fmt(stats(trades)))
     for side in ("long", "short"):
         part = [t for t in trades if t["side"] == side]
