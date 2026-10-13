@@ -45,19 +45,37 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir="data"):
         candles = []
     cur = candles[-1][0] + tf_ms if candles else since_ms
     now = int(time.time() * 1000)
+
+    def save():
+        with open(path + ".tmp", "w", newline="") as f:
+            csv.writer(f).writerows(candles)
+        os.replace(path + ".tmp", path)
+
+    pages = 0
     while cur < now:
-        batch = ex.fetch_ohlcv(symbol, tf, since=cur, limit=1000)
-        if not batch:
-            break
+        for attempt in range(8):
+            try:
+                batch = ex.fetch_ohlcv(symbol, tf, since=cur, limit=1000)
+                break
+            except (ccxt.RateLimitExceeded, ccxt.NetworkError, ccxt.RequestTimeout) as e:
+                wait = min(60, 5 * 2 ** attempt)
+                print(f"\n  {type(e).__name__}, жду {wait}с и повторяю ({attempt + 1}/8)")
+                time.sleep(wait)
+        else:
+            save()
+            raise SystemExit("Биржа не отвечает; прогресс сохранён, запустите ещё раз — докачает с места остановки.")
         batch = [tuple(c[:5]) for c in batch if c[0] >= cur]
         if not batch:
             break
         candles.extend(batch)
         cur = batch[-1][0] + tf_ms
+        pages += 1
         print(f"\r  свечи: {len(candles)}", end="", flush=True)
+        if pages % 20 == 0:
+            save()
+        time.sleep(0.3)  # мягче к лимитам, чем enableRateLimit по умолчанию
     print()
-    with open(path, "w", newline="") as f:
-        csv.writer(f).writerows(candles)
+    save()
     return candles
 
 
