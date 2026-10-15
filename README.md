@@ -21,7 +21,8 @@ id, дата (UTC), Deep Global/Local/Scalp, ликвидации Long/Short (т
 ## Бэктест
 
     python backtest.py history.csv --exchange binanceusdm --symbol BTC/USDT:USDT
-    python backtest.py history.csv --sweep      # сетка порогов Deep Local / Scalp
+    python backtest.py history.csv --sweep-long    # сетка порогов лонга (Local/Scalp >=), шорты выключены
+    python backtest.py history.csv --sweep-short   # сетка порогов шорта (Local/Scalp <=), лонги выключены
 
 Скачивает минутные свечи с публичного API биржи (кеш в `data/`), прогоняет те же правила, что и бот,
 печатает статистику и пишет сделки в `trades.csv`. Опции: `--tp --sl --fee --slip --local-min --scalp-min`.

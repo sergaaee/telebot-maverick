@@ -202,28 +202,60 @@ def half_str(trades):
     return f"{s['trades']:>3} {s['winrate']:>3.0f}% {s['total_usd']:>+6.0f}$" if s["trades"] else "  0   -       -"
 
 
-def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
-    split_ts = signals[len(signals) // 2][0]
-    rows = []
-    for name, extra in [("БАЗА (без фильтра)", {})] + filter_grid(kind):
-        trades = simulate(signals, candles, short=short, **base_kw, **extra)
-        s = stats(trades)
-        h1 = [t for t in trades if t["entry_ts"] < split_ts]
-        h2 = [t for t in trades if t["entry_ts"] >= split_ts]
-        wins = sum(t["pnl_usd"] > 0 for t in trades)
-        rows.append((name, s, h1, h2, wilson_low(wins, s["trades"])))
+def make_row(name, trades, split_ts):
+    s = stats(trades)
+    h1 = [t for t in trades if t["entry_ts"] < split_ts]
+    h2 = [t for t in trades if t["entry_ts"] >= split_ts]
+    wins = sum(t["pnl_usd"] > 0 for t in trades)
+    return (name, s, h1, h2, wilson_low(wins, s["trades"]))
+
+
+def print_table(rows):
     print(f"\n{'конфигурация':<46}| всего: n  win%  PF  итого$ | 1-я половина        | 2-я половина")
     for name, s, h1, h2, _ in rows:
         print(f"{name:<46}| {s['trades']:>3} {s['winrate']:>5.1f} {s['profit_factor']:>5.2f} {s['total_usd']:>+7.0f} | "
               f"{half_str(h1)} | {half_str(h2)}")
-    base_wr = rows[0][1]["winrate"]
+
+
+def print_top(rows, min_trades, base_label):
     good = [r for r in rows[1:] if r[1]["trades"] >= min_trades]
     good.sort(key=lambda r: r[4], reverse=True)
-    print(f"\nТоп-5 по нижней границе доверительного интервала winrate (сделок >= {min_trades}); база: {base_wr:.1f}%")
+    print(f"\nТоп-5 по нижней границе доверительного интервала winrate (сделок >= {min_trades}); база ({base_label}): "
+          f"{rows[0][1]['winrate']:.1f}%")
     for name, s, h1, h2, lo in good[:5]:
         print(f"  {name:<46} n={s['trades']:>3} winrate {s['winrate']:.1f}% (нижняя граница {100*lo:.0f}%) итого {s['total_usd']:+.0f}$")
     print(f"\nПроверено {len(rows) - 1} конфигураций на одной истории: лучшие из них частично просто повезло."
           " Верьте только тем, у кого плюс в ОБЕИХ половинах и достаточно сделок.")
+
+
+def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
+    split_ts = signals[len(signals) // 2][0]
+    rows = [make_row(name, simulate(signals, candles, short=short, **base_kw, **extra), split_ts)
+            for name, extra in [("БАЗА (без фильтра)", {})] + filter_grid(kind)]
+    print_table(rows)
+    print_top(rows, min_trades, "без фильтра")
+
+
+def run_threshold_sweep(side, signals, candles, common, a):
+    """Свип порогов одной стороны; вторая сторона отключена, чтобы не смешивать результаты."""
+    split_ts = signals[len(signals) // 2][0]
+    never = float("inf")   # пороги, при которых лонг (Local/Scalp >= inf) никогда не срабатывает
+    rows = []
+    if side == "long":
+        base = (a.local_min, a.scalp_min)
+        grid = [(lm, sm) for lm in (1.25, 1.45, 1.65, 1.85, 2.05) for sm in (1.5, 1.75, 2.0, 2.25, 2.5)]
+        run = lambda p: simulate(signals, candles, p[0], p[1], short=None, **common)
+        label = lambda p: f"long  local>={p[0]:.2f} scalp>={p[1]:.2f}"
+    else:
+        base = (a.short_local_max, a.short_scalp_max)
+        grid = [(lm, sm) for lm in (0.85, 0.95, 1.05, 1.15, 1.25) for sm in (0.35, 0.5, 0.65, 0.8, 0.95)]
+        run = lambda p: simulate(signals, candles, never, never, short=p, **common)
+        label = lambda p: f"short local<={p[0]:.2f} scalp<={p[1]:.2f}"
+    rows.append(make_row(f"БАЗА: {label(base)}", run(base), split_ts))
+    for p in grid:
+        rows.append(make_row(label(p) + ("  *" if p == base else ""), run(p), split_ts))
+    print_table(rows)
+    print_top(rows, a.min_trades, "текущие пороги")
 
 
 def explain(signals, candles, a, short, common, extra, trades):
@@ -270,7 +302,9 @@ def main():
     ap.add_argument("--confirm", type=int, default=2, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
     ap.add_argument("--out", default="trades.csv")
-    ap.add_argument("--sweep", action="store_true", help="сетка порогов local/scalp (только лонги)")
+    ap.add_argument("--sweep-long", "--sweep", dest="sweep_long", action="store_true",
+                    help="свип порогов лонга (Local/Scalp >=), шорты отключены; --sweep — прежнее имя")
+    ap.add_argument("--sweep-short", action="store_true", help="свип порогов шорта (Local/Scalp <=), лонги отключены")
     ap.add_argument("--liq-file", help="CSV с ликвидациями (например history_binance.csv); по умолчанию — основной файл")
     ap.add_argument("--liq-max-age", type=float, default=3.0, help="макс. возраст записи ликвидаций из --liq-file, ч")
     ap.add_argument("--sweep-liq", action="store_true", help="свип фильтра «ликвидации закончились»")
@@ -302,12 +336,10 @@ def main():
     common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm)
     short = None if a.no_short else (a.short_local_max, a.short_scalp_max)
 
-    if a.sweep:
-        print("\nlocal  scalp | результат")
-        for lm in (1.25, 1.45, 1.65, 1.85, 2.05):
-            for sm in (1.5, 1.75, 2.0, 2.25, 2.5):
-                print(f"{lm:5.2f} {sm:5.2f} | {fmt(stats(simulate(signals, candles, lm, sm, **common)))}")
-        print("\nОсторожно: подбор порогов по одной и той же истории — это переобучение.")
+    if a.sweep_long or a.sweep_short:
+        for side, on in (("long", a.sweep_long), ("short", a.sweep_short)):
+            if on:
+                run_threshold_sweep(side, signals, candles, common, a)
         return
     if a.sweep_liq or a.sweep_cool or a.sweep_cooldown:
         base_kw = dict(local_min=a.local_min, scalp_min=a.scalp_min, **common)
