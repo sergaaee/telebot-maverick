@@ -1,8 +1,7 @@
 """Фиксирует результаты симуляции на детерминированных данных: если логика входов/выходов случайно изменится,
 тест упадёт. Ожидаемые числа сняты с коммита 7846cd5 (разворот позиций) и совпадали во всех коммитах до ...7177838."""
 import os, random, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import backtest as b
+from app.core import backtest as b
 
 
 def make():

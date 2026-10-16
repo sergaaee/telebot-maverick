@@ -1,6 +1,5 @@
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from entries import attach_liq, entries
+from app.core.entries import attach_liq, entries
 
 H = 3_600_000
 

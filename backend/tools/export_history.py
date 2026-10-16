@@ -13,11 +13,10 @@ import asyncio
 import csv
 import os
 
-from dotenv import load_dotenv
 
-from signal_parser import parse_liquidation, parse_signal
+from app.config import ROOT
+from app.core.signal_parser import parse_liquidation, parse_signal
 
-load_dotenv()
 
 
 async def resolve(client, ident):
@@ -87,7 +86,7 @@ class RowWriter:
 async def main(out_path, chat, full=False):
     from telethon import TelegramClient
     header, last_id = (None, 0) if full else read_state(out_path)
-    client = TelegramClient(os.getenv("TG_SESSION", "maverick"), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
+    client = TelegramClient(os.path.join(ROOT, os.getenv("TG_SESSION", "maverick")), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
     await client.start()
     entity = await resolve(client, chat)
     print(f"Источник: {getattr(entity, 'title', None) or getattr(entity, 'first_name', None) or entity} (id {getattr(entity, 'id', '?')})")

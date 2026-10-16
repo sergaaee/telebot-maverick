@@ -16,9 +16,23 @@ import time
 from bisect import bisect_left
 from datetime import datetime, timezone
 
-from entries import attach_liq, entries, load_signals
+from .entries import attach_liq, entries, load_signals
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")  # не зависит от текущей папки запуска
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+CACHE_DIR = os.getenv("CACHE_DIR") or os.path.join(REPO_ROOT, "data")  # не зависит от папки запуска
+
+
+def cache_path(exchange, symbol, tf, cache_dir=CACHE_DIR):
+    key = "binanceusdm" if exchange == "binance" and ":" in symbol else exchange  # один и тот же рынок -> один кеш
+    return os.path.join(cache_dir, f"{key}_{symbol.replace('/', '').replace(':', '_')}_{tf}.csv")
+
+
+def read_cache(path):
+    """Свечи из CSV-кеша [(ts,o,h,l,c)] или [], если файла нет."""
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        return [tuple(float(x) if i else int(x) for i, x in enumerate(r)) for r in csv.reader(f)]
 
 
 def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
@@ -26,17 +40,15 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
     import ccxt
 
     os.makedirs(cache_dir, exist_ok=True)
-    key = "binanceusdm" if exchange == "binance" and ":" in symbol else exchange  # один и тот же рынок -> один кеш
-    name = f"{key}_{symbol.replace('/', '').replace(':', '_')}_{tf}.csv"
-    path = os.path.join(cache_dir, name)
+    key = "binanceusdm" if exchange == "binance" and ":" in symbol else exchange
+    path = cache_path(exchange, symbol, tf, cache_dir)
+    name = os.path.basename(path)
     candles = []
     legacy = os.path.join(cache_dir, name.replace(key + "_", "binance_", 1))  # кеш старых запусков с --exchange binance
     if not os.path.exists(path) and key != exchange and os.path.exists(legacy):
         shutil.copy(legacy, path)
     if os.path.exists(path):
-        with open(path, newline="") as f:
-            candles = [tuple(float(x) if i else int(x) for i, x in enumerate(r)) for r in csv.reader(f)]
-        candles = candles[:-1]  # последняя могла быть записана незавершённой старой версией — перекачаем
+        candles = read_cache(path)[:-1]  # последняя могла быть записана незавершённой старой версией — перекачаем
     ex = getattr(ccxt, exchange)({"enableRateLimit": True})
     tf_ms = ex.parse_timeframe(tf) * 1000
     # докачиваем хвост; если кеш начинается позже нужного, качаем заново с нуля
@@ -108,18 +120,24 @@ def _close(trade, exit_p, reason, idx, candles, fee, size):
                  pnl_pct=pnl * 100, pnl_usd=pnl * trade["entry"] * size)
 
 
-def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None, cooldown_h=0.0, only=None):
-    """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
-    Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
-    (закрытие по open свечи входа + новая позиция)."""
+def apply_only(local_min, scalp_min, short, only):
+    """Режим одной метрики: вторая метрика не учитывается ни для лонга, ни для шорта."""
     inf = float("inf")
-    if only == "local":    # вторая метрика не учитывается ни для лонга, ни для шорта
+    if only == "local":
         scalp_min = -inf
         short = None if short is None else (short[0], inf)
     elif only == "scalp":
         local_min = -inf
         short = None if short is None else (inf, short[1])
+    return local_min, scalp_min, short
+
+
+def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
+             short=None, liq=None, cool=None, cooldown_h=0.0, only=None):
+    """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
+    Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
+    (закрытие по open свечи входа + новая позиция)."""
+    local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, cur = [], None
@@ -139,7 +157,7 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
             _close(cur, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), "REV", i, candles, fee, size)
         entry = candles[i][1] * (1 + d * slip)
         tp, sl = entry * (1 + d * tp_pct / 100), entry * (1 - d * sl_pct / 100)
-        cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry}
+        cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": tp, "sl": sl}
         reason, exit_p, j = _scan(candles, i, d, tp, sl, slip)
         _close(cur, exit_p, reason, j, candles, fee, size)
         trades.append(cur)

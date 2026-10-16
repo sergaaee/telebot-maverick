@@ -1,6 +1,5 @@
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from backtest import simulate, stats
+from app.core.backtest import simulate, stats
 
 M = 60_000
 def c(i, o, h, l, cl): return (i * M, o, h, l, cl)

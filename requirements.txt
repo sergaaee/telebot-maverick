@@ -1,4 +1,0 @@
-telethon>=1.36
-ccxt>=4.4
-python-dotenv>=1.0
-pytest>=8.0

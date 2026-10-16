@@ -19,7 +19,7 @@ from bisect import bisect_right, insort
 from collections import deque
 from datetime import datetime
 
-from signal_parser import parse_liquidation, should_long, should_short
+from .signal_parser import parse_liquidation, should_long, should_short
 
 
 def _ts(s):

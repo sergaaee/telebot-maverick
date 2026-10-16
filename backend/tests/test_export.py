@@ -1,8 +1,7 @@
 import csv, os, sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-import export_history as e
+from tools import export_history as e
 
 MSG = "Deep Global = 0.99\nDeep Local = 1.25\nDeep Scalp = 1.44\n\nLiquidation\nLong 5.0k $ | Short 7.0k $\n"
 

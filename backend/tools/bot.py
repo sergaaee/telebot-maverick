@@ -2,40 +2,42 @@ import asyncio
 import logging
 import os
 
-from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import PeerChannel
 
-from signal_parser import Confirmer, parse_signal, should_long, should_short
-from trader import Trader
+from app.config import ROOT, load_settings
+from app.core.backtest import apply_only
+from app.core.signal_parser import Confirmer, parse_signal, should_long, should_short
+from tools.trader import Trader
 
-load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
 
-LOCAL_MIN = float(os.getenv("DEEP_LOCAL_MIN", "1.65"))
-SCALP_MIN = float(os.getenv("DEEP_SCALP_MIN", "2.0"))
-SHORT_LOCAL_MAX = float(os.getenv("SHORT_LOCAL_MAX", "1.05"))
-SHORT_SCALP_MAX = float(os.getenv("SHORT_SCALP_MAX", "0.65"))
-CONFIRM = int(os.getenv("CONFIRM_REPORTS", "2"))
+# Параметры стратегии — те же, что в интерфейсе бэктеста (backend/.env), чтобы бот и бэктест не расходились.
+# Фильтры «остывание» и «ликвидации» в боте пока не реализованы — только пороги, подтверждение, SIDE и ONLY.
+S = load_settings()
+D = S.defaults
+CONFIRM = D["confirm"]
+LOCAL_MIN, SCALP_MIN, SHORT = apply_only(D["local_min"], D["scalp_min"], (D["short_local_max"], D["short_scalp_max"]), D["only"])
+LONG_ON, SHORT_ON = D["side"] in ("both", "long"), D["side"] in ("both", "short")
 
 
 async def main():
     trader = Trader(
-        os.environ["EXCHANGE"],
+        S.exchange,
         os.getenv("API_KEY"),
         os.getenv("API_SECRET"),
         os.getenv("API_PASSWORD"),
-        os.environ["SYMBOL"],
-        float(os.getenv("ORDER_SIZE", "0.1")),
+        S.symbol,
+        D["size"],
         os.getenv("DRY_RUN", "true").lower() != "false",
-        float(os.getenv("TP_PCT", "3")),
-        float(os.getenv("SL_PCT", "1")),
+        D["tp_pct"],
+        D["sl_pct"],
     )
-    client = TelegramClient(os.getenv("TG_SESSION", "maverick"), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
+    client = TelegramClient(os.path.join(ROOT, os.getenv("TG_SESSION", "maverick")), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
     lock = asyncio.Lock()  # чтобы два быстрых сообщения не открыли две позы
-    conf_long = Confirmer(lambda s: should_long(s, LOCAL_MIN, SCALP_MIN), CONFIRM)
-    conf_short = Confirmer(lambda s: should_short(s, SHORT_LOCAL_MAX, SHORT_SCALP_MAX), CONFIRM)
+    conf_long = Confirmer(lambda s: LONG_ON and should_long(s, LOCAL_MIN, SCALP_MIN), CONFIRM)
+    conf_short = Confirmer(lambda s: SHORT_ON and should_short(s, *SHORT), CONFIRM)
     channel = PeerChannel(int(os.getenv("TG_CHANNEL_ID", "3217240841")))
 
     @client.on(events.NewMessage(chats=channel))

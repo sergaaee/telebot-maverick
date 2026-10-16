@@ -1,7 +1,6 @@
 import os, sys, time
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import ccxt
-import backtest
+from app.core import backtest
 
 M = 60_000
 

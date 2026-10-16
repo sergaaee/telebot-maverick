@@ -1,6 +1,5 @@
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from signal_parser import parse_signal, should_long
+from app.core.signal_parser import parse_signal, should_long
 
 MSG = """Deep Global = 0.99
 Deep Local = 1.25
@@ -26,7 +25,7 @@ def test_thresholds():
 
 
 def test_confirmer_and_short():
-    from signal_parser import Confirmer, should_short
+    from app.core.signal_parser import Confirmer, should_short
     c = Confirmer(lambda s: should_long(s, 1.65, 2.0), 2)
     ok, bad = {"local": 2, "scalp": 2.5}, {"local": 1, "scalp": 1}
     assert [c.update(x) for x in (ok, bad, ok, ok, ok, bad, ok)] == [False, False, False, True, True, False, False]
@@ -36,7 +35,7 @@ def test_confirmer_and_short():
 
 
 def test_liquidation_and_second_bot_format():
-    from signal_parser import parse_liquidation
+    from app.core.signal_parser import parse_liquidation
     msg = "Deep Global = 0.87\nDeep Local = 1.43\nDeep Scalp = 1.26\n\nLiquidation\nLong 3494.9k $ | Short 58288.3k $\n\nTop Coin\nWBETHUSDT | 12.40"
     assert parse_signal(msg) == {"local": 1.43, "scalp": 1.26, "global": 0.87}
     assert parse_liquidation(msg) == {"long": 3494.9, "short": 58288.3}
