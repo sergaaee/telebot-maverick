@@ -103,3 +103,17 @@ def test_missing_data_returns_404(tmp_path, monkeypatch):
     assert c.get("/api/candles").status_code == 404
     assert c.post("/api/backtest", json={}).status_code == 404
     assert c.get("/api/config").status_code == 200       # конфиг отдаётся даже без данных
+
+
+def test_candles_fixed_timeframe_and_truncation(client):
+    cfg = client.get("/api/config").json()
+    assert cfg["timeframes"][0] == 60 and 900 in cfg["timeframes"]
+    j = client.get("/api/candles", params={"start": T0, "end": T0 + 600 * M, "tf": 900}).json()
+    assert j["tf"] == 900 and not j["truncated"]
+    assert all(b[0] % 900 == 0 for b in j["bars"]) and len(j["bars"]) <= 601 // 15 + 2
+    # окно шире, чем влезает в max_bars на выбранном ТФ: отдаём последнюю часть и сообщаем об этом
+    j = client.get("/api/candles", params={"tf": 60, "max_bars": 500}).json()
+    assert j["tf"] == 60 and j["truncated"] and len(j["bars"]) <= 501
+    assert j["bars"][-1][0] == max(b[0] for b in j["bars"])
+    # ТФ меньше родного поднимается до родного
+    assert client.get("/api/candles", params={"tf": 5, "start": T0, "end": T0 + 10 * M}).json()["tf"] == 60

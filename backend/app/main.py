@@ -25,17 +25,22 @@ def create_app(settings: "Settings | None" = None) -> FastAPI:
 
     @app.get("/api/config")
     def config():
-        return {"defaults": s.defaults, "exchange": s.exchange, "symbol": s.symbol, "tf": s.candle_tf,
+        try:
+            tfs = store.timeframes()
+        except FileNotFoundError:
+            tfs = []
+        return {"defaults": s.defaults, "timeframes": tfs, "exchange": s.exchange, "symbol": s.symbol, "tf": s.candle_tf,
                 "max_bars": s.max_bars, "data": store.info()}
 
     @app.get("/api/candles")
     def candles(start: "int | None" = Query(None, description="мс, UTC"), end: "int | None" = Query(None, description="мс, UTC"),
-                max_bars: "int | None" = Query(None, ge=100, le=20000)):
+                max_bars: "int | None" = Query(None, ge=100, le=20000),
+                tf: "int | None" = Query(None, ge=1, description="таймфрейм, сек; без него подбирается автоматически")):
         try:
-            tf, bars = store.window(start, end, max_bars or s.max_bars)
+            tf_, bars, truncated = store.window(start, end, max_bars or s.max_bars, tf)
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
-        return {"tf": tf, "bars": bars}
+        return {"tf": tf_, "bars": bars, "truncated": truncated}
 
     @app.post("/api/backtest")
     def run(params: BacktestParams):

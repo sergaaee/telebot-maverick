@@ -9,6 +9,7 @@ from .core.entries import attach_liq, load_signals
 from .config import Settings
 
 # интервалы для автоматического выбора таймфрейма графика, секунды
+UI_TIMEFRAMES = [60, 300, 900, 1800, 3600, 14400, 86400]   # что предлагает переключатель в интерфейсе
 TIMEFRAMES = [60, 300, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 259200, 604800]
 
 
@@ -70,18 +71,36 @@ class DataStore:
             self._candles = (None, None)
 
     # ---------- окно для графика ----------
-    def window(self, start_ms, end_ms, max_bars):
-        """Свечи в [start_ms, end_ms], агрегированные до таймфрейма, при котором баров не больше max_bars."""
+    def native_tf(self):
+        ts = self.candle_ts()
+        return (ts[1] - ts[0]) // 1000 if len(ts) > 1 else 60
+
+    def timeframes(self):
+        """Таймфреймы (сек), которые можно выбрать в интерфейсе: не меньше родного."""
+        native = self.native_tf()
+        return [t for t in UI_TIMEFRAMES if t >= native]
+
+    def window(self, start_ms, end_ms, max_bars, tf=None):
+        """Свечи в [start_ms, end_ms]. Без tf таймфрейм подбирается автоматически (баров не больше max_bars);
+        с tf (сек) свечи агрегируются до него, а при превышении max_bars остаётся последняя часть окна.
+        Возвращает (tf, bars, truncated)."""
         candles = self.candles()
         ts = self._ts
-        native = (ts[1] - ts[0]) // 1000 if len(ts) > 1 else 60
+        native = self.native_tf()
         lo = bisect_left(ts, start_ms) if start_ms is not None else 0
         hi = bisect_right(ts, end_ms) if end_ms is not None else len(ts)
         span_s = max(((ts[hi - 1] - ts[lo]) / 1000) if hi > lo else 0, 1)
-        tf = next((t for t in TIMEFRAMES if t >= native and span_s / t <= max_bars), TIMEFRAMES[-1])
+        truncated = False
+        if tf is None:
+            tf = next((t for t in TIMEFRAMES if t >= native and span_s / t <= max_bars), TIMEFRAMES[-1])
+        else:
+            tf = max(int(tf), native)
+            if span_s / tf > max_bars:          # окно слишком широкое для этого ТФ — оставляем последние max_bars баров
+                truncated = True
+                lo = max(lo, bisect_left(ts, ts[hi - 1] - max_bars * tf * 1000)) if hi > lo else lo
         if tf == native:
             bars = [[c[0] // 1000, c[1], c[2], c[3], c[4]] for c in candles[lo:hi]]
-            return tf, bars
+            return tf, bars, truncated
         step = tf * 1000
         bars, cur = [], None
         for i in range(lo, hi):
@@ -101,7 +120,7 @@ class DataStore:
             bars.append(cur)
         for b in bars:
             b[0] //= 1000
-        return tf, bars
+        return tf, bars, truncated
 
     def info(self):
         out = {"signals": None, "candles": None}
