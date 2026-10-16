@@ -1,4 +1,5 @@
 """Загрузка и кеширование данных в памяти: отчёты (сигналы) и свечи."""
+import json
 import os
 import threading
 from bisect import bisect_left, bisect_right
@@ -27,6 +28,7 @@ class DataStore:
         self._raw = {}                  # id источника -> (mtime, [отчёты])
         self._sig = {}                  # (источник, источник ликвидаций) -> (ключ, данные)
         self._candles = {}              # символ -> (mtime, свечи, времена)
+        self._extra = self._load_extra()  # активы, добавленные из интерфейса
 
     # ---------- отчёты ----------
     def source(self, source_id):
@@ -80,10 +82,55 @@ class DataStore:
         return min(firsts)
 
     # ---------- свечи ----------
+    # ---------- список активов: SYMBOLS из .env + добавленные из интерфейса ----------
+    def _load_extra(self):
+        try:
+            with open(self.s.assets_file, encoding="utf-8") as f:
+                data = json.load(f).get("symbols", [])
+            return [x for x in data if isinstance(x, str) and x and x not in self.s.symbols]
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    def _save_extra(self):
+        path = self.s.assets_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"symbols": self._extra}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+
+    def symbols(self):
+        return list(self.s.symbols) + [x for x in self._extra if x not in self.s.symbols]
+
+    def user_symbols(self):
+        return list(self._extra)
+
+    def add_symbol(self, symbol):
+        """True, если актив новый и добавлен."""
+        with self._lock:
+            if symbol in self.s.symbols or symbol in self._extra:
+                return False
+            self._extra.append(symbol)
+            self._save_extra()
+            return True
+
+    def remove_symbol(self, symbol):
+        """Убирает добавленный из интерфейса актив из списка (файл со свечами остаётся). True, если был."""
+        with self._lock:
+            if symbol not in self._extra:
+                return False
+            self._extra.remove(symbol)
+            self._candles.pop(symbol, None)
+            self._save_extra()
+            return True
+
+    def has_candles(self, symbol):
+        return os.path.exists(backtest.cache_path(self.s.exchange, symbol, self.s.candle_tf, str(self.s.cache_dir)))
+
     def _symbol(self, symbol):
         symbol = symbol or self.s.symbol
-        if symbol not in self.s.symbols:
-            raise KeyError(f"Неизвестный актив '{symbol}'. Доступны: {', '.join(self.s.symbols)}")
+        if symbol not in self.symbols():
+            raise KeyError(f"Неизвестный актив '{symbol}'. Доступны: {', '.join(self.symbols())}")
         return symbol
 
     def candle_path(self, symbol=None):
@@ -180,8 +227,8 @@ class DataStore:
                 pass
             out["sources"].append(row)
         out["assets"] = []
-        for sym in self.s.symbols:
-            row = {"symbol": sym, "count": 0, "first_ts": None, "last_ts": None, "tf": self.s.candle_tf,
+        for sym in self.symbols():
+            row = {"symbol": sym, "user": sym in self._extra, "count": 0, "first_ts": None, "last_ts": None, "tf": self.s.candle_tf,
                    "file": self.candle_path(sym), "error": None}
             try:
                 c = self.candles(sym)

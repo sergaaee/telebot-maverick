@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getConfig, getUiState, putUiState, refreshCandles, runBacktest } from './api';
+import { addAsset, getConfig, getUiState, putUiState, refreshCandles, removeAsset, runBacktest } from './api';
 import EquityChart from './components/EquityChart';
 import Help from './components/Help';
 import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
 import StatsPanel from './components/StatsPanel';
+import Toasts from './components/Toasts';
 import TradesTable from './components/TradesTable';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
-import type { AppConfig, BacktestResult, Params, Signal, TfMode, Trade, UiState } from './types';
+import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
+import type { AppConfig, BacktestResult, Job, Params, Signal, TfMode, Trade, UiState } from './types';
 
 const profileKey = (source: string, symbol: string) => `${source}|${symbol}`;
 
@@ -46,13 +48,13 @@ export default function App() {
   const [showLevels, setShowLevels] = useState(true);
   const [showSkipped, setShowSkipped] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
   const [tfMode, setTfMode] = useState<TfMode>('auto');
   const [effTf, setEffTf] = useState<{ tf: number; truncated: boolean } | null>(null);
 
   const uiState = useRef<UiState>({}); // последнее известное состояние, хранящееся на сервере
   const ready = useRef(false);
   const runSeq = useRef(0);
+  const paramsRef = useRef<Params | null>(null);
   const leaving = useRef(false); // страница закрывается: прерванные запросы сохранения — не ошибка
 
   // ---------- сохранение выбора на сервере ----------
@@ -91,6 +93,43 @@ export default function App() {
     window.addEventListener('pagehide', flush);
     return () => window.removeEventListener('pagehide', flush);
   }, [params, tfMode, saveNow]);
+
+  // ---------- фоновые загрузки свечей и уведомления ----------
+  const onJobFinished = useCallback(
+    (job: Job, restored: boolean) => {
+      const ok = job.status === 'done';
+      const here = paramsRef.current?.symbol === job.symbol;
+      jobsApi.current?.push({
+        kind: ok ? 'success' : 'error',
+        jobId: job.id,
+        text: ok
+          ? `Свечи ${job.symbol} загружены (${job.count.toLocaleString('ru-RU')} шт.)${restored ? ' — пока вы были не здесь' : ''}.`
+          : `Не удалось скачать свечи ${job.symbol}: ${job.error ?? 'неизвестная ошибка'}. Повторить можно кнопкой «Обновить свечи».`,
+        action: ok && !here && configRef.current?.data.assets.some((x) => x.symbol === job.symbol)
+          ? { label: `Открыть ${job.symbol}`, onClick: () => switchRef.current?.({ symbol: job.symbol }) }
+          : undefined,
+      });
+      if (restored) return;
+      notifyBrowser(ok ? 'Свечи загружены' : 'Ошибка загрузки свечей', ok ? `${job.symbol}: ${job.count} свечей` : `${job.symbol}: ${job.error ?? ''}`);
+      // данные появились на диске: обновляем список активов; если это текущий актив — перерисовываем график и пересчитываем
+      getConfig().then((c) => {
+        setConfig(c);
+        if (ok && paramsRef.current?.symbol === job.symbol) {
+          setReloadKey((k) => k + 1);
+          void runRef.current?.(paramsRef.current);
+        }
+      }).catch(() => undefined);
+    },
+    [],
+  );
+  const jobsApi = useRef<ReturnType<typeof useJobs> | null>(null);
+  const jobsState = useJobs(onJobFinished);
+  jobsApi.current = jobsState;
+  const { jobs, toasts, push, dismiss, track } = jobsState;
+  const activeJobs = jobs.filter(isActive);
+  const configRef = useRef<AppConfig | null>(null);
+  const switchRef = useRef<((t: { source?: string; symbol?: string }) => void) | null>(null);
+  const runRef = useRef<((p: Params) => Promise<void>) | null>(null);
 
   // ---------- расчёт ----------
   const run = useCallback(async (p: Params) => {
@@ -139,6 +178,11 @@ export default function App() {
     void run(np);
   };
 
+  configRef.current = config;
+  paramsRef.current = params;
+  switchRef.current = switchTo;
+  runRef.current = run;
+
   const resetParams = () => {
     if (!params || !config) return;
     const np = { ...config.defaults, source: params.source, symbol: params.symbol };
@@ -147,19 +191,58 @@ export default function App() {
     void run(np);
   };
 
+  /** «Обновить/скачать свечи»: ставит загрузку в фон и сразу возвращает управление; о завершении придёт уведомление. */
   const onRefresh = async () => {
     if (!params) return;
-    setRefreshing(true);
     setError(null);
+    askNotificationPermission();
     try {
-      const data = await refreshCandles(params.symbol);
-      setConfig((c) => (c ? { ...c, data } : c));
-      setReloadKey((k) => k + 1);
-      void run(params);
+      const { job, created } = await refreshCandles(params.symbol);
+      track(job);
+      push({
+        kind: 'info',
+        autoCloseMs: 10000,
+        text: created
+          ? `Загрузка свечей ${params.symbol} запущена в фоне. Можно продолжать работу — как только она завершится, придёт уведомление.`
+          : `Свечи ${params.symbol} уже загружаются — дождитесь уведомления.`,
+      });
     } catch (e) {
-      setError(`Не удалось докачать свечи: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setRefreshing(false);
+      setError(`Не удалось запустить загрузку свечей: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  /** Добавление нового актива из интерфейса. Возвращает текст ошибки для формы или null при успехе. */
+  const onAddAsset = async (raw: string): Promise<string | null> => {
+    askNotificationPermission();
+    try {
+      const r = await addAsset(raw);
+      setConfig(await getConfig());                       // новый актив сразу появляется в списке
+      if (r.job) {
+        track(r.job);
+        push({
+          kind: 'info',
+          autoCloseMs: 14000,
+          text: `${r.symbol} ${r.added ? 'добавлен' : 'уже в списке'}. Свечи скачиваются в фоне — как только загрузка завершится, придёт уведомление; тогда актив можно будет выбрать. Это может занять несколько минут.`,
+        });
+      } else {
+        push({ kind: 'info', autoCloseMs: 8000, text: `${r.symbol} уже есть и свечи загружены — выбираю его.` });
+        switchTo({ symbol: r.symbol });
+      }
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  };
+
+  const onRemoveAsset = async (sym: string) => {
+    try {
+      await removeAsset(sym);
+      const c = await getConfig();
+      setConfig(c);
+      if (params?.symbol === sym) switchTo({ symbol: c.defaults.symbol });
+      push({ kind: 'info', autoCloseMs: 6000, text: `${sym} убран из списка (файл со свечами остался на диске).` });
+    } catch (e) {
+      setError(`Не удалось убрать актив: ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -212,8 +295,13 @@ export default function App() {
             <span className="chip">{config.exchange} · {symbol} · {config.tf}</span>
             {curSrc && curSrc.count > 0 && <span className="chip">{curSrc.label} · отчётов {curSrc.count.toLocaleString('ru-RU')} · {fmtDate(curSrc.first_ts!)} … {fmtDate(curSrc.last_ts!)}</span>}
             {asset && asset.count > 0 && <span className="chip">свечей {asset.count.toLocaleString('ru-RU')} · до {fmtDate(asset.last_ts!)}</span>}
-            <button type="button" className="ghost" disabled={refreshing} onClick={onRefresh}>
-              {refreshing ? 'Качаю свечи…' : 'Обновить свечи'}
+            {activeJobs.map((j) => (
+              <span className="chip chip-job" key={j.id} title="Фоновая загрузка свечей — по завершении придёт уведомление">
+                ⬇ {j.symbol} · {j.status === 'queued' ? 'в очереди' : `${j.count.toLocaleString('ru-RU')} св.${j.last_ts ? ` · до ${fmtDate(j.last_ts)}` : ''}`}
+              </span>
+            ))}
+            <button type="button" className="ghost" disabled={activeJobs.some((j) => j.symbol === symbol)} onClick={onRefresh}>
+              {activeJobs.some((j) => j.symbol === symbol) ? 'Качаю свечи…' : 'Обновить свечи'}
             </button>
             <Help text={HELP.refresh} />
           </div>
@@ -225,9 +313,11 @@ export default function App() {
       {config && !config.data.sources.some((s) => s.exists) && <div className="banner error">Нет ни одного файла истории — выгрузите историю (python cli.py export …) и проверьте SOURCE_*_FILE в backend/.env</div>}
       {(chartError || asset?.error) && (
         <div className="banner warn">
-          {chartError ?? asset?.error}
-          <button type="button" className="ghost" disabled={refreshing} onClick={onRefresh}>
-            {refreshing ? 'Качаю…' : 'Скачать свечи'}
+          {activeJobs.some((j) => j.symbol === symbol)
+            ? `Свечи ${symbol} загружаются в фоне — как только закончится, придёт уведомление.`
+            : (chartError ?? asset?.error)}
+          <button type="button" className="ghost" disabled={activeJobs.some((j) => j.symbol === symbol)} onClick={onRefresh}>
+            {activeJobs.some((j) => j.symbol === symbol) ? 'Качаю…' : 'Скачать свечи'}
           </button>
         </div>
       )}
@@ -238,6 +328,9 @@ export default function App() {
             params={params}
             sources={config.data.sources}
             assets={config.data.assets}
+            activeJobs={activeJobs}
+            onAddAsset={onAddAsset}
+            onRemoveAsset={(s) => void onRemoveAsset(s)}
             loading={loading}
             onChange={setParams}
             onRun={() => void run(params)}
@@ -308,6 +401,7 @@ export default function App() {
 
         <section className="right">{result ? <StatsPanel result={result} /> : <div className="empty">{loading ? 'Считаю…' : 'Нет результата'}</div>}</section>
       </main>
+      <Toasts toasts={toasts} onClose={dismiss} />
     </div>
   );
 }

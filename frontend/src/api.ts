@@ -1,4 +1,4 @@
-import type { AppConfig, BacktestResult, CandlesResponse, DataInfo, Params, UiState } from './types';
+import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, Params, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -35,8 +35,23 @@ export const getCandles = (symbol: string, startSec?: number, endSec?: number, t
   return request<CandlesResponse>('/api/candles?' + q.toString());
 };
 
+/** Ставит загрузку свечей в фон и сразу возвращается; ход и завершение — через getJobs(). */
 export const refreshCandles = (symbol: string) =>
-  request<DataInfo>('/api/candles/refresh?' + new URLSearchParams({ symbol }).toString(), { method: 'POST' });
+  request<{ job: Job; created: boolean }>('/api/candles/refresh?' + new URLSearchParams({ symbol }).toString(), { method: 'POST' });
+
+export const addAsset = (symbol: string) =>
+  request<AddAssetResult>('/api/assets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol }),
+  });
+
+export const removeAsset = (symbol: string) =>
+  request<{ ok: boolean }>('/api/assets?' + new URLSearchParams({ symbol }).toString(), { method: 'DELETE' });
+
+export const getJobs = () => request<{ jobs: Job[] }>('/api/jobs').then((r) => r.jobs);
+
+export const ackJob = (id: number) => request<Job>(`/api/jobs/${id}/ack`, { method: 'POST' });
 
 export const getUiState = () => request<UiState>('/api/ui-state');
 

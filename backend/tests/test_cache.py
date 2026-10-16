@@ -47,3 +47,23 @@ def test_binance_alias_shares_cache(tmp_path, monkeypatch):
     Fake.calls.clear()
     backtest.fetch_candles("binanceusdm", "BTC/USDT:USDT", "1m", since, cache_dir=str(tmp_path))
     assert len(Fake.calls) <= 2
+
+
+def test_asset_listed_after_signals_start_is_not_redownloaded_every_time(tmp_path, monkeypatch):
+    """Актив появился на бирже позже первого отчёта: кеш начинается с даты листинга и это нормально — перекачивать всё не нужно."""
+    now = int(time.time() * 1000) // M * M
+    listing = now - 3000 * M
+
+    class Late(Fake):
+        def fetch_ohlcv(self, symbol, tf, since=None, limit=1000):
+            return super().fetch_ohlcv(symbol, tf, since=max(since, listing), limit=limit)
+
+    monkeypatch.setattr(ccxt, "binanceusdm", Late, raising=False)
+    monkeypatch.setattr(backtest.time, "sleep", lambda s: None)
+    since = now - 10_000 * M                                      # история сигналов начинается намного раньше листинга
+    progress = []
+    c1 = backtest.fetch_candles("binanceusdm", "NEW/USDT:USDT", "1m", since, cache_dir=str(tmp_path), progress=lambda n, ts: progress.append(n))
+    assert c1[0][0] == listing and progress and progress[-1] == len(c1)
+    Fake.calls.clear()
+    c2 = backtest.fetch_candles("binanceusdm", "NEW/USDT:USDT", "1m", since, cache_dir=str(tmp_path))
+    assert len(Fake.calls) <= 2 and c2[0][0] == listing and len(c2) >= len(c1) - 1       # докачан только хвост, а не вся история

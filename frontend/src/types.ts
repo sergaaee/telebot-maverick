@@ -53,6 +53,8 @@ export interface SourceInfo {
 
 export interface AssetInfo {
   symbol: string;
+  /** добавлен из интерфейса (можно убрать) */
+  user: boolean;
   count: number;
   first_ts: number | null;
   last_ts: number | null;
@@ -70,6 +72,7 @@ export interface AppConfig {
   defaults: Params;
   exchange: string;
   symbols: string[];
+  user_symbols: string[];
   symbol: string;
   tf: string;
   max_bars: number;
@@ -176,4 +179,25 @@ export interface UiState {
   version?: number;
   last?: { source?: string; symbol?: string };
   profiles?: Record<string, Profile>;
+}
+
+/** Фоновая загрузка свечей актива. */
+export interface Job {
+  id: number;
+  symbol: string;
+  status: 'queued' | 'running' | 'done' | 'error';
+  count: number;
+  last_ts: number | null;
+  error: string | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  /** пользователь уже закрыл уведомление о завершении */
+  acked: boolean;
+}
+
+export interface AddAssetResult {
+  symbol: string;
+  added: boolean;
+  job: Job | null;
 }

@@ -1,14 +1,19 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { fmtDate } from '../format';
 import { HELP, type HelpKey } from '../helpTexts';
 import { MAX_TPS, fillRemainder, resizeTps, sumShares, validateTps } from '../tps';
-import type { AssetInfo, Only, Params, Side, SourceInfo, TpLevel } from '../types';
+import type { AssetInfo, Job, Only, Params, Side, SourceInfo, TpLevel } from '../types';
 import Help from './Help';
 
 interface Props {
   params: Params;
   sources: SourceInfo[];
   assets: AssetInfo[];
+  /** идущие сейчас загрузки свечей: такие активы пока нельзя выбрать */
+  activeJobs: Job[];
+  /** добавить актив: возвращает текст ошибки или null; свечи качаются в фоне, о завершении придёт уведомление */
+  onAddAsset: (symbol: string) => Promise<string | null>;
+  onRemoveAsset: (symbol: string) => void;
   loading: boolean;
   onChange: (p: Params) => void;
   onRun: () => void;
@@ -16,6 +21,8 @@ interface Props {
   onSwitch: (target: { source?: string; symbol?: string }) => void;
   onReset: () => void;
 }
+
+const ADD_ASSET = '__add_asset__';
 
 type NumKey = {
   [K in keyof Params]: Params[K] extends number | null ? K : never;
@@ -109,7 +116,7 @@ function Section({ title, help, children, open = true }: { title: string; help?:
   );
 }
 
-export default function ParamsPanel({ params: p, sources, assets, loading, onChange, onRun, onSwitch, onReset }: Props) {
+export default function ParamsPanel({ params: p, sources, assets, activeJobs, onAddAsset, onRemoveAsset, loading, onChange, onRun, onSwitch, onReset }: Props) {
   const set = <K extends keyof Params>(k: K, v: Params[K]) => onChange({ ...p, [k]: v });
   const num = (k: NumKey) => (v: number | null) => onChange({ ...p, [k]: v } as Params);
   const coolMode: 'off' | 'drop' | 'declines' = p.cool_drop != null ? 'drop' : p.cool_declines != null ? 'declines' : 'off';
@@ -120,6 +127,23 @@ export default function ParamsPanel({ params: p, sources, assets, loading, onCha
   const src = sources.find((s) => s.id === p.source);
   const liqSrc = p.liq_source ? sources.find((s) => s.id === p.liq_source) : src;
   const asset = assets.find((a) => a.symbol === p.symbol);
+  const downloading = (sym: string) => activeJobs.some((j) => j.symbol === sym);
+  const [adding, setAdding] = useState(false);
+  const [newSymbol, setNewSymbol] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submitAsset = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setAddError(null);
+    const err = await onAddAsset(newSymbol);
+    setBusy(false);
+    if (err) setAddError(err);
+    else {
+      setAdding(false);
+      setNewSymbol('');
+    }
+  };
 
   return (
     <aside className="params">
@@ -133,15 +157,45 @@ export default function ParamsPanel({ params: p, sources, assets, loading, onCha
       <Section title="Данные">
         <label className="field col">
           <Label text="Актив (свечи)" help="symbol" />
-          <select className="wide" value={p.symbol} onChange={(e) => onSwitch({ symbol: e.target.value })}>
+          <select
+            className="wide"
+            value={p.symbol}
+            onChange={(e) => (e.target.value === ADD_ASSET ? setAdding(true) : onSwitch({ symbol: e.target.value }))}
+          >
             {assets.map((a) => (
-              <option key={a.symbol} value={a.symbol}>
-                {a.symbol}{a.error ? ' — нет свечей' : ''}
+              <option key={a.symbol} value={a.symbol} disabled={downloading(a.symbol) && a.symbol !== p.symbol}>
+                {a.symbol}{downloading(a.symbol) ? ' — загружается…' : a.error ? ' — нет свечей' : ''}
               </option>
             ))}
+            <option value={ADD_ASSET}>＋ Добавить актив…</option>
           </select>
         </label>
-        {asset?.error && <div className="src-info warn-text">свечи не скачаны — нажмите «Обновить свечи»</div>}
+        {adding && (
+          <form className="add-asset" onSubmit={submitAsset}>
+            <div className="add-asset-row">
+              <input
+                autoFocus
+                type="text"
+                placeholder="ETH или ETH/USDT:USDT"
+                value={newSymbol}
+                onChange={(e) => setNewSymbol(e.target.value)}
+                aria-label="Символ нового актива"
+              />
+              <Help text={HELP.add_asset} />
+            </div>
+            <div className="add-asset-row">
+              <button type="submit" className="ghost" disabled={busy || !newSymbol.trim()}>{busy ? 'Проверяю…' : 'Добавить и скачать'}</button>
+              <button type="button" className="link" onClick={() => { setAdding(false); setAddError(null); }}>отмена</button>
+            </div>
+            {addError && <div className="src-info bad-text">{addError}</div>}
+            <div className="src-info">Свечи скачаются в фоне — когда загрузка закончится, придёт уведомление.</div>
+          </form>
+        )}
+        {asset?.user && !downloading(asset.symbol) && (
+          <button type="button" className="link remove-asset" onClick={() => onRemoveAsset(asset.symbol)}>убрать «{asset.symbol}» из списка</button>
+        )}
+        {downloading(p.symbol) && <div className="src-info">свечи этого актива загружаются…</div>}
+        {asset?.error && !downloading(p.symbol) && <div className="src-info warn-text">свечей нет — нажмите «Скачать свечи» вверху</div>}
         <label className="field col">
           <Label text="Источник метрик (сигналы)" help="source" />
           <select className="wide" value={p.source} onChange={(e) => onSwitch({ source: e.target.value })}>

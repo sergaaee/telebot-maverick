@@ -10,6 +10,7 @@
 """
 import argparse
 import csv
+import json
 import os
 import shutil
 import time
@@ -35,8 +36,22 @@ def read_cache(path):
         return [tuple(float(x) if i else int(x) for i, x in enumerate(r)) for r in csv.reader(f)]
 
 
-def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
-    """Скачивает свечи [since_ms, now] с кешем в CSV. Возвращает [(ts,o,h,l,c)]."""
+def _meta_path(path):
+    return path + ".meta.json"
+
+
+def _read_requested_since(path):
+    """С какой даты просили историю при полной загрузке (если актив появился на бирже позже — кеш начинается позже запрошенного)."""
+    try:
+        with open(_meta_path(path), encoding="utf-8") as f:
+            return int(json.load(f)["requested_since"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR, progress=None):
+    """Скачивает свечи [since_ms, now] с кешем в CSV. Возвращает [(ts,o,h,l,c)].
+    progress(n_свечей, ts_последней_мс) вызывается по ходу загрузки (для фоновых задач).""" 
     import ccxt
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -52,13 +67,17 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
     ex = getattr(ccxt, exchange)({"enableRateLimit": True})
     tf_ms = ex.parse_timeframe(tf) * 1000
     # докачиваем хвост; если кеш начинается позже нужного, качаем заново с нуля
-    if candles and candles[0][0] > since_ms + tf_ms:
+    asked = _read_requested_since(path)
+    if candles and candles[0][0] > since_ms + tf_ms and not (asked is not None and asked <= since_ms):
         print(f"  кеш {os.path.basename(path)} начинается позже нужного — качаю заново")
         candles = []
     elif candles:
         print(f"  кеш {os.path.basename(path)}: {len(candles)} свечей, докачиваю хвост")
     else:
         print(f"  кеша нет ({os.path.basename(path)}), качаю с начала")
+    if not candles:
+        with open(_meta_path(path), "w", encoding="utf-8") as f:   # запоминаем, с какой даты просили (актив мог появиться позже)
+            json.dump({"requested_since": since_ms}, f)
     cur = candles[-1][0] + tf_ms if candles else since_ms
     now = int(time.time() * 1000)
     closed_before = now // tf_ms * tf_ms  # свеча, которая ещё формируется, в кеш не попадает
@@ -88,6 +107,8 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
         cur = batch[-1][0] + tf_ms
         pages += 1
         print(f"\r  свечи: {len(candles)}", end="", flush=True)
+        if progress:
+            progress(len(candles), batch[-1][0])
         if pages % 20 == 0:
             save()
         time.sleep(0.3)  # мягче к лимитам, чем enableRateLimit по умолчанию

@@ -86,6 +86,7 @@ class Settings:
     candle_tf: str
     cache_dir: Path
     state_file: Path
+    assets_file: Path           # активы, добавленные из интерфейса (рядом с SYMBOLS из .env)
     max_bars: int
     host: str
     port: int
@@ -129,6 +130,7 @@ def load_settings() -> Settings:
         candle_tf=_opt("CANDLE_TF") or "1m",
         cache_dir=_path("CACHE_DIR", "../data"),
         state_file=_path("STATE_FILE", "../data/ui_state.json"),
+        assets_file=_path("ASSETS_FILE", "../data/assets.json"),
         max_bars=_num("MAX_BARS", 3000, int),
         host=_opt("HOST") or "127.0.0.1",
         port=_num("PORT", 8000, int),

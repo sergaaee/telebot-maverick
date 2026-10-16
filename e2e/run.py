@@ -194,7 +194,7 @@ def scenario(pg, base, state_url):
 
     # --- актив: другие свечи и пересчёт
     asset = field(pg, "Актив")
-    check("активы в списке", asset.locator("option").all_inner_texts() == ["BTC/USDT:USDT", "ETH/USDT:USDT"])
+    check("активы в списке", asset.locator("option").all_inner_texts() == ["BTC/USDT:USDT", "ETH/USDT:USDT", "＋ Добавить актив…"])
     btc_price = float(rows.nth(0).locator("td").nth(3).inner_text().replace("\xa0", "").replace(" ", "").replace(",", "."))
     asset.locator("select").select_option("ETH/USDT:USDT")
     pg.wait_for_timeout(3500)
@@ -233,6 +233,63 @@ def scenario(pg, base, state_url):
     field(pg, "Актив").locator("select").select_option("BTC/USDT:USDT")
     pg.wait_for_timeout(3000)
     check("после перезагрузки сохранены параметры связки", num(pg, "Стоп-лосс").input_value() == "7")
+
+    # --- добавление актива: проверка на бирже, фоновая загрузка, уведомления
+    sel_asset = field(pg, "Актив").locator("select")
+    toast = pg.locator(".toast")
+
+    def add_asset(text):
+        sel_asset.select_option("__add_asset__")
+        pg.locator(".add-asset input[type=text]").fill(text)
+        pg.get_by_role("button", name="Добавить и скачать").click()
+
+    add_asset("xyz")
+    pg.wait_for_timeout(800)
+    check("несуществующий актив: понятная ошибка и подсказка, список не изменился",
+          "нет на binanceusdm" in pg.locator(".add-asset").inner_text() and sel_asset.locator("option").count() == 3, pg.locator(".add-asset .bad-text").inner_text()[:80])
+    pg.locator(".add-asset input[type=text]").fill("ethz")
+    pg.get_by_role("button", name="Добавить и скачать").click(); pg.wait_for_timeout(600)
+    check("в ошибке есть похожие активы", "ETH/USDT:USDT" in pg.locator(".add-asset .bad-text").inner_text())
+    pg.locator(".add-asset input[type=text]").fill("sol")
+    pg.get_by_role("button", name="Добавить и скачать").click(); pg.wait_for_timeout(700)
+    t_all = toast.all_inner_texts()
+    check("после добавления сообщение: качается в фоне, придёт уведомление",
+          len(t_all) == 1 and "скачиваются в фоне" in t_all[0] and "придёт уведомление" in t_all[0], f"тостов {len(t_all)}: {t_all}")
+    opts = sel_asset.locator("option").all_inner_texts()
+    check("новый актив в списке с пометкой «загружается»", any(o.startswith("SOL/USDT:USDT") and "загружается" in o for o in opts), str(opts))
+    check("в шапке виден ход загрузки", pg.locator(".chip-job", has_text="SOL").count() == 1)
+    check("пока качается, актив выбрать нельзя", sel_asset.locator("option", has_text="SOL").first.get_attribute("disabled") is not None)
+    pg.wait_for_selector(".toast-success", timeout=30000)
+    check("по завершении приходит уведомление об успехе", "Свечи SOL/USDT:USDT загружены" in pg.locator(".toast-success").first.inner_text(), pg.locator(".toast-success").first.inner_text()[:80])
+    check("ход загрузки из шапки исчез", pg.locator(".chip-job").count() == 0)
+    pg.get_by_role("button", name="Открыть SOL/USDT:USDT").click()
+    pg.wait_for_timeout(3500)
+    sol_price = float(rows.nth(0).locator("td").nth(3).inner_text().replace("\xa0", "").replace(" ", "").replace(",", "."))
+    check("кнопка «Открыть» переключила на новый актив, бэктест на его ценах", sel_asset.input_value() == "SOL/USDT:USDT" and sol_price < 1000, f"цена входа {sol_price}")
+    check("уведомление закрылось после действия", pg.locator(".toast-success").count() == 0)
+
+    # уведомление не теряется при перезагрузке страницы во время загрузки
+    add_asset("doge")
+    pg.wait_for_timeout(1500)
+    pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1200)
+    check("после перезагрузки загрузка всё ещё отображается", pg.locator(".chip-job", has_text="DOGE").count() == 1)
+    pg.wait_for_selector(".toast-success", timeout=30000)
+    check("уведомление пришло и после перезагрузки", "DOGE/USDT:USDT загружены" in pg.locator(".toast-success").first.inner_text())
+    pg.locator(".toast-close").first.click(); pg.wait_for_timeout(600)
+    pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(2500)
+    check("закрытое уведомление больше не показывается", pg.locator(".toast").count() == 0)
+
+    # ошибка загрузки
+    add_asset("fail")
+    pg.wait_for_selector(".toast-error", timeout=30000)
+    check("ошибка загрузки показана в уведомлении с причиной", "429" in pg.locator(".toast-error").first.inner_text(), pg.locator(".toast-error").first.inner_text()[:100])
+    pg.locator(".toast-close").first.click()
+
+    # убрать добавленный актив
+    sel_asset.select_option("SOL/USDT:USDT"); pg.wait_for_timeout(3000)
+    pg.get_by_role("button", name="убрать «SOL/USDT:USDT» из списка").click(); pg.wait_for_timeout(3000)
+    check("убранный актив исчез из списка, выбран актив по умолчанию", "SOL/USDT:USDT" not in sel_asset.locator("option").all_inner_texts() and sel_asset.input_value() == "BTC/USDT:USDT")
+    sel_asset.select_option("BTC/USDT:USDT"); pg.wait_for_timeout(2500)
 
     # --- тейки частями и безубыток
     pg.wait_for_timeout(500)
@@ -315,12 +372,12 @@ def main():
         env = dict(os.environ, SOURCES="coinbase,binance", SOURCE_DEFAULT="binance", SOURCE_COINBASE_LABEL="Coinbase Maverick",
                    SOURCE_COINBASE_FILE=str(tmp / "history_cb.csv"), SOURCE_BINANCE_LABEL="Binance Maverick",
                    SOURCE_BINANCE_FILE=str(tmp / "history_bn.csv"), CACHE_DIR=str(tmp / "cache"), LIQ_SOURCE="", HISTORY_FILE="", SYMBOLS="BTC/USDT:USDT,ETH/USDT:USDT", SYMBOL_DEFAULT="BTC/USDT:USDT",
-                   STATE_FILE=str(tmp / "ui_state.json"),
+                   STATE_FILE=str(tmp / "ui_state.json"), ASSETS_FILE=str(tmp / "assets.json"),
                    LOCAL_MIN="1.85", SCALP_MIN="1.25", CONFIRM="4", TP_PCT="6", SL_PCT="2", SIDE="both", ONLY="", COOL_DROP="",
                    COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0", FEE="0.0005", SLIPPAGE="0", ORDER_SIZE="0.1",
                    VITE_PROXY_TARGET=f"http://127.0.0.1:{bp}", VITE_PORT=str(fp))
-        procs.append(subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(bp), "--log-level", "warning"],
-                                      cwd=ROOT / "backend", env=env))
+        procs.append(subprocess.Popen([sys.executable, "-m", "uvicorn", "server:app", "--app-dir", str(ROOT / "e2e"), "--port", str(bp),
+                                       "--log-level", "warning"], cwd=ROOT / "backend", env=env))
         procs.append(subprocess.Popen(["npx", "vite", "preview", "--host", "127.0.0.1", "--port", str(fp), "--strictPort"],
                                       cwd=ROOT / "frontend", env=env, stdout=subprocess.DEVNULL))
         wait_http(f"http://127.0.0.1:{bp}/api/health")
@@ -333,7 +390,9 @@ def main():
             pg.on("console", lambda m: errors.append(f"после «{STEP[0]}»: {m.type}: {m.text}") if m.type in ("error", "warning") else None)
             pg.on("pageerror", lambda e: errors.append(f"после «{STEP[0]}»: pageerror: {e}\n{(getattr(e, 'stack', '') or '')[:700]}"))
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
-            check("нет ошибок в консоли браузера", not errors, "\n" + "\n".join(errors)[:3000])
+            expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив
+            other = [e for e in errors if e not in expected]
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 2, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:
