@@ -26,7 +26,13 @@ export interface Params {
   /** после первого тейка переносить стоп в цену входа (безубыток) */
   be_after_tp1: boolean;
   sl_pct: number;
+  /** устарело (размер в BTC); сейчас размер задают депозит, доля и плечо */
   size: number;
+  /** начальный депозит, $ */
+  deposit: number;
+  /** доля текущего депозита в марже сделки, % */
+  trade_pct: number;
+  leverage: number;
   fee: number;
   slip: number;
   cooldown_h: number;
@@ -127,6 +133,9 @@ export interface Trade {
   reason: Reason;
   pnl_pct: number;
   pnl_usd: number;
+  /** объём позиции (маржа × плечо) и маржа, $ — только у сделок основной стратегии */
+  notional?: number | null;
+  margin?: number | null;
   hold_h: number;
   local: number | null;
   scalp: number | null;
@@ -169,6 +178,10 @@ export interface Stats {
   max_loss_streak: number;
   exposure_pct: number;
   expectancy_usd: number;
+  /** годовой Шарп по дневным доходностям; null — мало данных */
+  sharpe: number | null;
+  return_pct: number | null;
+  max_dd_pct: number | null;
   /** сколько сделок дошли до 1-го / 2-го / 3-го тейка */
   tp_reach: number[];
 }

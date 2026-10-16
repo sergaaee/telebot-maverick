@@ -61,7 +61,49 @@ def _filters(eff):
     return extra, liq, cool
 
 
-def _extra_stats(trades, span_ms):
+DAY_MS = 86_400_000
+
+
+def apply_sizing(trades, deposit, trade_pct, leverage):
+    """Размер каждой сделки = текущий баланс × trade_pct% × плечо (баланс = депозит + закрытые результаты, т.е. со сложным процентом).
+    pnl_pct у сделки — доходность на объём, поэтому pnl_usd пересчитывается последовательно. Баланс ≤ 0 — торговля прекращается (счёт слит)."""
+    bal = deposit
+    for t in trades:
+        notional = max(bal, 0.0) * trade_pct / 100 * leverage
+        t["margin"] = notional / leverage
+        t["notional"] = notional
+        t["pnl_usd"] = notional * t["pnl_pct"] / 100
+        bal += t["pnl_usd"]
+        t["balance_after"] = bal
+
+
+def sharpe_ratio(trades, deposit):
+    """Шарп по дневным доходностям баланса (результат за день / баланс на начало дня), годовой: × √365, безрисковая ставка 0.
+    Дни без сделок считаются нулевой доходностью. Меньше 2 дней или нулевой разброс — None."""
+    if not trades:
+        return None
+    d0 = trades[0]["entry_ts"] // DAY_MS
+    d1 = max(t["exit_ts"] for t in trades) // DAY_MS
+    if d1 - d0 < 1:
+        return None
+    by_day = {}
+    for t in trades:
+        d = t["exit_ts"] // DAY_MS
+        by_day[d] = by_day.get(d, 0.0) + t["pnl_usd"]
+    bal, rets = deposit, []
+    for d in range(d0, d1 + 1):
+        p = by_day.get(d, 0.0)
+        rets.append(p / bal if bal > 0 else 0.0)
+        bal += p
+    n = len(rets)
+    mean = sum(rets) / n
+    var = sum((r - mean) ** 2 for r in rets) / (n - 1)
+    if var <= 0:
+        return None
+    return mean / math.sqrt(var) * math.sqrt(365)
+
+
+def _extra_stats(trades, span_ms, deposit=None):
     pn = [t["pnl_usd"] for t in trades]
     wins = [x for x in pn if x > 0]
     losses = [x for x in pn if x <= 0]
@@ -78,6 +120,9 @@ def _extra_stats(trades, span_ms):
         "max_loss_streak": best,
         "exposure_pct": 100 * held / span_ms if span_ms > 0 else 0.0,
         "expectancy_usd": sum(pn) / len(pn) if pn else 0.0,
+        "sharpe": sharpe_ratio(trades, deposit) if deposit else None,
+        "return_pct": 100 * sum(pn) / deposit if deposit else None,
+        "max_dd_pct": _max_dd_pct(pn, deposit) if deposit else None,
         # сколько сделок дошли до первого / второго / третьего тейка
         "tp_reach": [sum(t["tp_hits"] >= k for t in trades) for k in (1, 2, 3)],
     }
@@ -90,7 +135,7 @@ def _trade_out(n, t, rep):
         "entry": t["entry"], "exit": t["exit"], "exit_avg": t["exit_avg"], "tp": t["tp"], "tps": t["tps"],
         "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
         "fills": t["fills"], "reason": t["reason"],
-        "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
+        "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "notional": t.get("notional"), "margin": t.get("margin"), "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
         "local": r[1] if r else None, "scalp": r[2] if r else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
@@ -149,6 +194,16 @@ def _top_section(store, eff, confirmed, rep, available_fn, now_ms, warnings):
         "equity": equity,
         "pending": {"symbols": len(pending), "windows": len(items), "requests": topcoins.estimate_requests(pending, tf_ms), "items": items},
     }
+
+
+def _max_dd_pct(pn, deposit):
+    eq = peak = deposit
+    dd = 0.0
+    for x in pn:
+        eq += x
+        peak = max(peak, eq)
+        dd = max(dd, (peak - eq) / peak if peak > 0 else 0.0)
+    return 100 * dd
 
 
 def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None) -> dict:
@@ -213,6 +268,10 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         allow = trend.build_trend(candles_all, eff["trend_tf"], emas)       # EMA считается по всей истории свечей (прогрев), а не только по периоду
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, **common, **extra)
 
+    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"])
+    if eff["sl_pct"] * eff["leverage"] >= 100:
+        warnings.append(f"Плечо {eff['leverage']:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа, бэктест этого не моделирует")
+
     # все подтверждённые сигналы (в том числе пропущенные: позиция открыта, пауза после стопа)
     lm, sm, sh = backtest.apply_only(long_min, scalp_min, short, eff["only"])
     confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool)
@@ -236,7 +295,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     second_half = [t for t in trades if t["entry_ts"] >= split_ts]
 
     def block(ts_):
-        return {**backtest.stats(ts_), **_extra_stats(ts_, span_ms)}
+        return {**backtest.stats(ts_), **_extra_stats(ts_, span_ms, eff["deposit"])}
 
     equity, cum = [], 0.0
     if trades:

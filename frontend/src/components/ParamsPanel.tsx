@@ -256,7 +256,9 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       <Section title="Выход и издержки" help="groupExit">
         <TpEditor tps={p.tps} be={p.be_after_tp1} onChange={(t, b) => onChange({ ...p, tps: t, be_after_tp1: b })} />
         <Num label="Стоп-лосс" help="sl_pct" value={p.sl_pct} step={0.5} suffix="%" onChange={num('sl_pct')} />
-        <Num label="Размер" help="size" value={p.size} step={0.01} suffix="BTC" onChange={num('size')} />
+        <Num label="Депозит" help="deposit" value={p.deposit} step={1000} suffix="$" onChange={num('deposit')} />
+        <Num label="Доля депозита на сделку" help="trade_pct" value={p.trade_pct} step={1} suffix="%" onChange={num('trade_pct')} />
+        <Num label="Плечо" help="leverage" value={p.leverage} step={1} suffix="×" onChange={num('leverage')} />
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
         <Num label="Проскальзывание" help="slip" value={+(p.slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('slip', (v ?? 0) / 100)} />
         <Num label="Пауза после стопа" help="cooldown_h" value={p.cooldown_h} step={1} suffix="ч" onChange={(v) => set('cooldown_h', v ?? 0)} />

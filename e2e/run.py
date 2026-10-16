@@ -377,8 +377,7 @@ def scenario(pg, base, state_url):
     heads = pg.locator("table.trades thead th").all_inner_texts()
     check("возврат на основную вкладку: снова Local/Scalp и график основного актива", "Local" in heads and pg.locator(".top-panel, [data-testid=top-panel]").count() == 0 and any("symbol=BTC" in r for r in reqs[n_req:]))
     # параметры топ-коинов сохраняются и меняют результат
-    num(pg, "Размер").last.fill("250") if False else None
-    top_size = pg.locator("aside.params label.field", has_text="Размер").nth(1).locator("input")
+    top_size = pg.locator("aside.params label.field", has_text="Размер").first.locator("input")
     top_size.fill("250")
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
     tabs.nth(1).click(); pg.wait_for_timeout(800)
@@ -386,7 +385,7 @@ def scenario(pg, base, state_url):
     pg.wait_for_timeout(900)
     pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1500)
     check("после перезагрузки настройки топ-коинов сохранены, вкладки на месте",
-          pg.locator(".tabs-row .seg button").count() == 2 and pg.locator("aside.params label.field", has_text="Размер").nth(1).locator("input").input_value() == "250")
+          pg.locator(".tabs-row .seg button").count() == 2 and pg.locator("aside.params label.field", has_text="Размер").first.locator("input").input_value() == "250")
 
     # --- фильтр тренда
     check("фильтр тренда выключен по умолчанию, чипа нет", pg.locator(".chip", has_text="тренд:").count() == 0)
@@ -405,6 +404,22 @@ def scenario(pg, base, state_url):
     emas.nth(0).uncheck(); emas.nth(1).uncheck()
     check("без выбранных EMA запуск заблокирован", pg.get_by_role("button", name="Исправьте тейки").is_disabled() or pg.locator("button.run").is_disabled())
     emas.nth(1).check(); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(2500)
+
+    # --- депозит, доля на сделку, плечо, Шарп
+    check("в статистике есть коэффициент Шарпа", pg.locator(".card-label", has_text="Коэф. Шарпа").count() == 1 and pg.locator(".card-label", has_text="Коэф. Шарпа").locator("xpath=following-sibling::div[1]").inner_text() != "")
+    check("у депозита, доли и плеча есть «?»", all(field(pg, l).first.locator(".help").count() == 1 for l in ("Депозит", "Доля депозита на сделку", "Плечо")))
+    base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({deposit: 10000, trade_pct: 10, leverage: 1})}).then(r => r.json())""")
+    lev_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({deposit: 10000, trade_pct: 10, leverage: 3})}).then(r => r.json())""")
+    check("API: плечо ×3 утраивает объём и результат первой сделки", abs(lev_t["trades"][0]["notional"] / base_t["trades"][0]["notional"] - 3) < 1e-9 and abs(lev_t["trades"][0]["pnl_usd"] / base_t["trades"][0]["pnl_usd"] - 3) < 1e-9)
+    num(pg, "Плечо").fill("4"); num(pg, "Депозит").fill("5000"); num(pg, "Доля депозита на сделку").fill("20")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    pg.locator("table.trades tbody tr").first.click(); pg.wait_for_timeout(1000)
+    check("объём сделки в сводке = депозит × доля × плечо", "объём 4 000 $" in pg.locator(".sel-info").inner_text().replace("\xa0", " "), pg.locator(".sel-info").inner_text()[-120:])
+    check("в карточке итога указан депозит", "5 000 $" in pg.locator(".card-sub").first.inner_text().replace("\xa0", " "), pg.locator(".card-sub").first.inner_text())
+    pg.wait_for_timeout(900); pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1200)
+    check("депозит, доля и плечо сохраняются", [num(pg, l).input_value() for l in ("Депозит", "Доля депозита на сделку", "Плечо")] == ["5000", "20", "4"])
+    num(pg, "Плечо").fill("1"); num(pg, "Депозит").fill("10000"); num(pg, "Доля депозита на сделку").fill("10")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(2500)
 
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля

@@ -462,6 +462,7 @@ export default function App() {
               <b>#{selTrade.n}</b>{selTrade.symbol && <b> {selTrade.symbol.split('/')[0]}</b>} <span className={selTrade.side === 'long' ? 'pos' : 'neg'}>{selTrade.side === 'long' ? 'лонг' : 'шорт'}</span>
               {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)} · вход {fmtPrice(selTrade.entry)} · TP {selTrade.tps.map(fmtPrice).join(' / ')} · SL {fmtPrice(selTrade.sl)}{selTrade.be ? ' (БУ после TP1)' : ''}
               {' · '}<span className="fills">{selTrade.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}</span>
+              {selTrade.notional != null && <span className="muted"> · объём {fmtUsd(selTrade.notional).replace(/^\+/, '')}</span>}
               {' · '}<b className={signClass(selTrade.pnl_usd)}>{fmtUsd(selTrade.pnl_usd)}</b>
               {selTrade.local != null && <span className="muted"> · Local {selTrade.local.toFixed(2)} / Scalp {selTrade.scalp?.toFixed(2)}</span>}
               {selTrade.coin && <span className="muted"> · в отчёте {selTrade.coin} {selTrade.top_value?.toFixed(2)}</span>}

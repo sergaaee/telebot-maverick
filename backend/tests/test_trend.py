@@ -42,3 +42,36 @@ def test_api_trend_filter(client):  # noqa: F811
     assert client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": [30]}).status_code == 422
     assert client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": []}).status_code == 422
     assert client.post("/api/backtest", json={"trend_enabled": True, "trend_tf": "2h"}).status_code == 422
+
+
+def test_sizing_deposit_pct_leverage_and_sharpe(client):  # noqa: F811
+    a = client.post("/api/backtest", json={"deposit": 1000, "trade_pct": 10, "leverage": 1}).json()
+    b = client.post("/api/backtest", json={"deposit": 1000, "trade_pct": 10, "leverage": 5}).json()
+    t1, t5 = a["trades"][0], b["trades"][0]
+    assert t1["notional"] == pytest.approx(100) and t1["margin"] == pytest.approx(100)
+    assert t5["notional"] == pytest.approx(500) and t5["margin"] == pytest.approx(100)
+    assert t5["pnl_usd"] == pytest.approx(5 * t1["pnl_usd"]) and t5["pnl_pct"] == pytest.approx(t1["pnl_pct"])      # доходность на объём от плеча не зависит
+    if len(a["trades"]) > 1:                                                                              # сложный процент
+        assert a["trades"][1]["notional"] == pytest.approx((1000 + t1["pnl_usd"]) * 0.1)
+    tot = a["stats"]["total"]
+    assert tot["return_pct"] == pytest.approx(100 * tot["total_usd"] / 1000)
+    assert tot["max_dd_pct"] >= 0 and "sharpe" in tot
+    assert not any("ликвидации" in w for w in a["warnings"])
+    w = client.post("/api/backtest", json={"leverage": 100, "sl_pct": 1}).json()["warnings"]
+    assert any("ликвидации" in x for x in w)
+    for bad in ({"deposit": 0}, {"trade_pct": 0}, {"trade_pct": 101}, {"leverage": 0.5}, {"leverage": 126}):
+        assert client.post("/api/backtest", json=bad).status_code == 422
+
+
+def test_sharpe_math():
+    from app.service import sharpe_ratio
+    day = 86_400_000
+    mk = lambda d, p: {"entry_ts": d * day, "exit_ts": d * day + 1000, "pnl_usd": p}
+    assert sharpe_ratio([], 1000) is None
+    assert sharpe_ratio([mk(0, 10)], 1000) is None                       # один день
+    flat = [mk(d, 10) for d in range(10)]
+    assert sharpe_ratio(flat, 1000) is not None and sharpe_ratio(flat, 1000) > 10          # почти без разброса
+    mixed = [mk(d, 10 if d % 2 else -5) for d in range(40)]
+    s = sharpe_ratio(mixed, 1000)
+    assert s > 0
+    assert sharpe_ratio([mk(d, -x) for d, x in enumerate([5, 10] * 20)], 1000) < 0
