@@ -3,6 +3,11 @@ export type Only = 'local' | 'scalp' | null;
 
 /** Параметры, как их отдаёт и принимает бэкенд (fee/slip — доли, не проценты). */
 export interface Params {
+  /** актив (символ ccxt), по которому берутся свечи */
+  symbol: string;
+  /** источник метрик (id из SOURCES) и источник ликвидаций (null = из самого источника) */
+  source: string;
+  liq_source: string | null;
   side: Side;
   only: Only;
   local_min: number;
@@ -26,20 +31,40 @@ export interface Params {
   date_to: string | null;
 }
 
+export interface SourceInfo {
+  id: string;
+  label: string;
+  file: string;
+  exists: boolean;
+  count: number;
+  first_ts: number | null;
+  last_ts: number | null;
+  has_liq: boolean;
+}
+
+export interface AssetInfo {
+  symbol: string;
+  count: number;
+  first_ts: number | null;
+  last_ts: number | null;
+  tf: string;
+  file: string;
+  error: string | null;
+}
+
 export interface DataInfo {
-  signals: { count: number; first_ts: number; last_ts: number; has_liq: boolean; liq_matched: number | null; file: string; liq_file: string | null } | null;
-  candles: { count: number; first_ts: number; last_ts: number; tf: string; file: string } | null;
-  signals_error?: string;
-  candles_error?: string;
+  sources: SourceInfo[];
+  assets: AssetInfo[];
 }
 
 export interface AppConfig {
   defaults: Params;
   exchange: string;
+  symbols: string[];
   symbol: string;
   tf: string;
   max_bars: number;
-  timeframes: number[];
+  timeframes: Record<string, number[]>;
   data: DataInfo;
 }
 
@@ -93,6 +118,9 @@ export interface Stats {
 
 export interface BacktestResult {
   params: Params;
+  symbol: string;
+  source: { id: string; label: string; liq_source: string | null };
+  warnings: string[];
   range: { first_ts: number; last_ts: number; split_ts: number; candles_last_ts: number };
   stats: { total: Stats; long: Stats; short: Stats; first_half: Stats; second_half: Stats };
   trades: Trade[];
@@ -110,3 +138,15 @@ export interface CandlesResponse {
 
 /** 'auto' — бэкенд подбирает ТФ под масштаб; число — фиксированный ТФ в секундах */
 export type TfMode = 'auto' | number;
+
+/** Что хранится на сервере (backend/data/ui_state.json): последний выбор и настройки по каждой связке «источник + актив». */
+export interface Profile {
+  params: Partial<Params>;
+  tf: TfMode;
+}
+
+export interface UiState {
+  version?: number;
+  last?: { source?: string; symbol?: string };
+  profiles?: Record<string, Profile>;
+}

@@ -1,4 +1,4 @@
-import type { AppConfig, BacktestResult, CandlesResponse, DataInfo, Params } from './types';
+import type { AppConfig, BacktestResult, CandlesResponse, DataInfo, Params, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -26,8 +26,8 @@ export const runBacktest = (p: Params) =>
     body: JSON.stringify(p),
   });
 
-export const getCandles = (startSec?: number, endSec?: number, tfSec?: number, maxBars?: number) => {
-  const q = new URLSearchParams();
+export const getCandles = (symbol: string, startSec?: number, endSec?: number, tfSec?: number, maxBars?: number) => {
+  const q = new URLSearchParams({ symbol });
   if (tfSec != null) q.set('tf', String(tfSec));
   if (maxBars != null) q.set('max_bars', String(maxBars));
   if (startSec != null) q.set('start', String(Math.floor(startSec * 1000)));
@@ -35,4 +35,15 @@ export const getCandles = (startSec?: number, endSec?: number, tfSec?: number, m
   return request<CandlesResponse>('/api/candles?' + q.toString());
 };
 
-export const refreshCandles = () => request<DataInfo>('/api/candles/refresh', { method: 'POST' });
+export const refreshCandles = (symbol: string) =>
+  request<DataInfo>('/api/candles/refresh?' + new URLSearchParams({ symbol }).toString(), { method: 'POST' });
+
+export const getUiState = () => request<UiState>('/api/ui-state');
+
+export const putUiState = (state: UiState, keepalive = false) =>
+  request<{ ok: boolean }>('/api/ui-state', {
+    method: 'PUT',
+    keepalive,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state),
+  });

@@ -84,3 +84,18 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
   .app { height: auto; } main { display: flex; flex-direction: column; }
   .center { min-height: 820px; } .params { overflow: visible; }
 }
+
+.field.col { flex-direction: column; align-items: stretch; gap: 3px; }
+select.wide { width: 100%; }
+.src-info { color: var(--muted); font-size: 11px; margin: -2px 0 2px; } .warn-text { color: var(--warn); }
+
+/* подсказки «?» */
+.help { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 5px; border-radius: 50%;
+  border: 1px solid #3a4558; color: var(--muted); font-size: 10px; font-weight: 600; cursor: help; user-select: none; vertical-align: middle; flex: none; }
+.help:hover, .help:focus { color: #fff; border-color: var(--accent); background: var(--accent); outline: none; }
+.tooltip { position: fixed; z-index: 1000; width: 320px; max-height: 270px; overflow: auto; background: #1b2332; color: var(--text); border: 1px solid #34425a;
+  border-radius: 8px; padding: 9px 11px; font-size: 12px; line-height: 1.45; white-space: pre-line; box-shadow: 0 8px 28px rgba(0,0,0,.55); pointer-events: none; }
+.label { display: inline-flex; align-items: center; }
+.group-head { display: flex; align-items: center; } .group-head .group-title { width: auto; flex: none; }
+.field.check .label { color: var(--text); } .field.check input { margin: 0 6px 0 0; }
+.chart-bar .help { margin-left: 3px; }

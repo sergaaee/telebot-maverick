@@ -1,83 +1,108 @@
 # telebot-maverick
 
-Слушает закрытый Telegram-канал (от вашего аккаунта, через Telethon) и при
-`Deep Local >= 1.65` и `Deep Scalp >= 2.0` в двух отчётах подряд (`CONFIRM_REPORTS`) открывает лонг 0.1 BTC, если такой позиции ещё нет.
+Торговый бот по сигналам Telegram-ботов Maverick (метрики Deep Global / Local / Scalp), бэктест и интерактивный интерфейс
+для просмотра сделок на графике.
 
-    pip install -r requirements.txt
-    cp .env.example .env   # заполнить
-    python bot.py          # первый запуск спросит телефон и код из Telegram
+```
+backend/     Python: FastAPI-API для интерфейса, движок бэктеста, Telegram-бот и экспорт истории
+  app/core/    движок: симуляция сделок (backtest.py), точки входа и фильтры (entries.py), разбор сообщений (signal_parser.py)
+  app/         API: config.py (env), data.py (источники и свечи), service.py (запуск бэктеста), state.py, main.py
+  tools/       bot.py, trader.py (биржа), export_history.py (выгрузка истории из Telegram)
+  tests/       pytest: движок, API, экспорт
+  cli.py       консольная точка входа: serve | backtest | export | bot
+frontend/    React + TypeScript + Vite + lightweight-charts: график, сигналы, TP/SL, статистика
+e2e/         проверка интерфейса в настоящем браузере на синтетических данных
+```
 
-По умолчанию `DRY_RUN=true` — ордера только логируются. Поставьте `DRY_RUN=false` для реальной торговли.
-После входа выставляются стоп (−1%) и тейк (+3%) от цены входа (`SL_PCT`, `TP_PCT`), reduce-only. Если стоп выставить не удалось — позиция сразу закрывается.
+Пользовательские данные лежат в **корне репозитория** и не коммитятся: `history*.csv` (выгрузки), `data/` (кеш свечей и
+`ui_state.json` с вашим выбором), `*.session` (сессии Telegram), `trades.csv`.
 
-## Выгрузка истории
+## Быстрый старт
 
-    python export_history.py history.csv                                     # канал из TG_CHANNEL_ID
-    TG_SESSION=export python export_history.py history_binance.csv --chat 2119980662   # или --chat maverickBinance
+```bash
+# 1. Бэкенд
+cd backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env              # заполнить: источники, активы, параметры стратегии (+ Telegram/биржа для бота)
+python cli.py serve               # API на http://127.0.0.1:8000  (python cli.py serve --reload — с автоперезагрузкой)
 
-Источник — id (канал, бот, группа) или часть названия/username из ваших диалогов. Все сообщения от старых к новым:
-id, дата (UTC), Deep Global/Local/Scalp, ликвидации Long/Short (тыс. $) и полный текст.
+# 2. Интерфейс (в другом терминале)
+cd frontend
+cp .env.example .env              # необязательно
+npm install
+npm run dev                       # http://localhost:5173, /api проксируется на бэкенд
+```
 
-**Повторный запуск с тем же файлом дописывает только новые сообщения** (id больше максимального в файле), `--full` — выгрузить всё заново.
-Файл старого формата (без колонок ликвидаций) дописывается в его же колонках, ничего не ломая.
+Свечи: в интерфейсе кнопка **«Обновить свечи»** (или `python cli.py backtest …`) скачивает их с биржи в `data/`.
 
-## Бэктест
+## Конфигурация (`backend/.env`)
 
-    python backtest.py history.csv --exchange binanceusdm --symbol BTC/USDT:USDT
-    python backtest.py history.csv --sweep-long    # сетка порогов лонга (Local/Scalp >=), шорты выключены
-    python backtest.py history.csv --sweep-short   # сетка порогов шорта (Local/Scalp <=), лонги выключены
+Все важные значения — в одном файле `backend/.env` (шаблон — `backend/.env.example`). Им пользуются и API, и бэктест, и бот,
+поэтому интерфейс и бот не расходятся в параметрах.
 
-Скачивает минутные свечи с публичного API биржи (кеш в `data/`), прогоняет те же правила, что и бот,
-печатает статистику и пишет сделки в `trades.csv`. Опции: `--tp --sl --fee --slip --local-min --scalp-min`.
+| Группа | Переменные |
+|---|---|
+| Источники метрик | `SOURCES=coinbase,binance`, `SOURCE_<ID>_FILE`, `SOURCE_<ID>_LABEL`, `SOURCE_DEFAULT`, `LIQ_SOURCE`, `LIQ_MAX_AGE_H` |
+| Активы и свечи | `EXCHANGE`, `SYMBOLS`, `SYMBOL_DEFAULT`, `CANDLE_TF`, `CACHE_DIR`, `MAX_BARS` |
+| Сервер | `HOST`, `PORT`, `CORS_ORIGINS`, `STATE_FILE` |
+| Стратегия (умолчания) | `SIDE`, `ONLY`, `LOCAL_MIN`, `SCALP_MIN`, `SHORT_LOCAL_MAX`, `SHORT_SCALP_MAX`, `CONFIRM`, `TP_PCT`, `SL_PCT`, `ORDER_SIZE`, `FEE`, `SLIPPAGE` |
+| Фильтры (умолчания) | `COOL_METRIC`, `COOL_DROP`, `COOL_DECLINES`, `LIQ_HOURS`, `LIQ_FRAC`, `LIQ_PCT`, `COOLDOWN_H` |
+| Telegram и биржа (бот, экспорт) | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`, `TG_CHANNEL_ID`, `API_KEY`, `API_SECRET`, `API_PASSWORD`, `DRY_RUN` |
 
-## Binance
+Старый формат (`HISTORY_FILE`, `LIQ_FILE`, `SYMBOL`) тоже понимается. Корневой `.env` читается как запасной.
+
+## Интерфейс
+
+- **График** свечей с маркерами входа (▲ лонг / ▼ шорт) и выхода (TP / SL / REV / OPEN), линиями входа, тейка и стопа на время
+  сделки и, по желанию, пропущенными сигналами. Клик по сделке на графике или в таблице приближает к ней.
+- **Таймфрейм**: «Авто» подбирает под масштаб, либо фиксированный (1m … 1d). Листание и зум подгружают свечи; смена ТФ
+  сохраняет вид и выбранную сделку; ← / → — предыдущая/следующая сделка.
+- **Параметры**: актив, источник метрик (Coinbase / Binance Maverick) и отдельно источник ликвидаций, сторона, режим «только Local /
+  только Scalp», пороги, подтверждение, TP/SL, комиссия, проскальзывание, пауза после стопа, фильтры «остывание метрик» и
+  «ликвидации закончились», период. У каждого параметра значок **«?»** с описанием, как он работает (тексты — `frontend/src/helpTexts.ts`).
+- **Статистика**: итог, число сделок, winrate, profit factor, просадка, средние, серия убытков, время в позиции; разрезы по
+  сторонам и половинам истории; результаты по месяцам; кривая капитала; таблица сделок.
+- **Запоминание выбора**: последний источник и актив, а также все параметры и таймфрейм **по каждой связке «источник + актив»**
+  хранятся на сервере в `STATE_FILE` (по умолчанию `data/ui_state.json`). Переживают перезапуск бэкенда, браузера и работают из
+  любого браузера. «Сбросить к env» возвращает значения из `.env` для текущей связки.
+
+## Консоль
+
+Запускать из папки `backend/`: `python cli.py <команда>`. Рабочая папка при этом переключается в корень репозитория,
+поэтому `history.csv`, `trades.csv`, `data/` и сессии Telegram лежат там же, где и раньше.
+
+```bash
+python cli.py backtest history.csv --exchange binanceusdm --symbol BTC/USDT:USDT      # бэктест (флаги как раньше, --help)
+python cli.py backtest history.csv --sweep-long          # сетка порогов лонга; --sweep-short — шорта
+python cli.py backtest history.csv --sweep-cool --side short
+python cli.py backtest history.csv --liq-file history_binance.csv --sweep-liq
+python cli.py export history.csv                         # выгрузка канала из TG_CHANNEL_ID (дописывает только новые сообщения)
+python cli.py export history_binance.csv --chat 2119980662   # или --chat maverickBinance; --full — заново
+python cli.py bot                                        # Telegram-бот (DRY_RUN=true по умолчанию — только лог)
+```
+
+Подробности по правилам и флагам бэктеста: `python cli.py backtest --help` и `backend/app/core/entries.py`.
+
+### Правила симуляции (одни и те же в бэктесте, интерфейсе и боте)
+
+- **Лонг**: `Deep Local ≥ LOCAL_MIN` и `Deep Scalp ≥ SCALP_MIN` в `CONFIRM` отчётах подряд. **Шорт**: `Local ≤ SHORT_LOCAL_MAX`
+  и `Scalp ≤ SHORT_SCALP_MAX`. Режим `ONLY` оставляет одну метрику.
+- Вход по open первой свечи после последнего подтверждающего отчёта; SL / TP — проценты от цены входа; если в одной свече
+  достигнуты оба, считается стоп. Комиссия берётся с обеих сторон.
+- Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — **разворот** (закрытие + новая позиция).
+- Фильтры входа (только бэктест/интерфейс, бот их пока не использует): остывание метрик, «ликвидации закончились», пауза после стопа.
+
+### Бот и Binance
 
 `EXCHANGE=binanceusdm`, `SYMBOL=BTC/USDT:USDT`. Ключ API: Futures включён, вывод выключен, лучше с привязкой к IP.
 Аккаунт должен быть в **One-way** режиме (не Hedge) — иначе `reduceOnly` отклоняется. Обновляйте ccxt (`pip install -U ccxt`):
-Binance меняет API условных ордеров, старые версии могут не ставить SL/TP.
+Binance меняет API условных ордеров. Если SL/TP выставить не удалось — позиция сразу закрывается. `DRY_RUN=false` — реальная торговля.
 
-## Шорт
+## Тесты
 
-`Deep Local <= 1.05` и `Deep Scalp <= 0.65` (в тех же `CONFIRM_REPORTS` отчётах подряд) → шорт `ORDER_SIZE`,
-SL +1% / TP −3% от входа. Одновременно открыта максимум одна позиция по символу. Сигнал в ту же сторону пропускается;
-в противоположную — **разворот**: отменяются SL/TP старой позиции, она закрывается по рынку и открывается новая со своими SL/TP. В бэктесте шорты отключаются флагом `--no-short`.
-
-## Фильтры входа (свипы)
-
-Проверка гипотез «заходить после окончания ликвидаций» и «заходить, когда метрики начали остывать».
-Описание фильтров — в `entries.py`.
-
-    # ликвидации берём из maverickBinance, сигналы — из основного файла
-    python backtest.py history.csv --liq-file history_binance.csv --sweep-liq
-    python backtest.py history.csv --sweep-cool
-
-Свип печатает базу и все конфигурации с разбивкой на две половины истории и топ по нижней границе
-доверительного интервала winrate. Выбранную конфигурацию можно прогнать отдельно:
-
-    python backtest.py history.csv --liq-file history_binance.csv --liq-hours 6 --liq-frac 0.25 --liq-pct 75
-    python backtest.py history.csv --cool-metric scalp --cool-drop 0.2      # или --cool-declines 2
-
-Флаг `--explain` к одиночному прогону показывает, какие сделки базы фильтр убрал (дата, сторона, результат, ликвидации).
-
-Фильтры пока только в бэктесте; в бот их стоит переносить только после подтверждения на данных.
-
-**Контроль для фильтров:** `--sweep-cooldown` — та же база, но с простой паузой после стопа (1–48 ч) и без ликвидаций.
-Если пауза даёт тот же прирост, значит фильтр ликвидаций ничего своего не добавляет.
-
-## Режим одной метрики
-
-    python backtest.py history.csv --only local     # сигнал только по Deep Local (Scalp игнорируется)
-    python backtest.py history.csv --only scalp     # сигнал только по Deep Scalp
-    python backtest.py history.csv --only local --sweep-long --sweep-short
-
-Действует на лонг и шорт, на все свипы (пороги перебираются только по выбранной метрике), фильтры и `--explain`.
-Остальные пороги (`--local-min`, `--scalp-min`, `--short-*`) работают как раньше для выбранной метрики.
-
-## Лонг и шорт отдельно в фильтр-свипах
-
-    python backtest.py history.csv --sweep-cool --side long
-    python backtest.py history.csv --sweep-cool --side short
-    python backtest.py history.csv --sweep-liq --liq-file history_binance.csv --side short
-
-`--side long|short|both` (по умолчанию `both` — как раньше) работает для `--sweep-liq`, `--sweep-cool`, `--sweep-cooldown`,
-одиночных прогонов с фильтрами и `--explain`. Сочетается с `--only local|scalp`.
+```bash
+cd backend && python -m pytest -q          # движок, API, экспорт
+cd frontend && npm run typecheck && npm run build
+python e2e/run.py                          # браузерная проверка интерфейса (нужны playwright и собранный фронтенд, см. шапку файла)
+```

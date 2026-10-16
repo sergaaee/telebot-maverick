@@ -76,9 +76,29 @@ def _extra_stats(trades, span_ms):
 
 def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> dict:
     eff = effective_params(defaults, params)
-    sigs_all, _hit = store.signals()
-    candles_all = store.candles()
-    ts_all = store.candle_ts()
+    source_id = eff.get("source") or store.s.default_source
+    liq_id = eff.get("liq_source")
+    try:
+        store.source(source_id)
+        if liq_id:
+            store.source(liq_id)
+        sigs_all, _hit = store.signals(source_id, liq_id)
+    except KeyError as e:
+        raise ParamError(str(e.args[0]))
+    symbol = eff.get("symbol") or store.s.symbol
+    try:
+        candles_all = store.candles(symbol)
+        ts_all = store.candle_ts(symbol)
+    except KeyError as e:
+        raise ParamError(str(e.args[0]))
+    warnings = []
+    # отчёты раньше первой свечи в кеше симулировать нельзя (вход «по open первой свечи» был бы ложным)
+    early = sum(1 for s in sigs_all if s[0] < ts_all[0])
+    if early:
+        sigs_all = [s for s in sigs_all if s[0] >= ts_all[0]]
+        warnings.append(f"{early} отчётов раньше начала свечей отброшены — нажмите «Обновить свечи», чтобы докачать историю")
+    if not sigs_all:
+        raise ParamError("Нет отчётов внутри диапазона свечей")
 
     t0 = _day_ms(eff["date_from"]) if eff.get("date_from") else None
     t1 = _day_ms(eff["date_to"], end=True) if eff.get("date_to") else None
@@ -93,7 +113,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
 
     extra, liq, cool = _filters(eff)
     if liq and not any(s[3] is not None for s in sigs):
-        raise ParamError("Для фильтра ликвидаций нет данных: задайте LIQ_FILE или HISTORY_FILE с ликвидациями")
+        raise ParamError("Для фильтра ликвидаций нет данных: выберите «Ликвидации из» источник, где они есть")
 
     side = eff["side"]
     long_min, scalp_min = eff["local_min"], eff["scalp_min"]
@@ -146,8 +166,12 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
         d["pnl_usd"] += t["pnl_usd"]
         d["wins"] += t["pnl_usd"] > 0
 
+    src = store.source(source_id)
     return _clean({
         "params": eff,
+        "symbol": symbol,
+        "source": {"id": src.id, "label": src.label, "liq_source": liq_id if liq_id and liq_id != source_id else None},
+        "warnings": warnings,
         "range": {"first_ts": sigs[0][0], "last_ts": sigs[-1][0], "split_ts": split_ts, "candles_last_ts": candles[-1][0]},
         "stats": {
             "total": block(trades),

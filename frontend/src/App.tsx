@@ -1,32 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { getConfig, refreshCandles, runBacktest } from './api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getConfig, getUiState, putUiState, refreshCandles, runBacktest } from './api';
 import EquityChart from './components/EquityChart';
+import Help from './components/Help';
 import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
 import StatsPanel from './components/StatsPanel';
 import TradesTable from './components/TradesTable';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
-import type { AppConfig, BacktestResult, Params, TfMode } from './types';
+import { HELP } from './helpTexts';
+import type { AppConfig, BacktestResult, Params, TfMode, UiState } from './types';
 
-const STORAGE_KEY = 'maverick.params.v1';
-const TF_KEY = 'maverick.tf.v1';
+const profileKey = (source: string, symbol: string) => `${source}|${symbol}`;
 
-function loadSaved(): Partial<Params> | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Partial<Params>) : null;
-  } catch {
-    return null;
-  }
+/** Что запоминаем для связки «источник + актив»: все параметры, кроме самих source/symbol, и выбранный ТФ графика. */
+function splitProfile(p: Params): Partial<Params> {
+  const { source: _s, symbol: _y, ...rest } = p;
+  void _s;
+  void _y;
+  return rest;
 }
 
-function loadTf(): TfMode {
-  try {
-    const v = localStorage.getItem(TF_KEY);
-    return v && v !== 'auto' && Number(v) > 0 ? Number(v) : 'auto';
-  } catch {
-    return 'auto';
-  }
+/** Параметры для связки: умолчания из env, поверх них сохранённый профиль (с отбраковкой исчезнувших источников). */
+function loadProfile(cfg: AppConfig, source: string, symbol: string, st: UiState): { params: Params; tf: TfMode } {
+  const prof = st.profiles?.[profileKey(source, symbol)];
+  const saved: Partial<Params> = { ...(prof?.params ?? {}) };
+  if (saved.liq_source && !cfg.data.sources.some((s) => s.id === saved.liq_source)) delete saved.liq_source;
+  return { params: { ...cfg.defaults, ...saved, source, symbol }, tf: prof?.tf ?? 'auto' };
 }
 
 export default function App() {
@@ -42,47 +41,115 @@ export default function App() {
   const [showSkipped, setShowSkipped] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
-  const [tfMode, setTfMode] = useState<TfMode>(loadTf);
+  const [tfMode, setTfMode] = useState<TfMode>('auto');
   const [effTf, setEffTf] = useState<{ tf: number; truncated: boolean } | null>(null);
 
+  const uiState = useRef<UiState>({}); // последнее известное состояние, хранящееся на сервере
+  const ready = useRef(false);
+  const runSeq = useRef(0);
+  const leaving = useRef(false); // страница закрывается: прерванные запросы сохранения — не ошибка
+
+  // ---------- сохранение выбора на сервере ----------
+  const buildState = useCallback((p: Params, tf: TfMode): UiState => {
+    const st = uiState.current;
+    return {
+      version: 1,
+      last: { source: p.source, symbol: p.symbol },
+      profiles: { ...(st.profiles ?? {}), [profileKey(p.source, p.symbol)]: { params: splitProfile(p), tf } },
+    };
+  }, []);
+
+  const saveNow = useCallback(
+    (p: Params, tf: TfMode, keepalive = false) => {
+      const st = buildState(p, tf);
+      uiState.current = st;
+      putUiState(st, keepalive).catch((e) => {
+        if (!leaving.current) console.warn('не удалось сохранить состояние', e);
+      });
+    },
+    [buildState],
+  );
+
+  useEffect(() => {
+    if (!params || !ready.current) return;
+    const t = setTimeout(() => saveNow(params, tfMode), 600);
+    return () => clearTimeout(t);
+  }, [params, tfMode, saveNow]);
+
+  useEffect(() => {
+    // не потерять последние правки при закрытии вкладки
+    const flush = () => {
+      leaving.current = true;
+      if (params && ready.current) saveNow(params, tfMode, true);
+    };
+    window.addEventListener('pagehide', flush);
+    return () => window.removeEventListener('pagehide', flush);
+  }, [params, tfMode, saveNow]);
+
+  // ---------- расчёт ----------
   const run = useCallback(async (p: Params) => {
+    const seq = ++runSeq.current;
     setLoading(true);
     setError(null);
     try {
       const r = await runBacktest(p);
+      if (seq !== runSeq.current) return; // пока считали, пользователь переключил источник/актив
       setResult(r);
       setSelected(null);
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
-      } catch {
-        /* localStorage может быть недоступен */
-      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (seq === runSeq.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (seq === runSeq.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    getConfig()
-      .then((c) => {
+    Promise.all([getConfig(), getUiState().catch(() => ({}) as UiState)])
+      .then(([c, st]) => {
+        uiState.current = st;
         setConfig(c);
-        const p = { ...c.defaults, ...(loadSaved() ?? {}) } as Params;
+        // последний выбор: источник и актив, если они всё ещё есть в конфиге
+        const source = c.data.sources.some((s) => s.id === st.last?.source) ? st.last!.source! : c.defaults.source;
+        const symbol = c.symbols.includes(st.last?.symbol ?? '') ? st.last!.symbol! : c.defaults.symbol;
+        const { params: p, tf } = loadProfile(c, source, symbol, st);
         setParams(p);
+        setTfMode(tf);
+        ready.current = true;
         void run(p);
       })
       .catch((e) => setError(`Не удалось связаться с бэкендом: ${e instanceof Error ? e.message : e}`));
   }, [run]);
 
+  const switchTo = (t: { source?: string; symbol?: string }) => {
+    if (!params || !config) return;
+    saveNow(params, tfMode); // текущие настройки остаются за прежней связкой
+    const { params: np, tf } = loadProfile(config, t.source ?? params.source, t.symbol ?? params.symbol, uiState.current);
+    setParams(np);
+    setTfMode(tf);
+    setResult(null);
+    setSelected(null);
+    setEffTf(null);
+    setChartError(null);
+    void run(np);
+  };
+
+  const resetParams = () => {
+    if (!params || !config) return;
+    const np = { ...config.defaults, source: params.source, symbol: params.symbol };
+    setParams(np);
+    setTfMode('auto');
+    void run(np);
+  };
+
   const onRefresh = async () => {
+    if (!params) return;
     setRefreshing(true);
     setError(null);
     try {
-      const data = await refreshCandles();
+      const data = await refreshCandles(params.symbol);
       setConfig((c) => (c ? { ...c, data } : c));
       setReloadKey((k) => k + 1);
-      if (params) void run(params);
+      void run(params);
     } catch (e) {
       setError(`Не удалось докачать свечи: ${e instanceof Error ? e.message : e}`);
     } finally {
@@ -90,15 +157,7 @@ export default function App() {
     }
   };
 
-  const changeTf = (m: TfMode) => {
-    setTfMode(m);
-    try {
-      localStorage.setItem(TF_KEY, String(m));
-    } catch {
-      /* ignore */
-    }
-  };
-
+  // ---------- сделки: выбор и навигация ----------
   const selectTrade = useCallback((n: number) => {
     setSelected(n);
     setFocusKey((k) => k + 1);
@@ -128,12 +187,15 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [step]);
 
-  const dataRange = useMemo(() => {
-    const c = config?.data.candles;
-    return c && config ? { first: c.first_ts / 1000, last: c.last_ts / 1000, nativeTf: tfSeconds(config.tf) } : null;
-  }, [config]);
-
-  const d = config?.data;
+  // ---------- производные ----------
+  const symbol = params?.symbol ?? config?.symbol ?? '';
+  const asset = config?.data.assets.find((a) => a.symbol === symbol);
+  const dataRange = useMemo(
+    () => (asset && asset.count > 0 && config ? { first: asset.first_ts! / 1000, last: asset.last_ts! / 1000, nativeTf: tfSeconds(config.tf) } : null),
+    [asset, config],
+  );
+  const curSrc = config?.data.sources.find((s) => s.id === (params?.source ?? config.defaults.source));
+  const tfOptions = (config && config.timeframes[symbol]) || [];
 
   return (
     <div className="app">
@@ -141,22 +203,23 @@ export default function App() {
         <h1>Maverick <span>· бэктест</span></h1>
         {config && (
           <div className="chips">
-            <span className="chip">{config.exchange} · {config.symbol} · {config.tf}</span>
-            {d?.signals && <span className="chip">отчётов {d.signals.count.toLocaleString('ru-RU')} · {fmtDate(d.signals.first_ts)} … {fmtDate(d.signals.last_ts)}</span>}
-            {d?.candles && <span className="chip">свечей {d.candles.count.toLocaleString('ru-RU')} · до {fmtDate(d.candles.last_ts)}</span>}
-            {d?.signals && !d.signals.has_liq && <span className="chip warn">нет данных о ликвидациях</span>}
-            <button type="button" className="ghost" disabled={refreshing} onClick={onRefresh} title="Скачать/докачать свечи с биржи">
+            <span className="chip">{config.exchange} · {symbol} · {config.tf}</span>
+            {curSrc && curSrc.count > 0 && <span className="chip">{curSrc.label} · отчётов {curSrc.count.toLocaleString('ru-RU')} · {fmtDate(curSrc.first_ts!)} … {fmtDate(curSrc.last_ts!)}</span>}
+            {asset && asset.count > 0 && <span className="chip">свечей {asset.count.toLocaleString('ru-RU')} · до {fmtDate(asset.last_ts!)}</span>}
+            <button type="button" className="ghost" disabled={refreshing} onClick={onRefresh}>
               {refreshing ? 'Качаю свечи…' : 'Обновить свечи'}
             </button>
+            <Help text={HELP.refresh} />
           </div>
         )}
       </header>
 
       {error && <div className="banner error">{error}</div>}
-      {d?.signals_error && <div className="banner error">{d.signals_error}</div>}
-      {(chartError || d?.candles_error) && (
+      {(result?.warnings ?? []).map((w) => <div className="banner warn" key={w}>{w}</div>)}
+      {config && !config.data.sources.some((s) => s.exists) && <div className="banner error">Нет ни одного файла истории — выгрузите историю (python cli.py export …) и проверьте SOURCE_*_FILE в backend/.env</div>}
+      {(chartError || asset?.error) && (
         <div className="banner warn">
-          {chartError ?? d?.candles_error}
+          {chartError ?? asset?.error}
           <button type="button" className="ghost" disabled={refreshing} onClick={onRefresh}>
             {refreshing ? 'Качаю…' : 'Скачать свечи'}
           </button>
@@ -165,29 +228,40 @@ export default function App() {
 
       <main>
         {params && config ? (
-          <ParamsPanel params={params} defaults={config.defaults} loading={loading} onChange={setParams} onRun={() => void run(params)} />
+          <ParamsPanel
+            params={params}
+            sources={config.data.sources}
+            assets={config.data.assets}
+            loading={loading}
+            onChange={setParams}
+            onRun={() => void run(params)}
+            onSwitch={switchTo}
+            onReset={resetParams}
+          />
         ) : (
           <aside className="params"><div className="empty">{error ? '' : 'Загрузка…'}</div></aside>
         )}
 
         <section className="center">
           <div className="chart-bar">
-            <div className="seg" title="Таймфрейм свечей">
-              <button type="button" className={tfMode === 'auto' ? 'on' : ''} onClick={() => changeTf('auto')}>
+            <div className="seg">
+              <button type="button" className={tfMode === 'auto' ? 'on' : ''} onClick={() => setTfMode('auto')}>
                 Авто{tfMode === 'auto' && effTf ? ` · ${tfLabel(effTf.tf)}` : ''}
               </button>
-              {(config?.timeframes ?? []).map((t) => (
-                <button type="button" key={t} className={tfMode === t ? 'on' : ''} onClick={() => changeTf(t)}>
+              {tfOptions.map((t) => (
+                <button type="button" key={t} className={tfMode === t ? 'on' : ''} onClick={() => setTfMode(t)}>
                   {tfLabel(t)}
                 </button>
               ))}
             </div>
+            <Help text={HELP.tf} />
             <div className="nav">
               <button type="button" className="ghost" onClick={() => step(-1)} disabled={!trades.length} title="Предыдущая сделка (←)">◀</button>
               <button type="button" className="ghost" onClick={() => step(1)} disabled={!trades.length} title="Следующая сделка (→)">▶</button>
             </div>
-            <label><input type="checkbox" checked={showLevels} onChange={(e) => setShowLevels(e.target.checked)} /> уровни TP / SL</label>
-            <label><input type="checkbox" checked={showSkipped} onChange={(e) => setShowSkipped(e.target.checked)} /> пропущенные сигналы</label>
+            <Help text={HELP.nav} />
+            <label><input type="checkbox" checked={showLevels} onChange={(e) => setShowLevels(e.target.checked)} /> уровни TP / SL<Help text={HELP.levels} /></label>
+            <label><input type="checkbox" checked={showSkipped} onChange={(e) => setShowSkipped(e.target.checked)} /> пропущенные сигналы<Help text={HELP.skipped} /></label>
             <span className="legend">
               <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="muted">OPEN</b>
             </span>
@@ -211,6 +285,7 @@ export default function App() {
               selected={selected}
               onSelect={selectTrade}
               focusKey={focusKey}
+              symbol={symbol}
               tfMode={tfMode}
               dataRange={dataRange}
               reloadKey={reloadKey}

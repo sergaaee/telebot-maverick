@@ -25,6 +25,8 @@ interface Props {
   onSelect: (n: number) => void;
   /** меняется при каждом явном выборе сделки (в том числе повторном) — график приближается к ней */
   focusKey: number;
+  /** актив, свечи которого показываем */
+  symbol: string;
   /** 'auto' — бэкенд подбирает ТФ под масштаб; число — фиксированный ТФ (сек) */
   tfMode: TfMode;
   /** первая/последняя свеча в кеше (сек) и родной таймфрейм (сек) — чтобы не запрашивать лишнее */
@@ -180,7 +182,7 @@ export default function PriceChart(props: Props) {
     const seq = ++loadSeq.current;
     const fixed = fixedTf();
     try {
-      const r = await getCandles(win?.from, win?.to, fixed ?? undefined, fixed ? FIXED_MAX_BARS : undefined);
+      const r = await getCandles(propsRef.current.symbol, win?.from, win?.to, fixed ?? undefined, fixed ? FIXED_MAX_BARS : undefined);
       if (seq !== loadSeq.current || !candle.current || !chart.current) return;
       tf.current = r.tf;
       candle.current.setData(r.bars.map((b) => ({ time: b[0] as UTCTimestamp, open: b[1], high: b[2], low: b[3], close: b[4] })));
@@ -307,6 +309,16 @@ export default function PriceChart(props: Props) {
   useEffect(() => {
     if (props.reloadKey > 0 && candle.current) void initialLoad();
   }, [props.reloadKey]);
+
+  // смена актива: другие свечи — начинаем с обзора всего периода
+  const firstSymbol = useRef(true);
+  useEffect(() => {
+    if (firstSymbol.current) {
+      firstSymbol.current = false;
+      return;
+    }
+    if (candle.current) void initialLoad();
+  }, [props.symbol]);
 
   // смена таймфрейма: остаёмся на выбранной сделке, а если её нет — на текущем участке времени
   useEffect(() => {

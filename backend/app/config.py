@@ -28,14 +28,42 @@ def _path(name, default):
 
 
 @dataclass(frozen=True)
+class Source:
+    """Источник метрик: файл истории одного Telegram-бота/канала."""
+    id: str
+    label: str
+    file: Path
+
+
+def _load_sources():
+    """SOURCES=coinbase,binance + SOURCE_<ID>_FILE / SOURCE_<ID>_LABEL. Для совместимости: HISTORY_FILE (+ LIQ_FILE)."""
+    ids = [x.strip().lower() for x in (_opt("SOURCES") or "").split(",") if x.strip()]
+    out = {}
+    for i in ids:
+        f = _opt(f"SOURCE_{i.upper()}_FILE")
+        if f:
+            p = Path(f)
+            out[i] = Source(i, _opt(f"SOURCE_{i.upper()}_LABEL") or i, p if p.is_absolute() else (BACKEND_DIR / p).resolve())
+    legacy_liq = None
+    if not out:                                   # старый формат: один файл (+ отдельный файл ликвидаций)
+        out["default"] = Source("default", "История", _path("HISTORY_FILE", "../history.csv"))
+        if _opt("LIQ_FILE"):
+            out["liq"] = Source("liq", "Ликвидации", _path("LIQ_FILE", _opt("LIQ_FILE")))
+            legacy_liq = "liq"
+    return out, legacy_liq
+
+
+@dataclass(frozen=True)
 class Settings:
-    history_file: Path
-    liq_file: "Path | None"
+    sources: dict
+    default_source: str
     liq_max_age_h: float
     exchange: str
-    symbol: str
+    symbol: str                 # актив по умолчанию
+    symbols: list               # доступные активы (SYMBOLS)
     candle_tf: str
     cache_dir: Path
+    state_file: Path
     max_bars: int
     host: str
     port: int
@@ -44,10 +72,21 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    liq = _opt("LIQ_FILE")
+    sources, legacy_liq = _load_sources()
+    default_source = (_opt("SOURCE_DEFAULT") or "").lower()
+    if default_source not in sources:
+        default_source = next(iter(sources))
+    liq_source = (_opt("LIQ_SOURCE") or legacy_liq or "").lower() or None
+    if liq_source not in sources:
+        liq_source = None
+    symbols = [x.strip() for x in (_opt("SYMBOLS") or _opt("SYMBOL") or "BTC/USDT:USDT").split(",") if x.strip()]
+    symbol = _opt("SYMBOL_DEFAULT") or _opt("SYMBOL") or symbols[0]
+    if symbol not in symbols:
+        symbols.insert(0, symbol)
     side = (_opt("SIDE") or "both").lower()
     only = (_opt("ONLY") or "").lower() or None
     defaults = dict(
+        source=default_source, liq_source=liq_source, symbol=symbol,
         side=side, only=only,
         local_min=_num("LOCAL_MIN", 1.85), scalp_min=_num("SCALP_MIN", 1.25),
         short_local_max=_num("SHORT_LOCAL_MAX", 0.7), short_scalp_max=_num("SHORT_SCALP_MAX", 1.2),
@@ -59,13 +98,15 @@ def load_settings() -> Settings:
         cooldown_h=_num("COOLDOWN_H", 0.0),
     )
     return Settings(
-        history_file=_path("HISTORY_FILE", "../history.csv"),
-        liq_file=_path("LIQ_FILE", liq) if liq else None,
+        sources=sources,
+        default_source=default_source,
         liq_max_age_h=_num("LIQ_MAX_AGE_H", 3.0),
         exchange=_opt("EXCHANGE") or "binanceusdm",
-        symbol=_opt("SYMBOL") or "BTC/USDT:USDT",
+        symbol=symbol,
+        symbols=symbols,
         candle_tf=_opt("CANDLE_TF") or "1m",
         cache_dir=_path("CACHE_DIR", "../data"),
+        state_file=_path("STATE_FILE", "../data/ui_state.json"),
         max_bars=_num("MAX_BARS", 3000, int),
         host=_opt("HOST") or "127.0.0.1",
         port=_num("PORT", 8000, int),

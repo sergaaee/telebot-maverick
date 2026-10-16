@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field
 class BacktestParams(BaseModel):
     """Любое поле можно не передавать — тогда берётся значение из env (backend/.env).
     Явный null отключает необязательный параметр (фильтры, --only)."""
+    symbol: Optional[str] = Field(None, max_length=40)
+    source: Optional[str] = Field(None, max_length=40)
+    liq_source: Optional[str] = Field(None, max_length=40)
     side: Optional[Literal["both", "long", "short"]] = None
     only: Optional[Literal["local", "scalp"]] = None
     local_min: Optional[float] = Field(None, ge=-10, le=10)
