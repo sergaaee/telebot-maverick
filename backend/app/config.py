@@ -22,20 +22,21 @@ def _num(name, default, cast=float):
     return cast(v) if v is not None else default
 
 
-def _tps():
-    """TP_LEVELS="3:50,6:50" (расстояние % : доля позиции %) или один тейк из TP_PCT на 100%."""
-    raw = _opt("TP_LEVELS")
+def _tps(prefix="", default_pct=6.0):
+    """TP_LEVELS="3:50,6:50" (расстояние % : доля позиции %) или один тейк из TP_PCT на 100%. prefix="TOP_" — для топ-коинов."""
+    name = f"{prefix}TP_LEVELS"
+    raw = _opt(name)
     if not raw:
-        return [{"pct": _num("TP_PCT", 6.0), "share": 100.0}]
+        return [{"pct": _num(f"{prefix}TP_PCT", default_pct), "share": 100.0}]
     try:
         levels = [{"pct": float(a), "share": float(b)} for a, b in (x.split(":") for x in raw.split(","))]
     except ValueError:
-        raise SystemExit(f"TP_LEVELS='{raw}': ожидается 'расстояние%:доля%,...', например 3:50,6:50")
+        raise SystemExit(f"{name}='{raw}': ожидается 'расстояние%:доля%,...', например 3:50,6:50")
     from app.core.backtest import normalize_tps       # одна и та же проверка для env, API и консоли
     try:
         normalize_tps([(l["pct"], l["share"]) for l in levels])
     except ValueError as e:
-        raise SystemExit(f"TP_LEVELS='{raw}': {e}")
+        raise SystemExit(f"{name}='{raw}': {e}")
     return levels
 
 
@@ -119,6 +120,11 @@ def load_settings() -> Settings:
         cool_drop=_num("COOL_DROP", None), cool_declines=_num("COOL_DECLINES", None, int),
         liq_hours=_num("LIQ_HOURS", None), liq_frac=_num("LIQ_FRAC", 0.25), liq_pct=_num("LIQ_PCT", 0.0),
         cooldown_h=_num("COOLDOWN_H", 0.0),
+        # топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии
+        top_enabled=_bool("TOP_ENABLED", True), top_side=(_opt("TOP_SIDES") or "long").lower(),
+        top_tps=_tps("TOP_", 5.0), top_be_after_tp1=_bool("TOP_BE_AFTER_TP1"), top_sl_pct=_num("TOP_SL_PCT", 3.0),
+        top_size=_num("TOP_SIZE_USD", 100.0), top_fee=_num("TOP_FEE", 0.0005), top_slip=_num("TOP_SLIPPAGE", 0.0),
+        top_days=_num("TOP_DAYS", 3.0), top_min_value=_num("TOP_MIN_VALUE", 0.0),
     )
     return Settings(
         sources=sources,

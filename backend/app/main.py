@@ -19,8 +19,8 @@ class AssetIn(BaseModel):
     symbol: str = Field(min_length=1, max_length=40, description="актив: ETH, ETHUSDT, ETH/USDT или ETH/USDT:USDT")
 
 
-def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None" = None, runner=None) -> FastAPI:
-    """markets и runner подменяются в тестах (без обращения к бирже)."""
+def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None" = None, runner=None, top_runner=None) -> FastAPI:
+    """markets, runner и top_runner подменяются в тестах (без обращения к бирже)."""
     s = settings or load_settings()
     store = DataStore(s)
     markets = markets or MarketsCache(lambda: ccxt_swap_symbols(s.exchange))
@@ -28,7 +28,37 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     def default_runner(symbol, progress):
         backtest.fetch_candles(s.exchange, symbol, s.candle_tf, store.first_signal_ts(), str(s.cache_dir), progress=progress)
 
-    jobs = JobManager(runner or default_runner, on_done=lambda job: store.reload_candles(job.symbol))
+    def default_top_runner(job, progress):
+        """Качает окна свечей топ-коинов; сбой по одной монете не останавливает остальные (итог — в job.warning)."""
+        windows = job.payload["windows"]
+        job.total, failed, count = len(windows), [], 0
+        for sym, ws in windows.items():
+            try:
+                for a, b in ws:
+                    count += backtest.fetch_window(s.exchange, sym, s.candle_tf, a, b, str(s.cache_dir),
+                                                   progress=lambda n, ts, base=count: progress(base + n, ts))
+            except BaseException as e:
+                failed.append(f"{sym}: {str(e) or type(e).__name__}")
+            job.done += 1
+        if failed and len(failed) == len(windows):
+            raise RuntimeError("; ".join(failed))
+        if failed:
+            job.warning = "Не удалось скачать: " + "; ".join(failed)
+
+    def on_done(job):
+        if job.kind == "top":
+            for sym in job.payload.get("windows", {}):
+                try:
+                    store.reload_candles(sym)
+                except KeyError:
+                    pass
+        else:
+            store.reload_candles(job.symbol)
+
+    def available_fn():
+        return markets.symbols()
+
+    jobs = JobManager(runner or default_runner, on_done=on_done, top_runner=top_runner or default_top_runner)
     app = FastAPI(title="telebot-maverick backtest viewer")
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["*"], allow_headers=["*"])
     app.state.settings, app.state.store, app.state.jobs = s, store, jobs
@@ -102,7 +132,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         """Убирает из списка актив, добавленный из интерфейса (файл со свечами остаётся на диске)."""
         if symbol == s.symbol:
             raise HTTPException(422, "Актив по умолчанию убрать нельзя")
-        if jobs.active(symbol):
+        if jobs.active(symbol, kind="candles"):
             raise HTTPException(409, "По активу идёт загрузка свечей — дождитесь её завершения")
         if not store.remove_symbol(symbol):
             raise HTTPException(404, "Такого добавленного актива нет (активы из SYMBOLS в .env убираются только в .env)")
@@ -124,11 +154,29 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     @app.post("/api/backtest")
     def run(params: BacktestParams):
         try:
-            return run_backtest(store, s.defaults, params)
+            return run_backtest(store, s.defaults, params, available_fn=available_fn)
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
         except ParamError as e:
             raise HTTPException(422, str(e))
+
+    @app.post("/api/top/download")
+    def top_download(params: BacktestParams):
+        """Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + TOP_DAYS) для текущих параметров."""
+        try:
+            res = run_backtest(store, s.defaults, params, available_fn=available_fn)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        except ParamError as e:
+            raise HTTPException(422, str(e))
+        items = (res["top"].get("pending") or {}).get("items") or []
+        if not items:
+            return {"job": None, "created": False, "windows": 0}
+        windows = {}
+        for it in items:
+            windows.setdefault(it["symbol"], []).append([it["from"], it["to"]])
+        job, created = jobs.submit("top", kind="top", label=f"Топ-коины: {len(windows)} монет", payload={"windows": windows}, total=len(windows))
+        return {"job": job.to_dict(), "created": created, "windows": len(items)}
 
     # ---- состояние интерфейса (выбранные источник/актив/ТФ и параметры по каждой связке) хранится на сервере ----
     @app.get("/api/ui-state")

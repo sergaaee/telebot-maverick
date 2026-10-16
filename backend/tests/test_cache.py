@@ -67,3 +67,33 @@ def test_asset_listed_after_signals_start_is_not_redownloaded_every_time(tmp_pat
     Fake.calls.clear()
     c2 = backtest.fetch_candles("binanceusdm", "NEW/USDT:USDT", "1m", since, cache_dir=str(tmp_path))
     assert len(Fake.calls) <= 2 and c2[0][0] == listing and len(c2) >= len(c1) - 1       # докачан только хвост, а не вся история
+
+
+def test_fetch_window_downloads_only_missing_parts(tmp_path, monkeypatch):
+    monkeypatch.setattr(ccxt, "binanceusdm", Fake, raising=False)
+    monkeypatch.setattr(backtest.time, "sleep", lambda s: None)
+    base = (int(time.time() * 1000) // M - 20000) * M
+    sym, path = "TIA/USDT:USDT", None
+    n1 = backtest.fetch_window("binanceusdm", sym, "1m", base, base + 1999 * M, cache_dir=str(tmp_path))
+    assert n1 == 2000 and len(Fake.calls) >= 2
+    path = backtest.cache_path("binanceusdm", sym, "1m", str(tmp_path))
+    assert backtest.covered_intervals(path, M) == [(base, base + 1999 * M)]
+    Fake.calls.clear()
+    assert backtest.fetch_window("binanceusdm", sym, "1m", base + 100 * M, base + 900 * M, cache_dir=str(tmp_path)) == 0     # уже есть
+    assert Fake.calls == []
+    # второе окно с разрывом: докачивается только оно, карта окон хранит два интервала, свечи между ними не выдумываются
+    far = base + 10000 * M
+    assert backtest.fetch_window("binanceusdm", sym, "1m", far, far + 499 * M, cache_dir=str(tmp_path)) == 500
+    assert backtest.covered_intervals(path, M) == [(base, base + 1999 * M), (far, far + 499 * M)]
+    assert backtest.missing_intervals(backtest.covered_intervals(path, M), base, far + 499 * M, M) == [(base + 2000 * M, far - M)]
+    # пересекающееся окно: качается только недостающий хвост
+    Fake.calls.clear()
+    assert backtest.fetch_window("binanceusdm", sym, "1m", base + 1500 * M, base + 2499 * M, cache_dir=str(tmp_path)) == 500
+    assert backtest.covered_intervals(path, M)[0] == (base, base + 2499 * M)
+    # будущее окно обрезается по последней завершённой свече
+    now = int(time.time() * 1000)
+    got = backtest.fetch_window("binanceusdm", sym, "1m", now - 5 * M, now + 3 * 86_400_000, cache_dir=str(tmp_path))
+    assert 3 <= got <= 6
+    assert max(c[0] for c in backtest.read_cache(path)) <= backtest.last_closed_start(M)
+    # склейка соседних интервалов
+    assert backtest.merge_intervals([(0, 5 * M), (6 * M, 9 * M), (20 * M, 30 * M)], M) == [(0, 9 * M), (20 * M, 30 * M)]

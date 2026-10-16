@@ -19,7 +19,7 @@ from bisect import bisect_right, insort
 from collections import deque
 from datetime import datetime
 
-from .signal_parser import parse_liquidation, should_long, should_short
+from .signal_parser import parse_liquidation, parse_top_coin, should_long, should_short
 
 
 def _ts(s):
@@ -27,7 +27,8 @@ def _ts(s):
 
 
 def load_signals(path):
-    """[(ts, local, scalp, liq_long_k, liq_short_k)] — ликвидации из колонок liq_*_k или из текста, иначе None."""
+    """[(ts, local, scalp, liq_long_k, liq_short_k, top_coin, top_value)] — ликвидации из колонок liq_*_k или из текста, иначе None;
+    топ-коин (тикер как в отчёте и его значение) берётся из текста отчёта, если он там есть."""
     out = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
@@ -40,7 +41,9 @@ def load_signals(path):
                 liq = parse_liquidation(r.get("text") or "")
                 if liq:
                     ll, ls = liq["long"], liq["short"]
-            out.append((_ts(r["date_utc"]), float(r["deep_local"]), float(r["deep_scalp"]), ll, ls))
+            top = parse_top_coin(r.get("text") or "")
+            out.append((_ts(r["date_utc"]), float(r["deep_local"]), float(r["deep_scalp"]), ll, ls,
+                        top["coin"] if top else None, top["value"] if top else None))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -53,10 +56,10 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     for s in signals:
         k = bisect_right(keys, s[0]) - 1
         if k >= 0 and s[0] - keys[k] <= max_age_h * 3.6e6:
-            out.append((*s[:3], series[k][1], series[k][2]))
+            out.append((*s[:3], series[k][1], series[k][2], *s[5:]))
             hit += 1
         else:
-            out.append((*s[:3], None, None))
+            out.append((*s[:3], None, None, *s[5:]))
     return out, hit
 
 

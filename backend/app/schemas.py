@@ -37,3 +37,14 @@ class BacktestParams(BaseModel):
     liq_pct: Optional[float] = Field(None, ge=0, le=100)
     date_from: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     date_to: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    # топ-коины
+    top_enabled: Optional[bool] = None
+    top_side: Optional[Literal["both", "long", "short"]] = None
+    top_tps: Optional[list[TpLevel]] = Field(None, min_length=1, max_length=3)
+    top_be_after_tp1: Optional[bool] = None
+    top_sl_pct: Optional[float] = Field(None, gt=0, le=100)
+    top_size: Optional[float] = Field(None, gt=0, le=1e9)
+    top_fee: Optional[float] = Field(None, ge=0, le=0.05)
+    top_slip: Optional[float] = Field(None, ge=0, le=0.05)
+    top_days: Optional[float] = Field(None, gt=0, le=30)
+    top_min_value: Optional[float] = Field(None, ge=0, le=1000)

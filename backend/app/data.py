@@ -128,10 +128,37 @@ class DataStore:
         return os.path.exists(backtest.cache_path(self.s.exchange, symbol, self.s.candle_tf, str(self.s.cache_dir)))
 
     def _symbol(self, symbol):
+        """Актив из списка или любая монета, свечи которой уже скачаны (топ-коины не добавляются в список активов)."""
         symbol = symbol or self.s.symbol
-        if symbol not in self.symbols():
+        if symbol not in self.symbols() and not self.has_candles(symbol):
             raise KeyError(f"Неизвестный актив '{symbol}'. Доступны: {', '.join(self.symbols())}")
         return symbol
+
+    def cached_symbols(self):
+        """Символы, для которых в кеше есть файл свечей (на случай, когда список рынков биржи недоступен)."""
+        prefix, suffix = f"{self.s.exchange}_", f"_{self.s.candle_tf}.csv"
+        out = set()
+        try:
+            names = os.listdir(self.s.cache_dir)
+        except OSError:
+            return out
+        for n in names:
+            if n.startswith(prefix) and n.endswith(suffix):
+                core = n[len(prefix):-len(suffix)]            # BTCUSDT_USDT
+                base, _, settle = core.rpartition("_")
+                for q in ("USDT", "USDC"):
+                    if base.endswith(q) and settle == q:
+                        out.add(f"{base[:-len(q)]}/{q}:{q}")
+        return out
+
+    def coin_covered(self, symbol):
+        """Скачанные интервалы свечей монеты [(начало, конец)], мс."""
+        path = backtest.cache_path(self.s.exchange, symbol, self.s.candle_tf, str(self.s.cache_dir))
+        tf_ms = backtest.tf_to_ms(self.s.candle_tf)
+        return backtest.covered_intervals(path, tf_ms)
+
+    def coin_candles(self, symbol):
+        return self.candles(symbol)
 
     def candle_path(self, symbol=None):
         return backtest.cache_path(self.s.exchange, self._symbol(symbol), self.s.candle_tf, str(self.s.cache_dir))

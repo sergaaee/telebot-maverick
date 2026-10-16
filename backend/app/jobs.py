@@ -9,7 +9,13 @@ from dataclasses import asdict, dataclass, field
 @dataclass
 class Job:
     id: int
-    symbol: str
+    symbol: str                     # для kind="top" — служебный ключ "top"
+    kind: str = "candles"           # candles — свечи актива | top — окна свечей топ-коинов
+    label: str = ""                 # подпись для уведомлений (для top)
+    payload: dict = field(default_factory=dict, repr=False)
+    total: int = 0                  # сколько всего единиц работы (для top — монет)
+    done: int = 0                   # сколько единиц готово
+    warning: "str | None" = None    # задача завершена, но часть работы не удалась
     status: str = "queued"          # queued | running | done | error
     count: int = 0                  # сколько свечей скачано к этому моменту
     last_ts: "int | None" = None    # время последней скачанной свечи, мс
@@ -20,27 +26,30 @@ class Job:
     acked: bool = False             # пользователь уже видел уведомление о завершении
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d.pop("payload", None)
+        return d
 
 
 class JobManager:
-    """runner(symbol, progress) выполняется в рабочем потоке; progress(count, last_ts) обновляет прогресс задачи."""
+    """runner(symbol, progress) выполняется в рабочем потоке; progress(count, last_ts) обновляет прогресс задачи.
+    top_runner(job, progress) — то же для задач kind="top"."""
 
-    def __init__(self, runner, on_done=None, keep=50):
-        self._runner, self._on_done, self._keep = runner, on_done, keep
+    def __init__(self, runner, on_done=None, keep=50, top_runner=None):
+        self._runner, self._on_done, self._keep, self._top_runner = runner, on_done, keep, top_runner
         self._q = queue.Queue()
         self._ids = itertools.count(1)
         self._jobs = {}
         self._lock = threading.Lock()
         self._worker = None
 
-    def submit(self, symbol):
-        """Ставит загрузку актива в очередь. Если по символу уже идёт/ждёт задача — возвращает её. -> (job, создана_ли_новая)"""
+    def submit(self, symbol, kind="candles", label="", payload=None, total=0):
+        """Ставит загрузку в очередь. Если такая задача (kind + символ) уже идёт/ждёт — возвращает её. -> (job, создана_ли_новая)"""
         with self._lock:
             for j in self._jobs.values():
-                if j.symbol == symbol and j.status in ("queued", "running"):
+                if j.symbol == symbol and j.kind == kind and j.status in ("queued", "running"):
                     return j, False
-            job = Job(id=next(self._ids), symbol=symbol)
+            job = Job(id=next(self._ids), symbol=symbol, kind=kind, label=label, payload=payload or {}, total=total)
             self._jobs[job.id] = job
             self._trim()
             self._q.put(job.id)
@@ -69,7 +78,10 @@ class JobManager:
                 job.count, job.last_ts = count, last_ts
 
             try:
-                self._runner(job.symbol, progress)
+                if job.kind == "top":
+                    self._top_runner(job, progress)
+                else:
+                    self._runner(job.symbol, progress)
                 job.status = "done"
             except BaseException as e:      # SystemExit из fetch_candles («биржа не отвечает») тоже считаем ошибкой задачи
                 job.status, job.error = "error", str(e) or type(e).__name__
@@ -88,8 +100,9 @@ class JobManager:
         with self._lock:
             return sorted(self._jobs.values(), key=lambda j: j.id)
 
-    def active(self, symbol=None):
-        return [j for j in self.list() if j.status in ("queued", "running") and (symbol is None or j.symbol == symbol)]
+    def active(self, symbol=None, kind=None):
+        return [j for j in self.list() if j.status in ("queued", "running") and (symbol is None or j.symbol == symbol)
+                and (kind is None or j.kind == kind)]
 
     def ack(self, job_id):
         j = self._jobs.get(job_id)

@@ -49,6 +49,120 @@ def _read_requested_since(path):
         return None
 
 
+# ---------- загрузка отдельных окон (топ-коины: момент сделки + N суток) ----------
+def tf_to_ms(tf):
+    """'1m' -> 60000, '4h' -> 14400000 (без обращения к ccxt)."""
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    try:
+        return int(tf[:-1]) * units[tf[-1]] * 1000
+    except (ValueError, KeyError, IndexError):
+        raise ValueError(f"Неизвестный таймфрейм '{tf}'")
+
+
+def _windows_path(path):
+    return path + ".windows.json"
+
+
+def covered_intervals(path, tf_ms):
+    """Какие интервалы (мс, начала свечей, включительно) уже есть в кеше: карта окон, а если её нет — весь файл целиком."""
+    try:
+        with open(_windows_path(path), encoding="utf-8") as f:
+            return merge_intervals([tuple(x) for x in json.load(f)["covered"]], tf_ms)
+    except (OSError, ValueError, KeyError):
+        pass
+    candles = read_cache(path)
+    return [(candles[0][0], candles[-1][0])] if candles else []
+
+
+def merge_intervals(intervals, tf_ms):
+    """Склеивает пересекающиеся и соседние (встык по свечам) интервалы."""
+    out = []
+    for a, b in sorted(intervals):
+        if out and a <= out[-1][1] + tf_ms:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def missing_intervals(covered, a, b, tf_ms):
+    """Части [a, b], которых нет в covered: [(начало, конец)], границы — начала свечей."""
+    gaps, cur = [], a
+    for x, y in merge_intervals(covered, tf_ms):
+        if y < cur:
+            continue
+        if x > b:
+            break
+        if x > cur:
+            gaps.append((cur, min(x - tf_ms, b)))
+        cur = max(cur, y + tf_ms)
+        if cur > b:
+            break
+    if cur <= b:
+        gaps.append((cur, b))
+    return gaps
+
+
+def last_closed_start(tf_ms, now_ms=None):
+    """Начало последней завершённой свечи (свеча, которая ещё формируется, не качается и не кешируется)."""
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    return now_ms // tf_ms * tf_ms - tf_ms
+
+
+def fetch_window(exchange, symbol, tf, start_ms, end_ms, cache_dir=CACHE_DIR, progress=None):
+    """Докачивает в кеш свечи [start_ms, end_ms] монеты, не трогая уже скачанное (карта окон `*.windows.json`).
+    Возвращает число скачанных свечей. Окно, ещё не наступившее целиком, качается до последней завершённой свечи."""
+    import ccxt
+
+    os.makedirs(cache_dir, exist_ok=True)
+    path = cache_path(exchange, symbol, tf, cache_dir)
+    ex = getattr(ccxt, exchange)({"enableRateLimit": True})
+    tf_ms = ex.parse_timeframe(tf) * 1000
+    end_eff = min(end_ms, last_closed_start(tf_ms))
+    covered = covered_intervals(path, tf_ms)
+    gaps = missing_intervals(covered, start_ms, end_eff, tf_ms) if start_ms <= end_eff else []
+    if not gaps:
+        return 0
+    have = {c[0]: c for c in read_cache(path)}
+    downloaded = 0
+    new_cover = list(covered)
+    for gx, gy in gaps:
+        cur = gx
+        while cur <= gy:
+            for attempt in range(8):
+                try:
+                    batch = ex.fetch_ohlcv(symbol, tf, since=cur, limit=1000)
+                    break
+                except (ccxt.RateLimitExceeded, ccxt.NetworkError, ccxt.RequestTimeout) as e:
+                    time.sleep(min(60, 5 * 2 ** attempt))
+            else:
+                _save_window(path, have, new_cover, tf_ms)      # что успели — сохраняем, остальное докачается в следующий раз
+                raise RuntimeError(f"биржа не отвечает при загрузке {symbol}")
+            batch = [tuple(c[:5]) for c in batch if cur <= c[0] <= gy]
+            if not batch:
+                break
+            for c in batch:
+                have[c[0]] = c
+            downloaded += len(batch)
+            cur = batch[-1][0] + tf_ms
+            if progress:
+                progress(downloaded, batch[-1][0])
+            time.sleep(0.2)
+        new_cover.append((gx, gy))       # пустой кусок тоже считаем закрытым: монеты тогда ещё не было на бирже
+    _save_window(path, have, new_cover, tf_ms)
+    return downloaded
+
+
+def _save_window(path, have, covered, tf_ms):
+    rows = [have[t] for t in sorted(have)]
+    with open(path + ".tmp", "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+    os.replace(path + ".tmp", path)
+    with open(_windows_path(path) + ".tmp", "w", encoding="utf-8") as f:
+        json.dump({"covered": [list(x) for x in merge_intervals(covered, tf_ms)]}, f)
+    os.replace(_windows_path(path) + ".tmp", _windows_path(path))
+
+
 def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR, progress=None):
     """Скачивает свечи [since_ms, now] с кешем в CSV. Возвращает [(ts,o,h,l,c)].
     progress(n_свечей, ts_последней_мс) вызывается по ходу загрузки (для фоновых задач).""" 
@@ -114,6 +228,10 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR, progress=
         time.sleep(0.3)  # мягче к лимитам, чем enableRateLimit по умолчанию
     print()
     save()
+    try:
+        os.remove(_windows_path(path))        # кеш теперь сплошной, карта «окон» больше не нужна
+    except OSError:
+        pass
     return candles
 
 
@@ -175,7 +293,7 @@ def _scan(candles, i, d, entry, tps, sl, slip, be):
     return events
 
 
-def _finalize(trade, events, candles, fee, size):
+def _finalize(trade, events, candles, fee, size, notional=None):
     """Итог сделки по списку событий (частичных и финального закрытия): PnL = сумма долей × доходность - комиссия за вход и выход."""
     d = 1 if trade["side"] == "long" else -1
     entry = trade["entry"]
@@ -192,7 +310,7 @@ def _finalize(trade, events, candles, fee, size):
         be_ts=candles[tp1[0]][0] if (tp1 and trade["be"]) else None,
         fills=[{"ts": candles[idx][0], "price": p, "share": s, "label": lab} for idx, p, s, lab in events],
         _events=events, _j=last[0],
-        pnl_pct=pnl * 100, pnl_usd=pnl * entry * size,
+        pnl_pct=pnl * 100, pnl_usd=pnl * (notional if notional else entry * size),
     )
 
 
@@ -208,19 +326,14 @@ def apply_only(local_min, scalp_min, short, only):
     return local_min, scalp_min, short
 
 
-def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False):
-    """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
-    tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
-    be_after_tp1 — после первого тейка переносить стоп в цену входа.
-    Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
-    (закрытие по open свечи входа + новая позиция)."""
-    local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
-    levels = normalize_tps(tps if tps else [(tp_pct, 100)])
+def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None):
+    """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам: одна позиция одновременно, сигнал в ту же сторону
+    игнорируется, в противоположную — разворот. levels — результат normalize_tps. notional (USD) задаёт размер позиции в долларах
+    вместо size (в единицах актива)."""
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, cur = [], None
-    for sts, d in entries(signals, local_min, scalp_min, confirm, short, liq, cool):
+    for sts, d in events:
         side = "long" if d == 1 else "short"
         i = bisect_left(ts, sts)
         if i >= n:
@@ -236,15 +349,28 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
             o = candles[i][1]
             kept = [e for e in cur["_events"] if e[0] < i]
             rest = 1.0 - sum(e[2] for e in kept)
-            _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size)
+            _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size, notional)
         entry = candles[i][1] * (1 + d * slip)
         prices = [entry * (1 + d * p / 100) for p, _ in levels]
         sl = entry * (1 - d * sl_pct / 100)
         cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": prices[-1], "tps": prices,
                "tp_shares": [s for _, s in levels], "sl": sl, "be": bool(be_after_tp1 and len(levels) > 1)}
-        _finalize(cur, _scan(candles, i, d, entry, list(zip(prices, [s for _, s in levels])), sl, slip, cur["be"]), candles, fee, size)
+        _finalize(cur, _scan(candles, i, d, entry, list(zip(prices, [s for _, s in levels])), sl, slip, cur["be"]), candles, fee, size, notional)
         trades.append(cur)
     return trades
+
+
+def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
+             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False):
+    """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
+    tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
+    be_after_tp1 — после первого тейка переносить стоп в цену входа.
+    Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
+    (закрытие по open свечи входа + новая позиция)."""
+    local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
+    levels = normalize_tps(tps if tps else [(tp_pct, 100)])
+    events = entries(signals, local_min, scalp_min, confirm, short, liq, cool)
+    return run_events(events, candles, levels, sl_pct, fee, size, slip, cooldown_h, be_after_tp1)
 
 
 def stats(trades):

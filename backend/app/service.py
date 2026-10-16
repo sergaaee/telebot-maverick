@@ -3,7 +3,9 @@ import math
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
 
-from .core import backtest
+import time
+
+from .core import backtest, topcoins
 from .core.entries import entries
 
 from .data import DataStore
@@ -39,6 +41,7 @@ def effective_params(defaults: dict, p: BacktestParams) -> dict:
         eff["tps"] = [{"pct": p.tp_pct, "share": 100.0}]          # совместимость: один тейк на всю позицию
     eff.pop("tp_pct", None)
     eff["tps"] = [l.model_dump() if hasattr(l, "model_dump") else dict(l) for l in eff["tps"]]
+    eff["top_tps"] = [l.model_dump() if hasattr(l, "model_dump") else dict(l) for l in eff["top_tps"]]
     eff.setdefault("date_from", None)
     eff.setdefault("date_to", None)
     return eff
@@ -80,7 +83,75 @@ def _extra_stats(trades, span_ms):
     }
 
 
-def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> dict:
+def _trade_out(n, t, rep):
+    r = rep.get(t["signal_ts"])
+    out = {
+        "n": n, "side": t["side"], "signal_ts": t["signal_ts"], "entry_ts": t["entry_ts"], "exit_ts": t["exit_ts"],
+        "entry": t["entry"], "exit": t["exit"], "exit_avg": t["exit_avg"], "tp": t["tp"], "tps": t["tps"],
+        "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
+        "fills": t["fills"], "reason": t["reason"],
+        "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
+        "local": r[1] if r else None, "scalp": r[2] if r else None,
+        "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
+    }
+    for k in ("symbol", "coin", "top_value", "partial", "window_end"):
+        if k in t:
+            out[k] = t[k]
+    return out
+
+
+def _top_section(store, eff, confirmed, rep, available_fn, now_ms, warnings):
+    """Сделки по топ-коинам для подтверждённых сигналов основной стратегии (см. core/topcoins.py)."""
+    if not eff.get("top_enabled"):
+        return {"enabled": False}
+    try:
+        backtest.normalize_tps([(l["pct"], l["share"]) for l in eff["top_tps"]])
+    except ValueError as e:
+        raise ParamError(f"Топ-коины: {e}")
+    triggers = []
+    for ts, d in confirmed:
+        r = rep.get(ts)
+        triggers.append({"ts": ts, "d": d, "coin": r[5] if r and len(r) > 5 else None, "value": r[6] if r and len(r) > 6 else None})
+    available = None
+    if any(t["coin"] for t in triggers):            # список рынков нужен только если в отчётах есть топ-коины
+        if available_fn is not None:
+            try:
+                available = set(available_fn())
+            except Exception as e:                  # биржа недоступна: работаем только с уже скачанными монетами
+                warnings.append(f"Топ-коины: список рынков биржи недоступен ({e}); использованы только уже скачанные монеты")
+        if available is None:
+            available = store.cached_symbols()
+    tf_ms = backtest.tf_to_ms(store.s.candle_tf)
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    res = topcoins.build_top(triggers, eff, available, store.coin_covered, store.coin_candles, tf_ms, now_ms)
+    trades = res["trades"]
+    out_trades = [_trade_out(i, t, rep) for i, t in enumerate(trades, 1)]
+    span_ms = (max(t["exit_ts"] for t in trades) - trades[0]["entry_ts"]) if trades else 0
+    by = {}
+    for t in trades:
+        d = by.setdefault(t["symbol"], {"symbol": t["symbol"], "coin": t["coin"], "trades": 0, "wins": 0, "pnl_usd": 0.0})
+        d["trades"] += 1
+        d["wins"] += t["pnl_usd"] > 0
+        d["pnl_usd"] += t["pnl_usd"]
+    equity, cum = [], 0.0
+    for t in sorted(trades, key=lambda x: x["exit_ts"]):
+        cum += t["pnl_usd"]
+        equity.append([t["exit_ts"], cum])
+    pending = res["pending"]
+    items = [{"symbol": sym, "from": a, "to": b} for sym, ws in pending.items() for a, b in ws]
+    return {
+        "enabled": True,
+        "stats": {**backtest.stats(trades), **_extra_stats(trades, span_ms)},
+        "trades": out_trades,
+        "by_coin": sorted(by.values(), key=lambda x: -x["pnl_usd"]),
+        "skipped": res["skipped"][:2000],
+        "skipped_total": len(res["skipped"]),
+        "equity": equity,
+        "pending": {"symbols": len(pending), "windows": len(items), "requests": topcoins.estimate_requests(pending, tf_ms), "items": items},
+    }
+
+
+def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None) -> dict:
     eff = effective_params(defaults, params)
     source_id = eff.get("source") or store.s.default_source
     liq_id = eff.get("liq_source")
@@ -144,18 +215,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
     signals_out = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken} for ts, d in confirmed[:limit]]
 
     rep = {s[0]: s for s in sigs}
-    out_trades = []
-    for i, t in enumerate(trades, 1):
-        r = rep.get(t["signal_ts"])
-        out_trades.append({
-            "n": i, "side": t["side"], "signal_ts": t["signal_ts"], "entry_ts": t["entry_ts"], "exit_ts": t["exit_ts"],
-            "entry": t["entry"], "exit": t["exit"], "exit_avg": t["exit_avg"], "tp": t["tp"], "tps": t["tps"],
-            "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
-            "fills": t["fills"], "reason": t["reason"],
-            "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
-            "local": r[1] if r else None, "scalp": r[2] if r else None,
-            "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
-        })
+    out_trades = [_trade_out(i, t, rep) for i, t in enumerate(trades, 1)]
 
     span_ms = (candles[-1][0] - trades[0]["entry_ts"]) if trades else 0
     split_ts = sigs[len(sigs) // 2][0]
@@ -179,6 +239,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
         d["pnl_usd"] += t["pnl_usd"]
         d["wins"] += t["pnl_usd"] > 0
 
+    top = _top_section(store, eff, confirmed, rep, available_fn, now_ms, warnings)
     src = store.source(source_id)
     return _clean({
         "params": eff,
@@ -198,4 +259,5 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
         "signals_truncated": len(confirmed) > limit,
         "equity": equity,
         "monthly": list(monthly.values()),
+        "top": top,
     })
