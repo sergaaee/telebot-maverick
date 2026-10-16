@@ -2,7 +2,8 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { fmtDate } from '../format';
 import { HELP, type HelpKey } from '../helpTexts';
 import { MAX_TPS, fillRemainder, resizeTps, sumShares, validateTps } from '../tps';
-import type { AssetInfo, Job, Only, Params, Side, SourceInfo, TpLevel } from '../types';
+import type { AssetInfo, Job, Only, Params, Side, SourceInfo, TfMode, TpLevel } from '../types';
+import { configFileName, exportConfig } from '../configIO';
 import Help from './Help';
 
 interface Props {
@@ -20,6 +21,9 @@ interface Props {
   /** смена источника или актива: App сохраняет текущие настройки и подхватывает сохранённые для новой связки */
   onSwitch: (target: { source?: string; symbol?: string }) => void;
   onReset: () => void;
+  /** применить конфиг (JSON-текст): возвращает текст ошибки или null */
+  onImportConfig: (text: string) => string | null;
+  tfMode: TfMode;
 }
 
 const ADD_ASSET = '__add_asset__';
@@ -116,7 +120,7 @@ function Section({ title, help, children, open = true }: { title: string; help?:
   );
 }
 
-export default function ParamsPanel({ params: p, sources, assets, activeJobs, onAddAsset, onRemoveAsset, loading, onChange, onRun, onSwitch, onReset }: Props) {
+export default function ParamsPanel({ params: p, sources, assets, activeJobs, onAddAsset, onRemoveAsset, loading, onChange, onRun, onSwitch, onReset, onImportConfig, tfMode }: Props) {
   const set = <K extends keyof Params>(k: K, v: Params[K]) => onChange({ ...p, [k]: v });
   const num = (k: NumKey) => (v: number | null) => onChange({ ...p, [k]: v } as Params);
   const coolMode: 'off' | 'drop' | 'declines' = p.cool_drop != null ? 'drop' : p.cool_declines != null ? 'declines' : 'off';
@@ -132,6 +136,42 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
   const [newSymbol, setNewSymbol] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [cfgOpen, setCfgOpen] = useState(false);
+  const [cfgText, setCfgText] = useState('');
+  const [cfgError, setCfgError] = useState<string | null>(null);
+  const [cfgMsg, setCfgMsg] = useState<string | null>(null);
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([exportConfig(p, tfMode)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = configFileName(p);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(exportConfig(p, tfMode));
+      setCfgMsg('Конфиг скопирован в буфер обмена');
+    } catch {
+      setCfgMsg('Не удалось скопировать — используйте «Скачать конфиг»');
+    }
+    setTimeout(() => setCfgMsg(null), 4000);
+  };
+  const applyCfg = () => {
+    const err = onImportConfig(cfgText);
+    setCfgError(err);
+    if (!err) {
+      setCfgOpen(false);
+      setCfgText('');
+    }
+  };
+  const loadFile = async (f: File | undefined) => {
+    if (!f) return;
+    setCfgText(await f.text());
+    setCfgError(null);
+  };
   const submitAsset = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -153,6 +193,33 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
           сбросить к env
         </button>
       </div>
+
+      <div className="cfg-bar">
+        <button type="button" className="ghost" onClick={download}>⬇ Скачать конфиг</button>
+        <button type="button" className="ghost" onClick={() => void copy()}>Копировать</button>
+        <button type="button" className="ghost" onClick={() => setCfgOpen(!cfgOpen)}>⬆ Загрузить…</button>
+        <Help text={HELP.config_io} />
+      </div>
+      {cfgMsg && <div className="src-info">{cfgMsg}</div>}
+      {cfgOpen && (
+        <div className="cfg-import">
+          <textarea
+            rows={6}
+            placeholder="Вставьте сюда JSON конфига или выберите файл"
+            value={cfgText}
+            onChange={(e) => { setCfgText(e.target.value); setCfgError(null); }}
+            aria-label="Конфиг для загрузки"
+          />
+          <div className="add-asset-row">
+            <input type="file" accept=".json,application/json" onChange={(e) => void loadFile(e.target.files?.[0])} aria-label="Файл конфига" />
+          </div>
+          <div className="add-asset-row">
+            <button type="button" className="ghost" disabled={!cfgText.trim()} onClick={applyCfg}>Применить и запустить</button>
+            <button type="button" className="link" onClick={() => { setCfgOpen(false); setCfgError(null); }}>отмена</button>
+          </div>
+          {cfgError && <div className="src-info bad-text">{cfgError}</div>}
+        </div>
+      )}
 
       <Section title="Данные">
         <label className="field col">

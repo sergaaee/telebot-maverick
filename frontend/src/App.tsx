@@ -8,6 +8,7 @@ import StatsPanel from './components/StatsPanel';
 import Toasts from './components/Toasts';
 import TopPanel from './components/TopPanel';
 import TradesTable from './components/TradesTable';
+import { parseConfig } from './configIO';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
 import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
@@ -205,6 +206,44 @@ export default function App() {
   paramsRef.current = params;
   switchRef.current = switchTo;
   runRef.current = run;
+
+  /** Применение вставленного/загруженного конфига: возвращает текст ошибки или null; недоступные источник/актив заменяются текущими. */
+  const onImportConfig = (text: string): string | null => {
+    if (!params || !config) return 'Интерфейс ещё загружается';
+    try {
+      const { params: imp, tf, ignored } = parseConfig(text, config.defaults);
+      const notes: string[] = [];
+      let source = imp.source;
+      let symbol = imp.symbol;
+      if (!config.data.sources.some((s) => s.id === source && s.exists)) {
+        notes.push(`источник «${source}» недоступен — оставлен «${params.source}»`);
+        source = params.source;
+      }
+      if (!config.symbols.includes(symbol)) {
+        notes.push(`актив ${symbol} не добавлен — оставлен ${params.symbol} (добавьте его через «＋ Добавить актив…» и загрузите конфиг ещё раз)`);
+        symbol = params.symbol;
+      }
+      if (imp.liq_source && !config.data.sources.some((s) => s.id === imp.liq_source)) imp.liq_source = null;
+      saveNow(params, tfMode);
+      const np = { ...imp, source, symbol };
+      setParams(np);
+      setTfMode(tf ?? 'auto');
+      setResult(null);
+      setSelected(null);
+      setSelectedTop(null);
+      setEffTf(null);
+      setChartError(null);
+      void run(np);
+      push({
+        kind: 'success',
+        autoCloseMs: 12000,
+        text: `Конфиг применён${notes.length ? `. Внимание: ${notes.join('; ')}` : ''}${ignored.length ? `. Пропущены неизвестные поля: ${ignored.join(', ')}` : ''}.`,
+      });
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  };
 
   const resetParams = () => {
     if (!params || !config) return;
@@ -412,6 +451,8 @@ export default function App() {
             onRun={() => void run(params)}
             onSwitch={switchTo}
             onReset={resetParams}
+            onImportConfig={onImportConfig}
+            tfMode={tfMode}
           />
         ) : (
           <aside className="params"><div className="empty">{error ? '' : 'Загрузка…'}</div></aside>

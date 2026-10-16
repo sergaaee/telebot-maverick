@@ -421,6 +421,36 @@ def scenario(pg, base, state_url):
     num(pg, "Плечо").fill("1"); num(pg, "Депозит").fill("10000"); num(pg, "Доля депозита на сделку").fill("10")
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(2500)
 
+    # --- экспорт и импорт полного конфига
+    import json as _json
+    with pg.expect_download() as dl:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    path = dl.value.path()
+    cfg = _json.loads(Path(path).read_text(encoding="utf-8"))
+    check("скачан JSON с форматом и полными параметрами", cfg["format"] == "maverick-config" and cfg["params"]["symbol"] == "BTC/USDT:USDT"
+          and {"tps", "top_tps", "deposit", "leverage", "compound", "trend_emas", "cool_metric", "liq_frac", "date_from"} <= set(cfg["params"]) and dl.value.suggested_filename.endswith(".json"), dl.value.suggested_filename)
+    check("в файле текущие значения (депозит 10000, плечо 1)", cfg["params"]["deposit"] == 10000 and cfg["params"]["leverage"] == 1)
+    cfg["params"].update(sl_pct=9, leverage=3, trend_enabled=True, trend_emas=[20, 100], top_days=2, tps=[{"pct": 2, "share": 30}, {"pct": 4, "share": 70}], be_after_tp1=True, bogus_field=1)
+    cfg["params"]["symbol"] = "NOPE/USDT:USDT"
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill("{не json")
+    pg.get_by_role("button", name="Применить и запустить").click()
+    check("кривой JSON: понятная ошибка, ничего не изменилось", "Не удалось разобрать JSON" in pg.locator(".cfg-import .bad-text").inner_text() and num(pg, "Плечо").input_value() == "1")
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    toast_txt = " ".join(pg.locator(".toast").all_inner_texts())
+    check("конфиг применён: поля обновились", num(pg, "Плечо").input_value() == "3" and num(pg, "Стоп-лосс").first.input_value() == "9"
+          and pg.locator(".tp-row").count() >= 2 and [pg.locator(".ema-row input").nth(i).is_checked() for i in range(4)] == [True, False, True, False])
+    check("уведомление: актив не найден, неизвестное поле пропущено", "NOPE/USDT:USDT" in toast_txt and "bogus_field" in toast_txt, toast_txt[:200])
+    check("актив остался текущим, бэктест пересчитан", field(pg, "Актив").locator("select").input_value() == "BTC/USDT:USDT" and pg.locator("table.trades tbody tr").count() > 0)
+    # вернуть исходные значения этого теста
+    cfg["params"].update(sl_pct=2, leverage=1, trend_enabled=False, top_days=3, be_after_tp1=False, tps=[{"pct": 6, "share": 100}], symbol="BTC/USDT:USDT")
+    del cfg["params"]["bogus_field"]
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3000)
+    check("конфиг без ошибок возвращает значения", num(pg, "Плечо").input_value() == "1" and num(pg, "Стоп-лосс").first.input_value() == "2")
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):
