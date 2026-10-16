@@ -299,6 +299,10 @@ def scenario(pg, base, state_url):
     check("по умолчанию один тейк на 100%", pg.locator(".tp-row").count() == 1 and "Σ долей: 100%" in pg.locator(".tp-sum").inner_text())
     pg.locator(".tp-editor .seg button", has_text="2").click()
     check("кнопка «2» даёт два тейка по 50%", pg.locator(".tp-row").count() == 2 and pg.locator(".tp-row input").nth(1).input_value() == "50")
+    pg.locator(".tp-editor .seg button", has_text="3").first.click()
+    pg.locator(".tp-editor .seg button", has_text="1").first.click()
+    check("с 3 тейков можно вернуться на 1 (регрессия)", pg.locator(".tp-row").count() == 1 and pg.locator(".tp-row input").nth(1).input_value() == "100")
+    pg.locator(".tp-editor .seg button", has_text="2").first.click()
     tp_in = pg.locator(".tp-row input")                      # [pct1, share1, pct2, share2]
     tp_in.nth(0).fill("3"); tp_in.nth(2).fill("6")
     tp_in.nth(1).fill("70")                                  # 70 + 50 = 120% — ошибка

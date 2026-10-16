@@ -53,15 +53,12 @@ function Num({ label, help, value, onChange, step = 0.05, suffix }: {
 }
 
 /** Тейк-профиты частями: число уровней (1–3), расстояние и доля позиции на каждом, перенос стопа в безубыток после первого. */
-function TpEditor({ tps, be, onTps, onBe }: { tps: TpLevel[]; be: boolean; onTps: (t: TpLevel[]) => void; onBe: (b: boolean) => void }) {
+function TpEditor({ tps, be, onChange }: { tps: TpLevel[]; be: boolean; onChange: (t: TpLevel[], be: boolean) => void }) {
   const n = tps.length;
   const err = validateTps(tps);
   const sum = sumShares(tps);
-  const setLevel = (i: number, patch: Partial<TpLevel>) => onTps(tps.map((l, k) => (k === i ? { ...l, ...patch } : l)));
-  const setCount = (k: number) => {
-    onTps(resizeTps(tps, k));
-    if (k < 2) onBe(false);
-  };
+  const setLevel = (i: number, patch: Partial<TpLevel>) => onChange(tps.map((l, k) => (k === i ? { ...l, ...patch } : l)), be);
+  const setCount = (k: number) => onChange(resizeTps(tps, k), k > 1 && be);       // одним вызовом: два подряд затирали бы друг друга
   return (
     <div className="tp-editor">
       <div className="field">
@@ -93,11 +90,11 @@ function TpEditor({ tps, be, onTps, onBe }: { tps: TpLevel[]; be: boolean; onTps
       <div className={`tp-sum ${err ? 'bad' : 'ok'}`}>
         Σ долей: {sum}%{err ? ` — ${err}` : ''}
         {n > 1 && Math.abs(sum - 100) > 0.001 && (
-          <button type="button" className="link" onClick={() => onTps(fillRemainder(tps))}>дополнить до 100%</button>
+          <button type="button" className="link" onClick={() => onChange(fillRemainder(tps), be)}>дополнить до 100%</button>
         )}
       </div>
       <label className="field check">
-        <input type="checkbox" checked={be && n > 1} disabled={n < 2} onChange={(e) => onBe(e.target.checked)} />
+        <input type="checkbox" checked={be && n > 1} disabled={n < 2} onChange={(e) => onChange(tps, e.target.checked)} />
         <Label text="В безубыток после 1-го тейка" help="be_after_tp1" />
       </label>
     </div>
@@ -257,7 +254,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       </Section>
 
       <Section title="Выход и издержки" help="groupExit">
-        <TpEditor tps={p.tps} be={p.be_after_tp1} onTps={(t) => onChange({ ...p, tps: t })} onBe={(v) => onChange({ ...p, be_after_tp1: v })} />
+        <TpEditor tps={p.tps} be={p.be_after_tp1} onChange={(t, b) => onChange({ ...p, tps: t, be_after_tp1: b })} />
         <Num label="Стоп-лосс" help="sl_pct" value={p.sl_pct} step={0.5} suffix="%" onChange={num('sl_pct')} />
         <Num label="Размер" help="size" value={p.size} step={0.01} suffix="BTC" onChange={num('size')} />
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
@@ -280,7 +277,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
                 <option value="both">лонг + шорт</option>
               </select>
             </label>
-            <TpEditor tps={p.top_tps} be={p.top_be_after_tp1} onTps={(t) => onChange({ ...p, top_tps: t })} onBe={(v) => onChange({ ...p, top_be_after_tp1: v })} />
+            <TpEditor tps={p.top_tps} be={p.top_be_after_tp1} onChange={(t, b) => onChange({ ...p, top_tps: t, top_be_after_tp1: b })} />
             <Num label="Стоп-лосс" help="top_sl_pct" value={p.top_sl_pct} step={0.5} suffix="%" onChange={num('top_sl_pct')} />
             <Num label="Размер" help="top_size" value={p.top_size} step={10} suffix="$" onChange={num('top_size')} />
             <Num label="Комиссия за сторону" help="top_fee" value={+(p.top_fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('top_fee', (v ?? 0) / 100)} />
