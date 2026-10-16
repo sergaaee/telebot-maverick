@@ -116,7 +116,7 @@ def load_settings() -> Settings:
         short_local_max=_num("SHORT_LOCAL_MAX", 0.7), short_scalp_max=_num("SHORT_SCALP_MAX", 1.2),
         confirm=_num("CONFIRM", 4, int), tps=_tps(), be_after_tp1=_bool("BE_AFTER_TP1"), sl_pct=_num("SL_PCT", 2.0),
         size=_num("ORDER_SIZE", 0.1),
-        deposit=_num("DEPOSIT", 10000.0), trade_pct=_num("TRADE_PCT", 10.0), leverage=_num("LEVERAGE", 1.0), fee=_num("FEE", 0.0005), slip=_num("SLIPPAGE", 0.0),
+        deposit=_num("DEPOSIT", 10000.0), trade_pct=_num("TRADE_PCT", 10.0), leverage=_num("LEVERAGE", 1.0), compound=_bool("COMPOUND", True), fee=_num("FEE", 0.0005), slip=_num("SLIPPAGE", 0.0),
         cool_metric=(_opt("COOL_METRIC") or "scalp").lower(),
         cool_drop=_num("COOL_DROP", None), cool_declines=_num("COOL_DECLINES", None, int),
         liq_hours=_num("LIQ_HOURS", None), liq_frac=_num("LIQ_FRAC", 0.25), liq_pct=_num("LIQ_PCT", 0.0),

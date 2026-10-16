@@ -33,6 +33,8 @@ export interface Params {
   /** доля текущего депозита в марже сделки, % */
   trade_pct: number;
   leverage: number;
+  /** true — сложный процент (доля от текущего баланса), false — фиксированная сумма от начального депозита */
+  compound: boolean;
   fee: number;
   slip: number;
   cooldown_h: number;

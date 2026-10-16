@@ -75,3 +75,13 @@ def test_sharpe_math():
     s = sharpe_ratio(mixed, 1000)
     assert s > 0
     assert sharpe_ratio([mk(d, -x) for d, x in enumerate([5, 10] * 20)], 1000) < 0
+
+
+def test_simple_percent_fixed_amount(client):  # noqa: F811
+    j = client.post("/api/backtest", json={"deposit": 1000, "trade_pct": 10, "leverage": 2, "compound": False}).json()
+    assert len(j["trades"]) > 1
+    assert all(t["notional"] == pytest.approx(200) for t in j["trades"])               # всегда 1000 × 10% × 2
+    c = client.post("/api/backtest", json={"deposit": 1000, "trade_pct": 10, "leverage": 2, "compound": True}).json()
+    assert c["trades"][0]["notional"] == pytest.approx(200)
+    assert c["trades"][1]["notional"] != pytest.approx(200)
+    assert j["stats"]["total"]["total_usd"] == pytest.approx(sum(t["pnl_pct"] / 100 * 200 for t in j["trades"]))

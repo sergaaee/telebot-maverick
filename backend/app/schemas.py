@@ -28,6 +28,7 @@ class BacktestParams(BaseModel):
     size: Optional[float] = Field(None, gt=0, description="устарело: размер в единицах актива (в бэктесте интерфейса не используется)")
     deposit: Optional[float] = Field(None, gt=0, le=1e12, description="начальный депозит, $")
     trade_pct: Optional[float] = Field(None, gt=0, le=100, description="доля текущего депозита, которая идёт в маржу сделки, %")
+    compound: Optional[bool] = Field(None, description="true — сложный процент (доля от текущего баланса), false — фиксированная сумма от начального депозита")
     leverage: Optional[float] = Field(None, ge=1, le=125, description="плечо")
     fee: Optional[float] = Field(None, ge=0, le=0.05)
     slip: Optional[float] = Field(None, ge=0, le=0.05)

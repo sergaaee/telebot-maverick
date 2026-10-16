@@ -64,12 +64,13 @@ def _filters(eff):
 DAY_MS = 86_400_000
 
 
-def apply_sizing(trades, deposit, trade_pct, leverage):
-    """Размер каждой сделки = текущий баланс × trade_pct% × плечо (баланс = депозит + закрытые результаты, т.е. со сложным процентом).
+def apply_sizing(trades, deposit, trade_pct, leverage, compound=True):
+    """Размер каждой сделки = база × trade_pct% × плечо (база: при compound — текущий баланс, иначе начальный депозит; баланс = депозит + закрытые результаты, т.е. со сложным процентом).
     pnl_pct у сделки — доходность на объём, поэтому pnl_usd пересчитывается последовательно. Баланс ≤ 0 — торговля прекращается (счёт слит)."""
     bal = deposit
     for t in trades:
-        notional = max(bal, 0.0) * trade_pct / 100 * leverage
+        base = bal if compound else deposit            # простой процент: каждый раз доля от НАЧАЛЬНОГО депозита
+        notional = (max(base, 0.0) if bal > 0 else 0.0) * trade_pct / 100 * leverage
         t["margin"] = notional / leverage
         t["notional"] = notional
         t["pnl_usd"] = notional * t["pnl_pct"] / 100
@@ -268,7 +269,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         allow = trend.build_trend(candles_all, eff["trend_tf"], emas)       # EMA считается по всей истории свечей (прогрев), а не только по периоду
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, **common, **extra)
 
-    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"])
+    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True))
     if eff["sl_pct"] * eff["leverage"] >= 100:
         warnings.append(f"Плечо {eff['leverage']:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа, бэктест этого не моделирует")
 

@@ -46,7 +46,7 @@ npm run dev                       # http://localhost:5173, /api проксиру
 | Источники метрик | `SOURCES=coinbase,binance`, `SOURCE_<ID>_FILE`, `SOURCE_<ID>_LABEL`, `SOURCE_DEFAULT`, `LIQ_SOURCE`, `LIQ_MAX_AGE_H` |
 | Активы и свечи | `EXCHANGE`, `SYMBOLS`, `SYMBOL_DEFAULT`, `CANDLE_TF`, `CACHE_DIR`, `MAX_BARS` |
 | Сервер | `HOST`, `PORT`, `CORS_ORIGINS`, `STATE_FILE`, `ASSETS_FILE` |
-| Стратегия (умолчания) | `SIDE`, `ONLY`, `LOCAL_MIN`, `SCALP_MIN`, `SHORT_LOCAL_MAX`, `SHORT_SCALP_MAX`, `CONFIRM`, `TP_PCT` или `TP_LEVELS`, `BE_AFTER_TP1`, `SL_PCT`, `DEPOSIT`, `TRADE_PCT`, `LEVERAGE`, `FEE`, `SLIPPAGE` |
+| Стратегия (умолчания) | `SIDE`, `ONLY`, `LOCAL_MIN`, `SCALP_MIN`, `SHORT_LOCAL_MAX`, `SHORT_SCALP_MAX`, `CONFIRM`, `TP_PCT` или `TP_LEVELS`, `BE_AFTER_TP1`, `SL_PCT`, `DEPOSIT`, `TRADE_PCT`, `LEVERAGE`, `COMPOUND`, `FEE`, `SLIPPAGE` |
 | Тренд (умолчания) | `TREND_ENABLED`, `TREND_EMAS` (20,50,100,200), `TREND_TF` |
 | Топ-коины (умолчания) | `TOP_ENABLED`, `TOP_SIDES`, `TOP_TP_PCT` или `TOP_TP_LEVELS`, `TOP_BE_AFTER_TP1`, `TOP_SL_PCT`, `TOP_SIZE_USD`, `TOP_FEE`, `TOP_SLIPPAGE`, `TOP_DAYS`, `TOP_MIN_VALUE` |
 | Фильтры (умолчания) | `COOL_METRIC`, `COOL_DROP`, `COOL_DECLINES`, `LIQ_HOURS`, `LIQ_FRAC`, `LIQ_PCT`, `COOLDOWN_H` |
@@ -74,6 +74,7 @@ npm run dev                       # http://localhost:5173, /api проксиру
   работает в фоне. Добавленный из интерфейса актив можно убрать из списка (файл со свечами остаётся на диске).
 - **Депозит, доля на сделку, плечо**: размер каждой сделки = текущий баланс × «доля депозита» × плечо (баланс = депозит + закрытые результаты, то есть
   со сложным процентом; если баланс упал до нуля, торговля прекращается). Доходность на объём от плеча не зависит, суммы в $ растут пропорционально.
+  Галочка «сложный процент» выключена — простой процент: каждая сделка на одну и ту же сумму (доля от начального депозита × плечо).
   Если плечо × стоп ≥ 100%, показывается предупреждение: на бирже позицию ликвидировали бы раньше стопа, а бэктест ликвидацию не моделирует.
   В статистике — доходность от депозита, просадка в % от пика и **коэффициент Шарпа**: годовой, по дневным доходностям баланса (результат за день /
   баланс на начало дня, дни без сделок = 0, × √365, безрисковая ставка 0). При менее чем двух днях истории или нулевом разбросе показывается «–».
