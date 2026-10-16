@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from entries import attach_liq, entries, load_signals
 
+
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")  # не зависит от текущей папки запуска
 
 
@@ -210,7 +211,7 @@ def make_row(name, trades, split_ts):
 
 
 def print_table(rows):
-    print(f"\n{'конфигурация':<46}| n  win%  PF  итого$ | 1-я половина        | 2-я половина")
+    print(f"\n{'конфигурация':<46}| всего: n  win%  PF  итого$ | 1-я половина        | 2-я половина")
     for name, s, h1, h2, _ in rows:
         print(f"{name:<46}| {s['trades']:>3} {s['winrate']:>5.1f} {s['profit_factor']:>5.2f} {s['total_usd']:>+7.0f} | "
               f"{half_str(h1)} | {half_str(h2)}")
@@ -222,8 +223,7 @@ def print_top(rows, min_trades, base_label):
     print(f"\nТоп-5 по нижней границе доверительного интервала winrate (сделок >= {min_trades}); база ({base_label}): "
           f"{rows[0][1]['winrate']:.1f}%")
     for name, s, h1, h2, lo in good[:5]:
-        print(
-            f"  {name:<46} n={s['trades']:>3} winrate {s['winrate']:.1f}% (нижняя граница {100 * lo:.0f}%) итого {s['total_usd']:+.0f}$")
+        print(f"  {name:<46} n={s['trades']:>3} winrate {s['winrate']:.1f}% (нижняя граница {100*lo:.0f}%) итого {s['total_usd']:+.0f}$")
     print(f"\nПроверено {len(rows) - 1} конфигураций на одной истории: лучшие из них частично просто повезло."
           " Верьте только тем, у кого плюс в ОБЕИХ половинах и достаточно сделок.")
 
@@ -239,17 +239,16 @@ def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
 def run_threshold_sweep(side, signals, candles, common, a):
     """Свип порогов одной стороны; вторая сторона отключена, чтобы не смешивать результаты."""
     split_ts = signals[len(signals) // 2][0]
-    never = float("inf")  # пороги, при которых лонг (Local/Scalp >= inf) никогда не срабатывает
+    never = float("inf")   # пороги, при которых лонг (Local/Scalp >= inf) никогда не срабатывает
     rows = []
     if side == "long":
         base = (a.local_min, a.scalp_min)
-        grid = [(lm, sm) for lm in (1.25, 1.45, 1.65, 1.85, 2.05, 2.25, 2.5, 2.75, 3) for sm in
-                (1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3)]
+        grid = [(lm, sm) for lm in (1.25, 1.45, 1.65, 1.85, 2.05) for sm in (1.5, 1.75, 2.0, 2.25, 2.5)]
         run = lambda p: simulate(signals, candles, p[0], p[1], short=None, **common)
         label = lambda p: f"long  local>={p[0]:.2f} scalp>={p[1]:.2f}"
     else:
         base = (a.short_local_max, a.short_scalp_max)
-        grid = [(lm, sm) for lm in (0.5, 0.6, 0.7, 0.85, 0.95, 1.05, 1.15, 1.25) for sm in (0.35, 0.5, 0.65, 0.8, 0.95, 1.05, 1.2)]
+        grid = [(lm, sm) for lm in (0.85, 0.95, 1.05, 1.15, 1.25) for sm in (0.35, 0.5, 0.65, 0.8, 0.95)]
         run = lambda p: simulate(signals, candles, never, never, short=p, **common)
         label = lambda p: f"short local<={p[0]:.2f} scalp<={p[1]:.2f}"
     rows.append(make_row(f"БАЗА: {label(base)}", run(base), split_ts))
@@ -291,35 +290,32 @@ def main():
     ap.add_argument("--exchange", default="binanceusdm")
     ap.add_argument("--symbol", default="BTC/USDT:USDT")
     ap.add_argument("--tf", default="1m")
-    ap.add_argument("--local-min", type=float, default=1.85)
-    ap.add_argument("--scalp-min", type=float, default=1.25)
-    ap.add_argument("--tp", type=float, default=6.0)
-    ap.add_argument("--sl", type=float, default=2.0)
+    ap.add_argument("--local-min", type=float, default=1.65)
+    ap.add_argument("--scalp-min", type=float, default=2.0)
+    ap.add_argument("--tp", type=float, default=3.0)
+    ap.add_argument("--sl", type=float, default=1.0)
     ap.add_argument("--fee", type=float, default=0.0005, help="taker-комиссия за сторону, доля")
     ap.add_argument("--slip", type=float, default=0.0, help="проскальзывание, доля")
-    ap.add_argument("--short-local-max", type=float, default=0.7)
-    ap.add_argument("--short-scalp-max", type=float, default=1.2)
+    ap.add_argument("--short-local-max", type=float, default=1.05)
+    ap.add_argument("--short-scalp-max", type=float, default=0.65)
     ap.add_argument("--no-short", action="store_true", help="только лонги")
-    ap.add_argument("--confirm", type=int, default=4, help="сколько отчётов подряд нужно для сигнала")
+    ap.add_argument("--confirm", type=int, default=2, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
     ap.add_argument("--out", default="trades.csv")
     ap.add_argument("--sweep-long", "--sweep", dest="sweep_long", action="store_true",
                     help="свип порогов лонга (Local/Scalp >=), шорты отключены; --sweep — прежнее имя")
     ap.add_argument("--sweep-short", action="store_true", help="свип порогов шорта (Local/Scalp <=), лонги отключены")
-    ap.add_argument("--liq-file",
-                    help="CSV с ликвидациями (например history_binance.csv); по умолчанию — основной файл")
+    ap.add_argument("--liq-file", help="CSV с ликвидациями (например history_binance.csv); по умолчанию — основной файл")
     ap.add_argument("--liq-max-age", type=float, default=3.0, help="макс. возраст записи ликвидаций из --liq-file, ч")
     ap.add_argument("--sweep-liq", action="store_true", help="свип фильтра «ликвидации закончились»")
     ap.add_argument("--sweep-cool", action="store_true", help="свип фильтра «метрики остывают»")
-    ap.add_argument("--sweep-cooldown", action="store_true",
-                    help="контроль: простая пауза после стопа (без ликвидаций)")
+    ap.add_argument("--sweep-cooldown", action="store_true", help="контроль: простая пауза после стопа (без ликвидаций)")
     ap.add_argument("--cooldown-h", type=float, default=0.0, help="пауза после стопа, ч")
     ap.add_argument("--min-trades", type=int, default=15, help="минимум сделок для попадания в топ свипа")
     ap.add_argument("--liq-hours", type=float, help="применить фильтр ликвидаций: окно, ч")
     ap.add_argument("--liq-frac", type=float, default=0.25, help="...спад до доли от максимума окна")
     ap.add_argument("--liq-pct", type=float, default=0, help="...всплеск не ниже этого перцентиля прошлых значений")
-    ap.add_argument("--explain", action="store_true",
-                    help="показать, какие сделки базы фильтр убрал/добавил и их ликвидации")
+    ap.add_argument("--explain", action="store_true", help="показать, какие сделки базы фильтр убрал/добавил и их ликвидации")
     ap.add_argument("--cool-metric", choices=["scalp", "local"], default="scalp")
     ap.add_argument("--cool-drop", type=float, help="применить фильтр остывания: падение от максимума серии")
     ap.add_argument("--cool-declines", type=int, help="...или: столько отчётов подряд вниз")
@@ -335,7 +331,7 @@ def main():
         if not have:
             raise SystemExit("В файле нет данных о ликвидациях — укажите --liq-file.")
     print(f"Сигналов с Deep-значениями: {len(signals)}, "
-          f"{datetime.fromtimestamp(signals[0][0] / 1000, timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(signals[-1][0] / 1000, timezone.utc):%Y-%m-%d}")
+          f"{datetime.fromtimestamp(signals[0][0]/1000, timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(signals[-1][0]/1000, timezone.utc):%Y-%m-%d}")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
     common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm)
     short = None if a.no_short else (a.short_local_max, a.short_scalp_max)
