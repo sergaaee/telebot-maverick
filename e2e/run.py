@@ -205,22 +205,22 @@ def scenario(pg, base, state_url):
 
     # --- сохранение выбора по связкам «источник + актив»
     src = field(pg, "Источник метрик").locator("select")
-    num(pg, "Тейк-профит").fill("7")
+    num(pg, "Стоп-лосс").fill("7")
     pg.locator(".seg button", has_text="1h").first.click()
     pg.wait_for_timeout(1200)                     # дебаунс сохранения
     src.select_option("coinbase")
     pg.wait_for_timeout(3000)
-    check("новая связка начинает с умолчаний из env", num(pg, "Тейк-профит").input_value() == "6")
-    num(pg, "Тейк-профит").fill("8")
+    check("новая связка начинает с умолчаний из env", num(pg, "Стоп-лосс").input_value() == "2")
+    num(pg, "Стоп-лосс").fill("8")
     pg.locator(".seg button", has_text="4h").first.click()
     pg.wait_for_timeout(1200)
     src.select_option("binance")
     pg.wait_for_timeout(3000)
-    check("возврат к связке восстанавливает её параметры и ТФ", num(pg, "Тейк-профит").input_value() == "7"
+    check("возврат к связке восстанавливает её параметры и ТФ", num(pg, "Стоп-лосс").input_value() == "7"
           and "on" in (pg.locator(".seg button", has_text="1h").first.get_attribute("class") or ""))
     asset.locator("select").select_option("ETH/USDT:USDT")
     pg.wait_for_timeout(3000)
-    check("у другого актива свои настройки", num(pg, "Тейк-профит").input_value() == "6")
+    check("у другого актива свои настройки", num(pg, "Стоп-лосс").input_value() == "2")
     pg.wait_for_timeout(1000)
     saved = pg.evaluate(f"fetch('{state_url}').then(r => r.json())")
     check("состояние записано на сервере", saved.get("last") == {"source": "binance", "symbol": "ETH/USDT:USDT"} and len(saved.get("profiles", {})) >= 3,
@@ -232,7 +232,42 @@ def scenario(pg, base, state_url):
           field(pg, "Источник метрик").locator("select").input_value() == "binance" and field(pg, "Актив").locator("select").input_value() == "ETH/USDT:USDT")
     field(pg, "Актив").locator("select").select_option("BTC/USDT:USDT")
     pg.wait_for_timeout(3000)
-    check("после перезагрузки сохранены параметры связки", num(pg, "Тейк-профит").input_value() == "7")
+    check("после перезагрузки сохранены параметры связки", num(pg, "Стоп-лосс").input_value() == "7")
+
+    # --- тейки частями и безубыток
+    pg.wait_for_timeout(500)
+    check("по умолчанию один тейк на 100%", pg.locator(".tp-row").count() == 1 and "Σ долей: 100%" in pg.locator(".tp-sum").inner_text())
+    pg.locator(".tp-editor .seg button", has_text="2").click()
+    check("кнопка «2» даёт два тейка по 50%", pg.locator(".tp-row").count() == 2 and pg.locator(".tp-row input").nth(1).input_value() == "50")
+    tp_in = pg.locator(".tp-row input")                      # [pct1, share1, pct2, share2]
+    tp_in.nth(0).fill("3"); tp_in.nth(2).fill("6")
+    tp_in.nth(1).fill("70")                                  # 70 + 50 = 120% — ошибка
+    run_btn = pg.locator("button.run")
+    check("доли не 100% блокируют запуск и объясняют почему", run_btn.is_disabled() and "Исправьте" in run_btn.inner_text() and "120" in pg.locator(".tp-sum").inner_text(),
+          pg.locator(".tp-sum").inner_text()[:60])
+    pg.get_by_role("button", name="дополнить до 100%").click()
+    check("«дополнить до 100%» кладёт остаток на последний тейк", tp_in.nth(3).input_value() == "30" and not run_btn.is_disabled())
+    be = pg.locator(".tp-editor label.field.check input")
+    be.check()
+    run_btn.click(); pg.wait_for_timeout(3500)
+    n_rows = rows.count()
+    cells = [rows.nth(i).locator("td").nth(7).inner_text() for i in range(n_rows)]
+    check("в таблице сделок есть колонка тейков вида n/2", n_rows > 0 and all(c in ("0/2", "1/2", "2/2") or c == "–" for c in cells) and any(c in ("1/2", "2/2") for c in cells),
+          f"{n_rows} сделок, {sorted(set(cells))}")
+    check("в статистике появилась карточка «Дошли до тейков»", pg.locator(".card-label", has_text="Дошли до тейков").count() == 1)
+    hit = next(i for i, c in enumerate(cells) if c in ("1/2", "2/2"))
+    rows.nth(hit).scroll_into_view_if_needed(); rows.nth(hit).click(); pg.wait_for_timeout(2500)
+    info = pg.locator(".sel-info").inner_text()
+    check("сводка сделки показывает исполнения частями и БУ", "TP1 70%" in info and "БУ после TP1" in info, info[-90:])
+    bes = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({tps:[{pct:3,share:70},{pct:6,share:30}], be_after_tp1:true})}).then(r => r.json())""")
+    reasons = {t["reason"] for t in bes["trades"]}
+    check("API: сделки с безубытком и частичными тейками", {"TP", "SL"} & reasons and all(abs(sum(f["share"] for f in t["fills"]) - 1) < 1e-9 for t in bes["trades"]), str(sorted(reasons)))
+    pg.wait_for_timeout(1200)
+    pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1500)
+    check("после перезагрузки сохранились тейки частями и БУ", pg.locator(".tp-row").count() == 2 and pg.locator(".tp-row input").nth(1).input_value() == "70"
+          and pg.locator(".tp-editor label.field.check input").is_checked())
+    check("у блока тейков есть подсказки «?»", pg.locator(".tp-editor .help").count() >= 4)
 
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
@@ -241,7 +276,7 @@ def scenario(pg, base, state_url):
         if "▸" in btn.inner_text():
             btn.click()
     field(pg, "Режим").first.locator("select").select_option("drop")     # режим фильтра остывания: открывает поля метрики и порога
-    pg.locator("aside.params label.field.check input").check()
+    field(pg, "включить").locator("input").check()                       # фильтр ликвидаций: показывает его поля
     fields = pg.locator("aside.params label.field")
     n_fields = fields.count()
     no_help = [fields.nth(i).inner_text().strip().split("\n")[0] for i in range(n_fields) if fields.nth(i).locator(".help").count() == 0]
@@ -250,7 +285,7 @@ def scenario(pg, base, state_url):
     no_group_help = [groups.nth(i).inner_text().strip() for i in range(groups.count())
                      if groups.nth(i).locator(".help").count() == 0 and groups.nth(i).inner_text().strip() not in ("▾ Данные", "▾ Режим")]
     check("у групп параметров и фильтров есть «?»", not no_group_help, str(no_group_help))
-    for label in ("Подтверждение", "Тейк-профит", "Источник метрик", "Актив"):
+    for label in ("Подтверждение", "Стоп-лосс", "Источник метрик", "Актив"):
         h = field(pg, label).locator(".help").first
         h.hover()
         pg.wait_for_timeout(200)

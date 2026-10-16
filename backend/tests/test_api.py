@@ -46,7 +46,7 @@ def client(tmp_path, monkeypatch):
                SIDE="both", ONLY="", COOL_DROP="", COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0",
                CORS_ORIGINS="http://localhost:5173",
                SOURCES="", SOURCE_DEFAULT="", LIQ_SOURCE="", SYMBOLS="", SYMBOL="", SYMBOL_DEFAULT="",
-               STATE_FILE=str(tmp_path / "state.json"))      # пустые значения не дают реальному backend/.env подмешаться в тесты
+               TP_LEVELS="", BE_AFTER_TP1="", STATE_FILE=str(tmp_path / "state.json"))      # пустые значения не дают реальному backend/.env подмешаться в тесты
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     return TestClient(create_app(load_settings()))
@@ -225,3 +225,45 @@ def test_multiple_assets(tmp_path, monkeypatch):
     assert pe < 20 < pb
     assert c.get("/api/candles", params={"symbol": "DOGE/USDT:USDT"}).status_code == 422
     assert c.post("/api/backtest", json={"symbol": "DOGE/USDT:USDT"}).status_code == 422
+
+
+def test_multi_tp_in_api(client):
+    d = client.get("/api/config").json()["defaults"]
+    assert d["tps"] == [{"pct": 3.0, "share": 100.0}] and d["be_after_tp1"] is False and "tp_pct" not in d
+    two = [{"pct": 1.5, "share": 50}, {"pct": 3, "share": 50}]
+    j = client.post("/api/backtest", json={"tps": two, "be_after_tp1": True, "side": "long"}).json()
+    t = j["trades"][0]
+    assert j["params"]["tps"] == two and j["params"]["be_after_tp1"] is True and "tp_pct" not in j["params"]
+    assert t["tps"] == pytest.approx([t["entry"] * 1.015, t["entry"] * 1.03]) and t["tp_shares"] == [0.5, 0.5] and t["be"] is True
+    assert [f["label"] for f in t["fills"]][:2] == ["TP1", "TP2"] and t["tp_hits"] == 2 and t["reason"] == "TP"
+    assert abs(sum(f["share"] for f in t["fills"]) - 1.0) < 1e-9 and t["fills"][0]["ts"] <= t["fills"][1]["ts"]
+    assert t["exit_avg"] == pytest.approx((t["fills"][0]["price"] + t["fills"][1]["price"]) / 2)
+    tot = j["stats"]["total"]
+    assert tot["tp_reach"][0] >= tot["tp_reach"][1] >= tot["tp_reach"][2] == 0 and tot["tp_reach"][1] >= 1 and "be" in tot
+    # старое поле tp_pct без tps работает как один тейк на 100%
+    j = client.post("/api/backtest", json={"tp_pct": 2, "side": "long"}).json()
+    assert j["params"]["tps"] == [{"pct": 2.0, "share": 100.0}]
+
+
+def test_multi_tp_validation(client):
+    bad = {
+        "доли не 100%": [{"pct": 1, "share": 60}, {"pct": 2, "share": 60}],
+        "тейки не растут": [{"pct": 2, "share": 50}, {"pct": 1, "share": 50}],
+    }
+    for name, tps in bad.items():
+        r = client.post("/api/backtest", json={"tps": tps})
+        assert r.status_code == 422, name
+    assert "100%" in client.post("/api/backtest", json={"tps": bad["доли не 100%"]}).json()["detail"]
+    four = [{"pct": i + 1, "share": 25} for i in range(4)]
+    assert client.post("/api/backtest", json={"tps": four}).status_code == 422          # не больше трёх
+    assert client.post("/api/backtest", json={"tps": []}).status_code == 422
+
+
+def test_tp_levels_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("TP_LEVELS", "3:50,6:30,10:20")
+    monkeypatch.setenv("BE_AFTER_TP1", "true")
+    d = load_settings().defaults
+    assert d["tps"] == [{"pct": 3.0, "share": 50.0}, {"pct": 6.0, "share": 30.0}, {"pct": 10.0, "share": 20.0}] and d["be_after_tp1"] is True
+    monkeypatch.setenv("TP_LEVELS", "3:50,6:40")
+    with pytest.raises(SystemExit, match="100%"):
+        load_settings()

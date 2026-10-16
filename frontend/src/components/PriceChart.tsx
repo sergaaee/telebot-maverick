@@ -40,8 +40,10 @@ interface Props {
 
 type Range = { from: number; to: number };
 
-const COLORS = { up: '#26a69a', down: '#ef5350', rev: '#f0a030', open: '#8a94a8', tp: '#26a69a', sl: '#ef5350', entry: '#8a94a8' };
-const reasonColor = (r: Trade['reason']) => (r === 'TP' ? COLORS.up : r === 'SL' ? COLORS.down : r === 'REV' ? COLORS.rev : COLORS.open);
+const COLORS = { up: '#26a69a', down: '#ef5350', rev: '#f0a030', open: '#8a94a8', be: '#6ea0ff', sl: '#ef5350', entry: '#8a94a8' };
+const TP_COLORS = ['#26a69a', '#35c9b8', '#7be0d2'];
+/** Цвет маркера закрытия по метке исполнения: TP1..TP3, SL, BE, REV, OPEN. */
+const labelColor = (l: string) => (l.startsWith('TP') ? COLORS.up : l === 'SL' ? COLORS.down : l === 'BE' ? COLORS.be : l === 'REV' ? COLORS.rev : COLORS.open);
 
 /** Для фиксированного ТФ: сколько баров запрашиваем за раз и сколько максимум показываем в видимой области. */
 const FIXED_MAX_BARS = 6000;
@@ -92,15 +94,19 @@ export default function PriceChart(props: Props) {
           text: labels ? `${long ? 'L' : 'S'}${tr.n}` : '',
           size: 1.4,
         });
-      if (inWin(snap(tr.exit_ts / 1000)))
+      // каждое исполнение (частичные тейки и финальное закрытие) — свой маркер
+      tr.fills.forEach((f, k) => {
+        const ft = snap(f.ts / 1000);
+        if (!inWin(ft)) return;
         markers.push({
-          time: snap(tr.exit_ts / 1000) as UTCTimestamp,
+          time: ft as UTCTimestamp,
           position: long ? 'aboveBar' : 'belowBar',
           shape: 'circle',
-          color: reasonColor(tr.reason),
-          text: labels ? tr.reason : '',
-          size: 1,
+          color: labelColor(f.label),
+          text: labels ? f.label : '',
+          size: k < tr.fills.length - 1 ? 0.8 : 1,
         });
+      });
     }
     if (showSkipped) {
       for (const s of signals.filter((x) => !x.taken && inWin(snap(x.ts / 1000)))) {
@@ -110,19 +116,25 @@ export default function PriceChart(props: Props) {
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     c.setMarkers(markers);
 
-    // уровни: по две серии на вид (чётные/нечётные сделки), чтобы соседние сегменты не пересекались по времени
-    const kinds: [string, 'tp' | 'sl' | 'entry', string, LineStyle][] = [
-      ['tp', 'tp', COLORS.tp, LineStyle.Dashed],
-      ['sl', 'sl', COLORS.sl, LineStyle.Dashed],
-      ['entry', 'entry', COLORS.entry, LineStyle.Dotted],
+    // Уровни: по две серии на вид (чётные/нечётные сделки), чтобы соседние сегменты не пересекались по времени.
+    // Линия каждого тейка идёт до его исполнения, стоп — до переноса в безубыток (дальше остаётся линия входа), вход — до закрытия.
+    type Kind = { name: string; color: string; style: LineStyle; segment: (tr: Trade) => { price: number; end: number } | null };
+    const fillTs = (tr: Trade, label: string) => tr.fills.find((f) => f.label === label)?.ts;
+    const kinds: Kind[] = [
+      ...[0, 1, 2].map((i): Kind => ({
+        name: `tp${i}`, color: TP_COLORS[i], style: LineStyle.Dashed,
+        segment: (tr) => (i < tr.tps.length ? { price: tr.tps[i], end: fillTs(tr, `TP${i + 1}`) ?? tr.exit_ts } : null),
+      })),
+      { name: 'sl', color: COLORS.sl, style: LineStyle.Dashed, segment: (tr) => ({ price: tr.sl, end: tr.be_ts ?? tr.exit_ts }) },
+      { name: 'entry', color: COLORS.entry, style: LineStyle.Dotted, segment: (tr) => ({ price: tr.entry, end: tr.exit_ts }) },
     ];
-    for (const [name, field, color, style] of kinds) {
+    for (const kind of kinds) {
       for (const parity of [0, 1]) {
-        const key = `${name}${parity}`;
+        const key = `${kind.name}-${parity}`;
         let s = levels.current[key];
         if (!s) {
           s = chart.current.addLineSeries({
-            color, lineWidth: 1, lineStyle: style, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+            color: kind.color, lineWidth: 1, lineStyle: kind.style, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           levels.current[key] = s;
         }
@@ -135,14 +147,16 @@ export default function PriceChart(props: Props) {
         };
         if (showLevels) {
           for (const tr of trades.filter((x) => x.n % 2 === parity)) {
+            const seg = kind.segment(tr);
+            if (!seg) continue;
             const a0 = snap(tr.entry_ts / 1000);
-            const b0 = Math.max(snap(tr.exit_ts / 1000), a0 + t);
+            const b0 = Math.max(snap(seg.end / 1000), a0 + t);
             if (b0 < lo || a0 > hi) continue; // сделка целиком вне окна
             const a = Math.max(a0, lo);
             const b = Math.min(b0, hi); // обрезаем по окну
             if (b <= a || a <= last) continue;
-            push(a, tr[field]);
-            push(b, tr[field]);
+            push(a, seg.price);
+            push(b, seg.price);
             if (b + t <= hi) push(b + t); // разрыв между сегментами
           }
         }
@@ -353,7 +367,7 @@ export default function PriceChart(props: Props) {
       c.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title });
     priceLines.current = [
       mk(tr.entry, '#cfd6e4', `вход #${tr.n}`, LineStyle.Solid),
-      mk(tr.tp, COLORS.tp, 'TP', LineStyle.Dashed),
+      ...tr.tps.map((price, i) => mk(price, TP_COLORS[i], tr.tps.length > 1 ? `TP${i + 1} · ${Math.round(tr.tp_shares[i] * 100)}%` : 'TP', LineStyle.Dashed)),
       mk(tr.sl, COLORS.sl, 'SL', LineStyle.Dashed),
     ];
   }, [props.selected, props.trades]);

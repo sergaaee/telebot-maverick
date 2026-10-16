@@ -23,6 +23,10 @@ LONG_ON, SHORT_ON = D["side"] in ("both", "long"), D["side"] in ("both", "short"
 
 
 async def main():
+    if len(D["tps"]) > 1 or D["be_after_tp1"]:
+        # в бэктесте и интерфейсе такая стратегия считается иначе, чем бот её исполнил бы, поэтому молча упрощать нельзя
+        raise SystemExit("Бот пока умеет один тейк на всю позицию без переноса в безубыток. Задайте в backend/.env один уровень "
+                         "(TP_LEVELS пустой или '6:100') и BE_AFTER_TP1=false. Тейки частями и БУ сейчас работают в бэктесте и интерфейсе.")
     trader = Trader(
         S.exchange,
         os.getenv("API_KEY"),
@@ -31,7 +35,7 @@ async def main():
         S.symbol,
         D["size"],
         os.getenv("DRY_RUN", "true").lower() != "false",
-        D["tp_pct"],
+        D["tps"][0]["pct"],
         D["sl_pct"],
     )
     client = TelegramClient(os.path.join(ROOT, os.getenv("TG_SESSION", "maverick")), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])

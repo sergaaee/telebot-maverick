@@ -22,6 +22,28 @@ def _num(name, default, cast=float):
     return cast(v) if v is not None else default
 
 
+def _tps():
+    """TP_LEVELS="3:50,6:50" (расстояние % : доля позиции %) или один тейк из TP_PCT на 100%."""
+    raw = _opt("TP_LEVELS")
+    if not raw:
+        return [{"pct": _num("TP_PCT", 6.0), "share": 100.0}]
+    try:
+        levels = [{"pct": float(a), "share": float(b)} for a, b in (x.split(":") for x in raw.split(","))]
+    except ValueError:
+        raise SystemExit(f"TP_LEVELS='{raw}': ожидается 'расстояние%:доля%,...', например 3:50,6:50")
+    from app.core.backtest import normalize_tps       # одна и та же проверка для env, API и консоли
+    try:
+        normalize_tps([(l["pct"], l["share"]) for l in levels])
+    except ValueError as e:
+        raise SystemExit(f"TP_LEVELS='{raw}': {e}")
+    return levels
+
+
+def _bool(name, default=False):
+    v = _opt(name)
+    return default if v is None else v.lower() in ("1", "true", "yes", "on")
+
+
 def _path(name, default):
     p = Path(os.getenv(name, default).strip() or default)
     return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
@@ -90,7 +112,7 @@ def load_settings() -> Settings:
         side=side, only=only,
         local_min=_num("LOCAL_MIN", 1.85), scalp_min=_num("SCALP_MIN", 1.25),
         short_local_max=_num("SHORT_LOCAL_MAX", 0.7), short_scalp_max=_num("SHORT_SCALP_MAX", 1.2),
-        confirm=_num("CONFIRM", 4, int), tp_pct=_num("TP_PCT", 6.0), sl_pct=_num("SL_PCT", 2.0),
+        confirm=_num("CONFIRM", 4, int), tps=_tps(), be_after_tp1=_bool("BE_AFTER_TP1"), sl_pct=_num("SL_PCT", 2.0),
         size=_num("ORDER_SIZE", 0.1), fee=_num("FEE", 0.0005), slip=_num("SLIPPAGE", 0.0),
         cool_metric=(_opt("COOL_METRIC") or "scalp").lower(),
         cool_drop=_num("COOL_DROP", None), cool_declines=_num("COOL_DECLINES", None, int),

@@ -15,7 +15,7 @@ export default function TradesTable({ trades, selected, onSelect }: { trades: Tr
         <thead>
           <tr>
             <th>#</th><th>сторона</th><th>вход (UTC)</th><th>цена</th><th>выход</th><th>цена</th><th>причина</th>
-            <th>PnL</th><th>PnL $</th><th>держал</th><th>Local</th><th>Scalp</th>
+            <th>тейки</th><th>PnL</th><th>PnL $</th><th>держал</th><th>Local</th><th>Scalp</th>
           </tr>
         </thead>
         <tbody>
@@ -28,6 +28,9 @@ export default function TradesTable({ trades, selected, onSelect }: { trades: Tr
               <td>{fmtTs(t.exit_ts)}</td>
               <td>{fmtPrice(t.exit)}</td>
               <td><span className={`tag tag-${t.reason}`}>{t.reason}</span></td>
+              <td title={t.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}>
+                {t.tps.length > 1 ? `${t.tp_hits}/${t.tps.length}` : t.tp_hits ? '1/1' : '–'}
+              </td>
               <td className={signClass(t.pnl_pct)}>{fmtPct(t.pnl_pct)}</td>
               <td className={signClass(t.pnl_usd)}>{fmtUsd(t.pnl_usd)}</td>
               <td>{fmtHold(t.hold_h)}</td>

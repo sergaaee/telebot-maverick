@@ -96,28 +96,83 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR):
     return candles
 
 
-def _scan(candles, i, d, tp, sl, slip):
-    """Естественный выход позиции, открытой на open свечи i: (reason, exit_price, idx)."""
+MAX_TPS = 3
+
+
+def normalize_tps(tps):
+    """Проверяет тейки частями: [(расстояние от входа в %, доля позиции в %), ...] -> [(pct, доля 0..1)].
+    От 1 до 3 уровней, расстояния строго растут, доли > 0 и в сумме дают 100%."""
+    levels = [(float(p), float(s)) for p, s in tps]
+    if not 1 <= len(levels) <= MAX_TPS:
+        raise ValueError(f"Тейков должно быть от 1 до {MAX_TPS}")
+    if any(p <= 0 for p, _ in levels):
+        raise ValueError("Расстояние до тейка должно быть больше 0%")
+    if any(b <= a for (a, _), (b, _) in zip(levels, levels[1:])):
+        raise ValueError("Каждый следующий тейк должен быть дальше предыдущего")
+    if any(s <= 0 for _, s in levels):
+        raise ValueError("Доля позиции на каждом тейке должна быть больше 0%")
+    if abs(sum(s for _, s in levels) - 100) > 1e-6:
+        raise ValueError(f"Доли тейков должны давать в сумме 100% (сейчас {sum(s for _, s in levels):g}%)")
+    return [(p, s / 100) for p, s in levels]
+
+
+def _scan(candles, i, d, entry, tps, sl, slip, be):
+    """Ход позиции, открытой на open свечи i. tps: [(цена, доля)]. Возвращает события [(idx, цена, доля, метка)],
+    метки: TP1..TP3, SL, BE (стоп в безубытке), OPEN (данные кончились).
+
+    Порядок внутри свечи (внутри минуты он неизвестен, поэтому выбираем худшее для результата):
+      1. сначала проверяется действующий стоп (SL, а после первого тейка при be — вход): если задет, остаток закрыт по нему;
+      2. затем по порядку исполняются тейки, до которых дошла цена (при гэпе — по цене открытия);
+      3. если в этой свече исполнился первый тейк и стоп перенесён в безубыток, а цена также коснулась входа,
+         считаем, что возврат к входу был после тейка: остаток закрыт в безубытке."""
+    stop, stop_label = sl, "SL"
+    remaining, k_tp, events = 1.0, 0, []
     for k in range(i, len(candles)):
         _, o, h, l, _ = candles[k]
-        if d == 1:
-            if l <= sl:
-                return "SL", min(sl, o) * (1 - slip), k
-            if h >= tp:
-                return "TP", max(tp, o), k
-        else:
-            if h >= sl:
-                return "SL", max(sl, o) * (1 + slip), k
-            if l <= tp:
-                return "TP", min(tp, o), k
-    return "OPEN", candles[-1][4], len(candles) - 1
+        if (l <= stop) if d == 1 else (h >= stop):
+            px = min(stop, o) * (1 - slip) if d == 1 else max(stop, o) * (1 + slip)
+            events.append((k, px, remaining, stop_label))
+            return events
+        be_now = False
+        while k_tp < len(tps):
+            lvl, share = tps[k_tp]
+            if not ((h >= lvl) if d == 1 else (l <= lvl)):
+                break
+            px = max(lvl, o) if d == 1 else min(lvl, o)
+            take = remaining if k_tp == len(tps) - 1 else min(share, remaining)  # последний тейк забирает остаток
+            events.append((k, px, take, f"TP{k_tp + 1}"))
+            remaining -= take
+            k_tp += 1
+            if k_tp == 1 and be and len(tps) > 1:
+                stop, stop_label, be_now = entry, "BE", True
+        if remaining <= 1e-12:
+            return events
+        if be_now and ((l <= stop) if d == 1 else (h >= stop)):
+            events.append((k, stop * (1 - slip) if d == 1 else stop * (1 + slip), remaining, "BE"))
+            return events
+    events.append((len(candles) - 1, candles[-1][4], remaining, "OPEN"))
+    return events
 
 
-def _close(trade, exit_p, reason, idx, candles, fee, size):
+def _finalize(trade, events, candles, fee, size):
+    """Итог сделки по списку событий (частичных и финального закрытия): PnL = сумма долей × доходность - комиссия за вход и выход."""
     d = 1 if trade["side"] == "long" else -1
-    pnl = d * (exit_p / trade["entry"] - 1) - 2 * fee
-    trade.update(exit=exit_p, reason=reason, exit_ts=candles[idx][0], _j=idx,
-                 pnl_pct=pnl * 100, pnl_usd=pnl * trade["entry"] * size)
+    entry = trade["entry"]
+    gross = sum(s * d * (p / entry - 1) for _, p, s, _ in events)
+    pnl = gross - 2 * fee
+    last = events[-1]
+    label = last[3]
+    total = sum(s for _, _, s, _ in events)
+    tp1 = next((e for e in events if e[3] == "TP1"), None)
+    trade.update(
+        exit=last[1], exit_avg=sum(s * p for _, p, s, _ in events) / total, exit_ts=candles[last[0]][0],
+        reason="TP" if label.startswith("TP") else label,
+        tp_hits=sum(e[3].startswith("TP") for e in events),
+        be_ts=candles[tp1[0]][0] if (tp1 and trade["be"]) else None,
+        fills=[{"ts": candles[idx][0], "price": p, "share": s, "label": lab} for idx, p, s, lab in events],
+        _events=events, _j=last[0],
+        pnl_pct=pnl * 100, pnl_usd=pnl * entry * size,
+    )
 
 
 def apply_only(local_min, scalp_min, short, only):
@@ -133,11 +188,14 @@ def apply_only(local_min, scalp_min, short, only):
 
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None, cooldown_h=0.0, only=None):
+             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False):
     """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
+    tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
+    be_after_tp1 — после первого тейка переносить стоп в цену входа.
     Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
     (закрытие по open свечи входа + новая позиция)."""
     local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
+    levels = normalize_tps(tps if tps else [(tp_pct, 100)])
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, cur = [], None
@@ -153,20 +211,24 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
         if cur is not None:
             if cur["side"] == side:
                 continue  # такая позиция уже открыта
+            # разворот на open свечи входа: уже исполненные тейки остаются, остаток закрывается по рынку
             o = candles[i][1]
-            _close(cur, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), "REV", i, candles, fee, size)
+            kept = [e for e in cur["_events"] if e[0] < i]
+            rest = 1.0 - sum(e[2] for e in kept)
+            _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size)
         entry = candles[i][1] * (1 + d * slip)
-        tp, sl = entry * (1 + d * tp_pct / 100), entry * (1 - d * sl_pct / 100)
-        cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": tp, "sl": sl}
-        reason, exit_p, j = _scan(candles, i, d, tp, sl, slip)
-        _close(cur, exit_p, reason, j, candles, fee, size)
+        prices = [entry * (1 + d * p / 100) for p, _ in levels]
+        sl = entry * (1 - d * sl_pct / 100)
+        cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": prices[-1], "tps": prices,
+               "tp_shares": [s for _, s in levels], "sl": sl, "be": bool(be_after_tp1 and len(levels) > 1)}
+        _finalize(cur, _scan(candles, i, d, entry, list(zip(prices, [s for _, s in levels])), sl, slip, cur["be"]), candles, fee, size)
         trades.append(cur)
     return trades
 
 
 def stats(trades):
     if not trades:
-        return {"trades": 0, "tp": 0, "sl": 0, "open": 0, "rev": 0, "winrate": 0, "total_usd": 0,
+        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "rev": 0, "winrate": 0, "total_usd": 0,
                 "avg_pct": 0, "profit_factor": 0, "max_dd_usd": 0}
     wins = [t["pnl_usd"] for t in trades if t["pnl_usd"] > 0]
     losses = [-t["pnl_usd"] for t in trades if t["pnl_usd"] <= 0]
@@ -178,6 +240,7 @@ def stats(trades):
     return {"trades": len(trades),
             "tp": sum(t["reason"] == "TP" for t in trades),
             "sl": sum(t["reason"] == "SL" for t in trades),
+            "be": sum(t["reason"] == "BE" for t in trades),
             "open": sum(t["reason"] == "OPEN" for t in trades),
             "rev": sum(t["reason"] == "REV" for t in trades),
             "winrate": 100 * len(wins) / len(trades),
@@ -188,7 +251,7 @@ def stats(trades):
 
 
 def fmt(s):
-    return (f"сделок {s['trades']} (TP {s['tp']} / SL {s['sl']} / разворот {s['rev']} / открыта {s['open']}), "
+    return (f"сделок {s['trades']} (TP {s['tp']} / SL {s['sl']} / БУ {s['be']} / разворот {s['rev']} / открыта {s['open']}), "
             f"winrate {s['winrate']:.1f}%, итого {s['total_usd']:+.0f} $, "
             f"средняя {s['avg_pct']:+.3f}%, PF {s['profit_factor']:.2f}, макс. просадка {s['max_dd_usd']:.0f} $")
 
@@ -331,6 +394,8 @@ def main():
     ap.add_argument("--local-min", type=float, default=1.85)
     ap.add_argument("--scalp-min", type=float, default=1.25)
     ap.add_argument("--tp", type=float, default=6.0)
+    ap.add_argument("--tps", help="тейки частями 'расстояние%:доля%,...', до 3, доли в сумме 100, например 3:50,6:50; заменяет --tp")
+    ap.add_argument("--be-after-tp1", action="store_true", help="после первого тейка переносить стоп в цену входа (безубыток)")
     ap.add_argument("--sl", type=float, default=2.0)
     ap.add_argument("--fee", type=float, default=0.0005, help="taker-комиссия за сторону, доля")
     ap.add_argument("--slip", type=float, default=0.0, help="проскальзывание, доля")
@@ -380,7 +445,15 @@ def main():
     if a.only:
         print(f"РЕЖИМ: только Deep {a.only.capitalize()} (вторая метрика игнорируется)")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
-    common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm, only=a.only)
+    tps = None
+    if a.tps:
+        try:
+            tps = [(float(x.split(":")[0]), float(x.split(":")[1])) for x in a.tps.split(",")]
+            normalize_tps(tps)
+        except (ValueError, IndexError) as e:
+            raise SystemExit(f"--tps: {e}. Формат: расстояние%:доля%,... например 3:50,6:50")
+    common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm, only=a.only,
+                  tps=tps, be_after_tp1=a.be_after_tp1)
     short = None if a.no_short else (a.short_local_max, a.short_scalp_max)
 
     if a.sweep_long or a.sweep_short:
@@ -422,7 +495,8 @@ def main():
         explain(signals, candles, a, short, common, extra, trades)
     if trades:
         with open(a.out, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=[x for x in trades[0] if not x.startswith('_')], extrasaction='ignore')
+            w = csv.DictWriter(f, fieldnames=[x for x in trades[0] if not x.startswith('_') and not isinstance(trades[0][x], list)],
+                               extrasaction='ignore')
             w.writeheader()
             w.writerows(trades)
         print(f"Сделки -> {a.out}")

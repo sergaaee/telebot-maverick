@@ -35,6 +35,10 @@ def _day_ms(s, end=False):
 def effective_params(defaults: dict, p: BacktestParams) -> dict:
     eff = dict(defaults)
     eff.update({k: getattr(p, k) for k in p.model_fields_set})
+    if "tp_pct" in p.model_fields_set and "tps" not in p.model_fields_set and p.tp_pct is not None:
+        eff["tps"] = [{"pct": p.tp_pct, "share": 100.0}]          # совместимость: один тейк на всю позицию
+    eff.pop("tp_pct", None)
+    eff["tps"] = [l.model_dump() if hasattr(l, "model_dump") else dict(l) for l in eff["tps"]]
     eff.setdefault("date_from", None)
     eff.setdefault("date_to", None)
     return eff
@@ -71,6 +75,8 @@ def _extra_stats(trades, span_ms):
         "max_loss_streak": best,
         "exposure_pct": 100 * held / span_ms if span_ms > 0 else 0.0,
         "expectancy_usd": sum(pn) / len(pn) if pn else 0.0,
+        # сколько сделок дошли до первого / второго / третьего тейка
+        "tp_reach": [sum(t["tp_hits"] >= k for t in trades) for k in (1, 2, 3)],
     }
 
 
@@ -120,7 +126,12 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
     short = None if side == "long" else (eff["short_local_max"], eff["short_scalp_max"])
     if side == "short":
         long_min = scalp_min = INF          # лонг никогда не срабатывает
-    common = dict(tp_pct=eff["tp_pct"], sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"],
+    try:
+        tps = [(l["pct"], l["share"]) for l in eff["tps"]]
+        backtest.normalize_tps(tps)
+    except ValueError as e:
+        raise ParamError(str(e))
+    common = dict(tp_pct=tps[0][0], tps=tps, be_after_tp1=bool(eff.get("be_after_tp1")), sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"],
                   confirm=eff["confirm"], only=eff["only"])
 
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, **common, **extra)
@@ -138,7 +149,9 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams) -> di
         r = rep.get(t["signal_ts"])
         out_trades.append({
             "n": i, "side": t["side"], "signal_ts": t["signal_ts"], "entry_ts": t["entry_ts"], "exit_ts": t["exit_ts"],
-            "entry": t["entry"], "exit": t["exit"], "tp": t["tp"], "sl": t["sl"], "reason": t["reason"],
+            "entry": t["entry"], "exit": t["exit"], "exit_avg": t["exit_avg"], "tp": t["tp"], "tps": t["tps"],
+            "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
+            "fills": t["fills"], "reason": t["reason"],
             "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
             "local": r[1] if r else None, "scalp": r[2] if r else None,
             "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,

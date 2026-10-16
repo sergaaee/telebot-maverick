@@ -26,13 +26,16 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
     <div className="stats">
       <div className="cards">
         <Card label="Итого" value={fmtUsd(t.total_usd)} cls={signClass(t.total_usd)} sub={`на ${result.params.size} BTC`} />
-        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · SL ${t.sl} · разворот ${t.rev} · откр. ${t.open}`} />
+        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev} · откр. ${t.open}`} />
         <Card label="Winrate" value={`${t.winrate.toFixed(1)}%`} />
         <Card label="Profit factor" value={fmtPf(t.profit_factor)} />
         <Card label="Макс. просадка" value={fmtUsd(-t.max_dd_usd)} cls="neg" />
         <Card label="Средняя сделка" value={fmtPct(t.avg_pct, 3)} cls={signClass(t.avg_pct)} sub={fmtUsd(t.expectancy_usd, 1)} />
         <Card label="Ср. плюс / минус" value={`${fmtUsd(t.avg_win_usd)} / ${fmtUsd(t.avg_loss_usd)}`} />
         <Card label="Лучшая / худшая" value={`${fmtUsd(t.best_usd)} / ${fmtUsd(t.worst_usd)}`} />
+        {result.params.tps.length > 1 && (
+          <Card label="Дошли до тейков" value={t.tp_reach.slice(0, result.params.tps.length).join(' / ')} sub={result.params.tps.map((_, i) => `TP${i + 1}`).join(' / ')} />
+        )}
         <Card label="Серия убытков" value={String(t.max_loss_streak)} sub="макс. подряд" />
         <Card label="В позиции" value={`${t.exposure_pct.toFixed(0)}%`} sub="доля времени" />
       </div>

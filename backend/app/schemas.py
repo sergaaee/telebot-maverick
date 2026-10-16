@@ -3,6 +3,11 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class TpLevel(BaseModel):
+    pct: float = Field(gt=0, le=100, description="расстояние до тейка от цены входа, %")
+    share: float = Field(gt=0, le=100, description="какая доля позиции закрывается на этом тейке, %")
+
+
 class BacktestParams(BaseModel):
     """Любое поле можно не передавать — тогда берётся значение из env (backend/.env).
     Явный null отключает необязательный параметр (фильтры, --only)."""
@@ -16,7 +21,9 @@ class BacktestParams(BaseModel):
     short_local_max: Optional[float] = Field(None, ge=-10, le=10)
     short_scalp_max: Optional[float] = Field(None, ge=-10, le=10)
     confirm: Optional[int] = Field(None, ge=1, le=100)
-    tp_pct: Optional[float] = Field(None, gt=0, le=100)
+    tps: Optional[list[TpLevel]] = Field(None, min_length=1, max_length=3, description="тейки частями (1–3), доли в сумме 100%")
+    be_after_tp1: Optional[bool] = None
+    tp_pct: Optional[float] = Field(None, gt=0, le=100, description="устарело: один тейк на 100% (если tps не передан)")
     sl_pct: Optional[float] = Field(None, gt=0, le=100)
     size: Optional[float] = Field(None, gt=0)
     fee: Optional[float] = Field(None, ge=0, le=0.05)

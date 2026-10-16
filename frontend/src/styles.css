@@ -99,3 +99,13 @@ select.wide { width: 100%; }
 .group-head { display: flex; align-items: center; } .group-head .group-title { width: auto; flex: none; }
 .field.check .label { color: var(--text); } .field.check input { margin: 0 6px 0 0; }
 .chart-bar .help { margin-left: 3px; }
+
+/* тейки частями */
+.tp-editor { display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: #0e131a; }
+.tp-head, .tp-row { display: grid; grid-template-columns: 34px 1fr 1fr; gap: 6px; align-items: center; }
+.tp-head { color: var(--muted); font-size: 11px; } .tp-head span { display: flex; align-items: center; }
+.tp-row b { color: var(--pos); font-size: 12px; } .tp-row .input-wrap input { width: 100%; min-width: 0; }
+.tp-row .input-wrap { width: 100%; } .tp-row .input-wrap em { width: 14px; }
+.tp-sum { font-size: 11px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; } .tp-sum.ok { color: var(--muted); } .tp-sum.bad { color: var(--neg); }
+.seg-sm button { padding: 2px 11px; }
+.tag-BE { color: #6ea0ff; } .fills { color: var(--muted); }

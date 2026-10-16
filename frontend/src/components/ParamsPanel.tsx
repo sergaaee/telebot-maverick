@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react';
 import { fmtDate } from '../format';
 import { HELP, type HelpKey } from '../helpTexts';
-import type { AssetInfo, Only, Params, Side, SourceInfo } from '../types';
+import { MAX_TPS, fillRemainder, resizeTps, sumShares, validateTps } from '../tps';
+import type { AssetInfo, Only, Params, Side, SourceInfo, TpLevel } from '../types';
 import Help from './Help';
 
 interface Props {
@@ -43,6 +44,56 @@ function Num({ label, help, value, onChange, step = 0.05, suffix }: {
   );
 }
 
+/** Тейк-профиты частями: число уровней (1–3), расстояние и доля позиции на каждом, перенос стопа в безубыток после первого. */
+function TpEditor({ p, onChange }: { p: Params; onChange: (p: Params) => void }) {
+  const n = p.tps.length;
+  const err = validateTps(p.tps);
+  const sum = sumShares(p.tps);
+  const setLevel = (i: number, patch: Partial<TpLevel>) =>
+    onChange({ ...p, tps: p.tps.map((l, k) => (k === i ? { ...l, ...patch } : l)) });
+  const setCount = (k: number) => onChange({ ...p, tps: resizeTps(p.tps, k), be_after_tp1: k > 1 ? p.be_after_tp1 : false });
+  return (
+    <div className="tp-editor">
+      <div className="field">
+        <Label text="Тейк-профитов" help="tp_count" />
+        <div className="seg seg-sm">
+          {Array.from({ length: MAX_TPS }, (_, i) => i + 1).map((k) => (
+            <button type="button" key={k} className={n === k ? 'on' : ''} onClick={() => setCount(k)}>{k}</button>
+          ))}
+        </div>
+      </div>
+      <div className="tp-head">
+        <span />
+        <span>расстояние <Help text={HELP.tp_level_pct} /></span>
+        <span>закрыть <Help text={HELP.tp_level_share} /></span>
+      </div>
+      {p.tps.map((l, i) => (
+        <div className="tp-row" key={i}>
+          <b>TP{i + 1}</b>
+          <span className="input-wrap">
+            <input type="number" step={0.5} min={0} value={Number.isFinite(l.pct) ? l.pct : ''} onChange={(e) => setLevel(i, { pct: e.target.value === '' ? NaN : Number(e.target.value) })} />
+            <em>%</em>
+          </span>
+          <span className="input-wrap">
+            <input type="number" step={5} min={0} max={100} value={Number.isFinite(l.share) ? l.share : ''} onChange={(e) => setLevel(i, { share: e.target.value === '' ? NaN : Number(e.target.value) })} />
+            <em>%</em>
+          </span>
+        </div>
+      ))}
+      <div className={`tp-sum ${err ? 'bad' : 'ok'}`}>
+        Σ долей: {sum}%{err ? ` — ${err}` : ''}
+        {n > 1 && Math.abs(sum - 100) > 0.001 && (
+          <button type="button" className="link" onClick={() => onChange({ ...p, tps: fillRemainder(p.tps) })}>дополнить до 100%</button>
+        )}
+      </div>
+      <label className="field check">
+        <input type="checkbox" checked={p.be_after_tp1 && n > 1} disabled={n < 2} onChange={(e) => onChange({ ...p, be_after_tp1: e.target.checked })} />
+        <Label text="В безубыток после 1-го тейка" help="be_after_tp1" />
+      </label>
+    </div>
+  );
+}
+
 function Section({ title, help, children, open = true }: { title: string; help?: HelpKey; children: ReactNode; open?: boolean }) {
   const [o, setO] = useState(open);
   return (
@@ -65,6 +116,7 @@ export default function ParamsPanel({ params: p, sources, assets, loading, onCha
   const setCoolMode = (m: string) =>
     onChange({ ...p, cool_drop: m === 'drop' ? 0.1 : null, cool_declines: m === 'declines' ? 2 : null });
   const liqOn = p.liq_hours != null;
+  const tpErr = validateTps(p.tps);
   const src = sources.find((s) => s.id === p.source);
   const liqSrc = p.liq_source ? sources.find((s) => s.id === p.liq_source) : src;
   const asset = assets.find((a) => a.symbol === p.symbol);
@@ -148,7 +200,7 @@ export default function ParamsPanel({ params: p, sources, assets, loading, onCha
       </Section>
 
       <Section title="Выход и издержки" help="groupExit">
-        <Num label="Тейк-профит" help="tp_pct" value={p.tp_pct} step={0.5} suffix="%" onChange={num('tp_pct')} />
+        <TpEditor p={p} onChange={onChange} />
         <Num label="Стоп-лосс" help="sl_pct" value={p.sl_pct} step={0.5} suffix="%" onChange={num('sl_pct')} />
         <Num label="Размер" help="size" value={p.size} step={0.01} suffix="BTC" onChange={num('size')} />
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
@@ -208,8 +260,8 @@ export default function ParamsPanel({ params: p, sources, assets, loading, onCha
         </label>
       </Section>
 
-      <button type="button" className="run" disabled={loading} onClick={onRun}>
-        {loading ? 'Считаю…' : 'Запустить'}
+      <button type="button" className="run" disabled={loading || !!tpErr} onClick={onRun} title={tpErr ?? undefined}>
+        {loading ? 'Считаю…' : tpErr ? 'Исправьте тейки' : 'Запустить'}
       </button>
     </aside>
   );

@@ -1,4 +1,10 @@
 export type Side = 'both' | 'long' | 'short';
+
+/** Один тейк: расстояние до него от цены входа (%) и доля позиции (%), которая на нём закрывается. */
+export interface TpLevel {
+  pct: number;
+  share: number;
+}
 export type Only = 'local' | 'scalp' | null;
 
 /** Параметры, как их отдаёт и принимает бэкенд (fee/slip — доли, не проценты). */
@@ -15,7 +21,10 @@ export interface Params {
   short_local_max: number;
   short_scalp_max: number;
   confirm: number;
-  tp_pct: number;
+  /** тейки частями: от 1 до 3, доли в сумме 100% */
+  tps: TpLevel[];
+  /** после первого тейка переносить стоп в цену входа (безубыток) */
+  be_after_tp1: boolean;
   sl_pct: number;
   size: number;
   fee: number;
@@ -68,7 +77,15 @@ export interface AppConfig {
   data: DataInfo;
 }
 
-export type Reason = 'TP' | 'SL' | 'REV' | 'OPEN';
+export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN';
+
+/** Частичное или финальное закрытие: метка TP1..TP3 / SL / BE / REV / OPEN, доля от исходной позиции (0..1). */
+export interface Fill {
+  ts: number;
+  price: number;
+  share: number;
+  label: string;
+}
 
 export interface Trade {
   n: number;
@@ -78,8 +95,15 @@ export interface Trade {
   exit_ts: number;
   entry: number;
   exit: number;
+  exit_avg: number;
   tp: number;
+  tps: number[];
+  tp_shares: number[];
   sl: number;
+  be: boolean;
+  be_ts: number | null;
+  tp_hits: number;
+  fills: Fill[];
   reason: Reason;
   pnl_pct: number;
   pnl_usd: number;
@@ -100,6 +124,7 @@ export interface Stats {
   trades: number;
   tp: number;
   sl: number;
+  be: number;
   open: number;
   rev: number;
   winrate: number;
@@ -114,6 +139,8 @@ export interface Stats {
   max_loss_streak: number;
   exposure_pct: number;
   expectancy_usd: number;
+  /** сколько сделок дошли до 1-го / 2-го / 3-го тейка */
+  tp_reach: number[];
 }
 
 export interface BacktestResult {

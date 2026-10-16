@@ -8,7 +8,7 @@ import StatsPanel from './components/StatsPanel';
 import TradesTable from './components/TradesTable';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
-import type { AppConfig, BacktestResult, Params, TfMode, UiState } from './types';
+import type { AppConfig, BacktestResult, Params, Signal, TfMode, Trade, UiState } from './types';
 
 const profileKey = (source: string, symbol: string) => `${source}|${symbol}`;
 
@@ -23,10 +23,16 @@ function splitProfile(p: Params): Partial<Params> {
 /** Параметры для связки: умолчания из env, поверх них сохранённый профиль (с отбраковкой исчезнувших источников). */
 function loadProfile(cfg: AppConfig, source: string, symbol: string, st: UiState): { params: Params; tf: TfMode } {
   const prof = st.profiles?.[profileKey(source, symbol)];
-  const saved: Partial<Params> = { ...(prof?.params ?? {}) };
+  const saved: Partial<Params> & { tp_pct?: number } = { ...(prof?.params ?? {}) };
+  // профили старого формата хранили один тейк в tp_pct
+  if (saved.tp_pct != null && !saved.tps) saved.tps = [{ pct: saved.tp_pct, share: 100 }];
+  delete saved.tp_pct;
   if (saved.liq_source && !cfg.data.sources.some((s) => s.id === saved.liq_source)) delete saved.liq_source;
   return { params: { ...cfg.defaults, ...saved, source, symbol }, tf: prof?.tf ?? 'auto' };
 }
+
+const NO_TRADES: Trade[] = [];
+const NO_SIGNALS: Signal[] = [];
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -163,7 +169,7 @@ export default function App() {
     setFocusKey((k) => k + 1);
   }, []);
 
-  const trades = result?.trades ?? [];
+  const trades = result?.trades ?? NO_TRADES;
   const selIdx = trades.findIndex((t) => t.n === selected);
   const selTrade = selIdx >= 0 ? trades[selIdx] : null;
   const step = useCallback(
@@ -271,15 +277,17 @@ export default function App() {
           {selTrade && (
             <div className="sel-info">
               <b>#{selTrade.n}</b> <span className={selTrade.side === 'long' ? 'pos' : 'neg'}>{selTrade.side === 'long' ? 'лонг' : 'шорт'}</span>
-              {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)} · вход {fmtPrice(selTrade.entry)} · TP {fmtPrice(selTrade.tp)} · SL {fmtPrice(selTrade.sl)} · выход {fmtPrice(selTrade.exit)} ({selTrade.reason})
+              {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)} · вход {fmtPrice(selTrade.entry)} · TP {selTrade.tps.map(fmtPrice).join(' / ')} · SL {fmtPrice(selTrade.sl)}{selTrade.be ? ' (БУ после TP1)' : ''}
+              {' · '}<span className="fills">{selTrade.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}</span>
               {' · '}<b className={signClass(selTrade.pnl_usd)}>{fmtUsd(selTrade.pnl_usd)}</b>
               {selTrade.local != null && <span className="muted"> · Local {selTrade.local.toFixed(2)} / Scalp {selTrade.scalp?.toFixed(2)}</span>}
             </div>
           )}
           <div className="price">
-            <PriceChart
+            {/* график создаём, когда известен актив: иначе первый запрос свечей уходит с пустым символом */}
+            {symbol ? <PriceChart
               trades={trades}
-              signals={result?.signals ?? []}
+              signals={result?.signals ?? NO_SIGNALS}
               showLevels={showLevels}
               showSkipped={showSkipped}
               selected={selected}
@@ -291,7 +299,7 @@ export default function App() {
               reloadKey={reloadKey}
               onLoadError={setChartError}
               onTfInfo={(tf, truncated) => setEffTf({ tf, truncated })}
-            />
+            /> : <div className="empty">Загрузка…</div>}
           </div>
           <div className="equity-title">Капитал, $ (накопленный результат по закрытым сделкам)</div>
           <div className="equity">{result && result.equity.length > 1 ? <EquityChart equity={result.equity} splitTs={result.range.split_ts} /> : <div className="empty">нет данных</div>}</div>
