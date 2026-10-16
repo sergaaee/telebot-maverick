@@ -38,6 +38,10 @@ export interface Params {
   liq_pct: number;
   date_from: string | null;
   date_to: string | null;
+  /** торговля только по тренду: лонг выше всех выбранных EMA, шорт ниже всех (EMA по свечам таймфрейма trend_tf) */
+  trend_enabled: boolean;
+  trend_emas: number[];
+  trend_tf: string;
   /** топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии */
   top_enabled: boolean;
   top_side: Side;
@@ -141,6 +145,7 @@ export interface Signal {
   ts: number;
   side: 'long' | 'short';
   taken: boolean;
+  trend_blocked?: boolean;
 }
 
 export interface Stats {
@@ -181,6 +186,7 @@ export interface BacktestResult {
   equity: [number, number][];
   monthly: { month: string; trades: number; pnl_usd: number; wins: number }[];
   top: TopSection;
+  trend: { enabled: boolean; blocked: number; confirmed: number };
 }
 
 export interface TopSkipped {

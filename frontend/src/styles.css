@@ -131,3 +131,4 @@ select.wide { width: 100%; }
 .reasons { margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 12px; }
 .skipped-list { max-height: 220px; overflow: auto; margin-top: 6px; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
 .tag-TIME { color: var(--warn); }
+.ema-row { display: flex; gap: 12px; margin-top: 4px; } .ema-row label { display: flex; gap: 4px; align-items: center; cursor: pointer; }

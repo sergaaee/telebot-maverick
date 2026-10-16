@@ -361,7 +361,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
 
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False):
+             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False, event_filter=None):
     """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
     tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
     be_after_tp1 — после первого тейка переносить стоп в цену входа.
@@ -370,6 +370,8 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
     local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
     levels = normalize_tps(tps if tps else [(tp_pct, 100)])
     events = entries(signals, local_min, scalp_min, confirm, short, liq, cool)
+    if event_filter:
+        events = [e for e in events if event_filter(*e)]
     return run_events(events, candles, levels, sl_pct, fee, size, slip, cooldown_h, be_after_tp1)
 
 

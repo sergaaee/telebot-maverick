@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import time
 
-from .core import backtest, topcoins
+from .core import backtest, topcoins, trend
 from .core.entries import entries
 
 from .data import DataStore
@@ -205,14 +205,27 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     common = dict(tp_pct=tps[0][0], tps=tps, be_after_tp1=bool(eff.get("be_after_tp1")), sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"],
                   confirm=eff["confirm"], only=eff["only"])
 
-    trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, **common, **extra)
+    allow = None
+    if eff.get("trend_enabled"):
+        emas = sorted(set(eff.get("trend_emas") or []))
+        if not emas:
+            raise ParamError("Фильтр тренда: выберите хотя бы одну EMA")
+        allow = trend.build_trend(candles_all, eff["trend_tf"], emas)       # EMA считается по всей истории свечей (прогрев), а не только по периоду
+    trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, **common, **extra)
 
     # все подтверждённые сигналы (в том числе пропущенные: позиция открыта, пауза после стопа)
     lm, sm, sh = backtest.apply_only(long_min, scalp_min, short, eff["only"])
     confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool)
+    trend_blocked = 0
+    if allow:
+        passed = [e for e in confirmed if allow(*e)]
+        trend_blocked = len(confirmed) - len(passed)
+        blocked_ts = {e[0] for e in confirmed} - {e[0] for e in passed}
+    else:
+        blocked_ts = set()
     taken = {t["signal_ts"] for t in trades}
     limit = 5000
-    signals_out = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken} for ts, d in confirmed[:limit]]
+    signals_out = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken, "trend_blocked": ts in blocked_ts} for ts, d in confirmed[:limit]]
 
     rep = {s[0]: s for s in sigs}
     out_trades = [_trade_out(i, t, rep) for i, t in enumerate(trades, 1)]
@@ -260,4 +273,5 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "equity": equity,
         "monthly": list(monthly.values()),
         "top": top,
+        "trend": {"enabled": bool(allow), "blocked": trend_blocked, "confirmed": len(confirmed)},
     })

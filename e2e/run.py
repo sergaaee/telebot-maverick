@@ -384,6 +384,24 @@ def scenario(pg, base, state_url):
     check("после перезагрузки настройки топ-коинов сохранены, вкладки на месте",
           pg.locator(".tabs-row .seg button").count() == 2 and pg.locator("aside.params label.field", has_text="Размер").nth(1).locator("input").input_value() == "250")
 
+    # --- фильтр тренда
+    check("фильтр тренда выключен по умолчанию, чипа нет", pg.locator(".chip", has_text="тренд:").count() == 0)
+    pg.get_by_role("button", name="Фильтр: тренд (EMA)").click() if "▸" in pg.get_by_role("button", name="Фильтр: тренд (EMA)").inner_text() else None
+    field(pg, "торговать только по тренду").locator("input").check()
+    emas = pg.locator(".ema-row input")
+    check("предложены EMA 20/50/100/200, по умолчанию 50 и 200", pg.locator(".ema-row label").all_inner_texts() == ["20", "50", "100", "200"] and [emas.nth(i).is_checked() for i in range(4)] == [False, True, False, True])
+    emas.nth(3).uncheck(); emas.nth(0).check()
+    n_before = rows.count()
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    chip = pg.locator(".chip", has_text="тренд:")
+    check("после запуска виден чип с числом отсечённых сигналов", chip.count() == 1 and "отсечено" in chip.inner_text(), chip.all_inner_texts().__str__())
+    api_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({trend_enabled: true, trend_emas: [20, 50], trend_tf: '1h'})}).then(r => r.json())""")
+    base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({trend_enabled: false})}).then(r => r.json())""")
+    check("API: с трендом сделок не больше, отсечённые сигналы помечены", len(api_t["trades"]) <= len(base_t["trades"]) and api_t["trend"]["blocked"] > 0 and not any(s["taken"] and s["trend_blocked"] for s in api_t["signals"]), str(api_t["trend"]))
+    emas.nth(0).uncheck(); emas.nth(1).uncheck()
+    check("без выбранных EMA запуск заблокирован", pg.get_by_role("button", name="Исправьте тейки").is_disabled() or pg.locator("button.run").is_disabled())
+    emas.nth(1).check(); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(2500)
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):

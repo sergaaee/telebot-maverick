@@ -23,6 +23,7 @@ interface Props {
 }
 
 const ADD_ASSET = '__add_asset__';
+const EMAS = [20, 50, 100, 200];
 
 type NumKey = {
   [K in keyof Params]: Params[K] extends number | null ? K : never;
@@ -125,7 +126,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
   const setCoolMode = (m: string) =>
     onChange({ ...p, cool_drop: m === 'drop' ? 0.1 : null, cool_declines: m === 'declines' ? 2 : null });
   const liqOn = p.liq_hours != null;
-  const tpErr = validateTps(p.tps) ?? (p.top_enabled ? validateTps(p.top_tps) : null);
+  const tpErr = validateTps(p.tps) ?? (p.top_enabled ? validateTps(p.top_tps) : null) ?? (p.trend_enabled && p.trend_emas.length === 0 ? 'Выберите EMA' : null);
   const src = sources.find((s) => s.id === p.source);
   const liqSrc = p.liq_source ? sources.find((s) => s.id === p.liq_source) : src;
   const asset = assets.find((a) => a.symbol === p.symbol);
@@ -286,6 +287,39 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
             <Num label="Проскальзывание" help="top_slip" value={+(p.top_slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('top_slip', (v ?? 0) / 100)} />
             <Num label="Держать / качать" help="top_days" value={p.top_days} step={0.5} suffix="сут" onChange={(v) => set('top_days', v ?? 3)} />
             <Num label="Значение в отчёте ≥" help="top_min_value" value={p.top_min_value} step={0.5} onChange={(v) => set('top_min_value', v ?? 0)} />
+          </>
+        )}
+      </Section>
+
+      <Section title="Фильтр: тренд (EMA)" help="groupTrend" open={p.trend_enabled}>
+        <label className="field check">
+          <input type="checkbox" checked={p.trend_enabled} onChange={(e) => set('trend_enabled', e.target.checked)} />
+          <Label text="торговать только по тренду" help="trend_on" />
+        </label>
+        {p.trend_enabled && (
+          <>
+            <div className="field col">
+              <Label text="EMA (все сразу)" help="trend_emas" />
+              <div className="ema-row">
+                {EMAS.map((n) => (
+                  <label key={n} className="check">
+                    <input
+                      type="checkbox"
+                      checked={p.trend_emas.includes(n)}
+                      onChange={(e) => set('trend_emas', EMAS.filter((x) => (x === n ? e.target.checked : p.trend_emas.includes(x))))}
+                    />{' '}
+                    {n}
+                  </label>
+                ))}
+              </div>
+              {p.trend_emas.length === 0 && <div className="src-info bad-text">выберите хотя бы одну EMA</div>}
+            </div>
+            <label className="field">
+              <Label text="Таймфрейм EMA" help="trend_tf" />
+              <select value={p.trend_tf} onChange={(e) => set('trend_tf', e.target.value)}>
+                {['5m', '15m', '30m', '1h', '4h', '1d'].map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
           </>
         )}
       </Section>

@@ -120,6 +120,8 @@ def load_settings() -> Settings:
         cool_drop=_num("COOL_DROP", None), cool_declines=_num("COOL_DECLINES", None, int),
         liq_hours=_num("LIQ_HOURS", None), liq_frac=_num("LIQ_FRAC", 0.25), liq_pct=_num("LIQ_PCT", 0.0),
         cooldown_h=_num("COOLDOWN_H", 0.0),
+        trend_enabled=_bool("TREND_ENABLED"), trend_tf=(_opt("TREND_TF") or "1h").lower(),
+        trend_emas=[int(x) for x in (_opt("TREND_EMAS") or "50,200").split(",") if x.strip()],
         # топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии
         top_enabled=_bool("TOP_ENABLED", True), top_side=(_opt("TOP_SIDES") or "long").lower(),
         top_tps=_tps("TOP_", 5.0), top_be_after_tp1=_bool("TOP_BE_AFTER_TP1"), top_sl_pct=_num("TOP_SL_PCT", 3.0),
