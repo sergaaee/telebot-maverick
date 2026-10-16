@@ -115,3 +115,16 @@ def test_only_applies_to_shorts_too():
     t = simulate(sigs, cs, 1.65, 2.0, only="local", **kw)
     assert len(t) == 1 and t[0]["side"] == "short"
     assert simulate(sigs, cs, 1.65, 2.0, only="scalp", **kw) == []
+
+
+def test_side_short_only_disables_longs():
+    inf = float("inf")
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 104, 96, 100)] + [c(i, 100, 100, 100, 100) for i in range(2, 20)]
+    kw = dict(tp_pct=3, sl_pct=1, fee=0, size=0.1)
+    sigs = [(0, 2.0, 2.5), (M, 2.0, 2.5), (2 * M, 0.5, 0.2), (3 * M, 0.5, 0.2)]
+    both = simulate(sigs, cs, 1.65, 2.0, confirm=2, short=(1.05, 0.65), **kw)
+    assert {t["side"] for t in both} == {"long", "short"}
+    only_short = simulate(sigs, cs, inf, inf, confirm=2, short=(1.05, 0.65), **kw)   # то, что делает --side short
+    assert {t["side"] for t in only_short} == {"short"}
+    only_long = simulate(sigs, cs, 1.65, 2.0, confirm=2, short=None, **kw)           # --side long
+    assert {t["side"] for t in only_long} == {"long"}

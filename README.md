@@ -69,3 +69,12 @@ SL +1% / TP −3% от входа. Одновременно открыта ма�
 
 Действует на лонг и шорт, на все свипы (пороги перебираются только по выбранной метрике), фильтры и `--explain`.
 Остальные пороги (`--local-min`, `--scalp-min`, `--short-*`) работают как раньше для выбранной метрики.
+
+## Лонг и шорт отдельно в фильтр-свипах
+
+    python backtest.py history.csv --sweep-cool --side long
+    python backtest.py history.csv --sweep-cool --side short
+    python backtest.py history.csv --sweep-liq --liq-file history_binance.csv --side short
+
+`--side long|short|both` (по умолчанию `both` — как раньше) работает для `--sweep-liq`, `--sweep-cool`, `--sweep-cooldown`,
+одиночных прогонов с фильтрами и `--explain`. Сочетается с `--only local|scalp`.

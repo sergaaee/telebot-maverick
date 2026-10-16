@@ -183,7 +183,9 @@ def wilson_low(wins, n, z=1.96):
     return ((p + z * z / (2 * n)) - z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)) / (1 + z * z / n)
 
 
-def filter_grid(kind):
+def filter_grid(kind, side="both"):
+    # для шорта «остывание» зеркально: метрика растёт от минимума серии
+    verb, way = {"long": ("упала", "вниз"), "short": ("выросла", "вверх")}.get(side, ("упала/выросла", "вниз/вверх"))
     grid = []
     if kind == "cd":
         for hours in (1, 2, 4, 6, 12, 24, 48):
@@ -197,9 +199,9 @@ def filter_grid(kind):
     else:
         for metric in ("scalp", "local"):
             for drop in (0.05, 0.1, 0.2, 0.3, 0.5):
-                grid.append((f"cool {metric:5} упала на >= {drop}", dict(cool=dict(metric=metric, drop=drop))))
+                grid.append((f"cool {metric:5} {verb} на >= {drop}", dict(cool=dict(metric=metric, drop=drop))))
             for k_ in (1, 2, 3):
-                grid.append((f"cool {metric:5} {k_} отчёт(а) подряд вниз", dict(cool=dict(metric=metric, declines=k_))))
+                grid.append((f"cool {metric:5} {k_} отчёт(а) подряд {way}", dict(cool=dict(metric=metric, declines=k_))))
     return grid
 
 
@@ -235,10 +237,10 @@ def print_top(rows, min_trades, base_label):
           " Верьте только тем, у кого плюс в ОБЕИХ половинах и достаточно сделок.")
 
 
-def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
+def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades, side="both"):
     split_ts = signals[len(signals) // 2][0]
     rows = [make_row(name, simulate(signals, candles, short=short, **base_kw, **extra), split_ts)
-            for name, extra in [("БАЗА (без фильтра)", {})] + filter_grid(kind)]
+            for name, extra in [("БАЗА (без фильтра)", {})] + filter_grid(kind, side)]
     print_table(rows)
     print_top(rows, min_trades, "без фильтра")
 
@@ -317,6 +319,9 @@ def main():
     ap.add_argument("--short-local-max", type=float, default=0.7)
     ap.add_argument("--short-scalp-max", type=float, default=1.2)
     ap.add_argument("--no-short", action="store_true", help="только лонги")
+    ap.add_argument("--side", choices=["both", "long", "short"], default="both",
+                    help="для фильтр-свипов (--sweep-liq/-cool/-cooldown), --explain и одиночного прогона: торговать обе стороны, "
+                         "только лонги или только шорты")
     ap.add_argument("--only", choices=["local", "scalp"], help="торговать только по одной метрике (вторая игнорируется)")
     ap.add_argument("--confirm", type=int, default=4, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
@@ -365,11 +370,19 @@ def main():
             if on:
                 run_threshold_sweep(side, signals, candles, common, a)
         return
+    if a.side == "long":
+        short = None
+    elif a.side == "short":
+        if short is None:
+            raise SystemExit("--side short несовместим с --no-short")
+        a.local_min = a.scalp_min = float("inf")   # лонг (Local/Scalp >= inf) никогда не срабатывает
+    if a.side != "both":
+        print(f"СТОРОНА: только {a.side}")
     if a.sweep_liq or a.sweep_cool or a.sweep_cooldown:
         base_kw = dict(local_min=a.local_min, scalp_min=a.scalp_min, **common)
         for kind, on in (("liq", a.sweep_liq), ("cool", a.sweep_cool), ("cd", a.sweep_cooldown)):
             if on:
-                run_filter_sweep(kind, signals, candles, base_kw, short, a.min_trades)
+                run_filter_sweep(kind, signals, candles, base_kw, short, a.min_trades, a.side)
         return
 
     extra = {}
