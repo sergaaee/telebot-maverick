@@ -93,3 +93,25 @@ def test_cooldown_after_stop():
     assert [x["signal_ts"] for x in simulate(sigs, cs, 1.65, 2.0, **kw)] == [0, 10 * M]  # 3-й сигнал: позиция уже открыта
     t = simulate(sigs, cs, 1.65, 2.0, cooldown_h=1, **kw)
     assert [x["signal_ts"] for x in t] == [0, 100 * M]
+
+
+def test_only_local_and_only_scalp():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 104, 100, 104)] + [c(i, 104, 104, 104, 104) for i in range(2, 20)]
+    kw = dict(tp_pct=3, sl_pct=1, fee=0, size=0.1)
+    hi_local_low_scalp = [(0, 2.0, 0.5)]    # Local проходит, Scalp нет
+    hi_scalp_low_local = [(0, 1.0, 2.5)]    # Scalp проходит, Local нет
+    assert simulate(hi_local_low_scalp, cs, 1.65, 2.0, **kw) == []
+    assert len(simulate(hi_local_low_scalp, cs, 1.65, 2.0, only="local", **kw)) == 1
+    assert simulate(hi_local_low_scalp, cs, 1.65, 2.0, only="scalp", **kw) == []
+    assert len(simulate(hi_scalp_low_local, cs, 1.65, 2.0, only="scalp", **kw)) == 1
+    assert simulate(hi_scalp_low_local, cs, 1.65, 2.0, only="local", **kw) == []
+
+
+def test_only_applies_to_shorts_too():
+    cs = [c(0, 100, 100, 100, 100), c(1, 100, 100, 96, 96)] + [c(i, 96, 96, 96, 96) for i in range(2, 20)]
+    kw = dict(tp_pct=3, sl_pct=1, fee=0, size=0.1, short=(1.05, 0.65))
+    sigs = [(0, 1.0, 0.9)]                  # Local <= 1.05 проходит, Scalp <= 0.65 нет
+    assert simulate(sigs, cs, 1.65, 2.0, **kw) == []
+    t = simulate(sigs, cs, 1.65, 2.0, only="local", **kw)
+    assert len(t) == 1 and t[0]["side"] == "short"
+    assert simulate(sigs, cs, 1.65, 2.0, only="scalp", **kw) == []

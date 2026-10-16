@@ -110,10 +110,17 @@ def _close(trade, exit_p, reason, idx, candles, fee, size):
 
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None, cooldown_h=0.0):
+             short=None, liq=None, cool=None, cooldown_h=0.0, only=None):
     """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
     Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
     (закрытие по open свечи входа + новая позиция)."""
+    inf = float("inf")
+    if only == "local":    # вторая метрика не учитывается ни для лонга, ни для шорта
+        scalp_min = -inf
+        short = None if short is None else (short[0], inf)
+    elif only == "scalp":
+        local_min = -inf
+        short = None if short is None else (inf, short[1])
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, cur = [], None
@@ -237,21 +244,30 @@ def run_filter_sweep(kind, signals, candles, base_kw, short, min_trades):
 
 
 def run_threshold_sweep(side, signals, candles, common, a):
-    """Свип порогов одной стороны; вторая сторона отключена, чтобы не смешивать результаты."""
+    """Свип порогов одной стороны; вторая сторона отключена, чтобы не смешивать результаты.
+    С --only local/scalp перебирается только одна метрика."""
     split_ts = signals[len(signals) // 2][0]
-    never = float("inf")   # пороги, при которых лонг (Local/Scalp >= inf) никогда не срабатывает
-    rows = []
+    never = float("inf")   # лонг (Local/Scalp >= inf) никогда не срабатывает
+    only = common.get("only")
     if side == "long":
         base = (a.local_min, a.scalp_min)
-        grid = [(lm, sm) for lm in (1.25, 1.45, 1.65, 1.85, 2.05) for sm in (1.5, 1.75, 2.0, 2.25, 2.5)]
+        locals_, scalps_ = (1.25, 1.45, 1.65, 1.85, 2.05), (1.5, 1.75, 2.0, 2.25, 2.5)
         run = lambda p: simulate(signals, candles, p[0], p[1], short=None, **common)
-        label = lambda p: f"long  local>={p[0]:.2f} scalp>={p[1]:.2f}"
+        label = lambda p: (f"long  local>={p[0]:.2f}" if only == "local" else f"long  scalp>={p[1]:.2f}" if only == "scalp"
+                           else f"long  local>={p[0]:.2f} scalp>={p[1]:.2f}")
     else:
         base = (a.short_local_max, a.short_scalp_max)
-        grid = [(lm, sm) for lm in (0.85, 0.95, 1.05, 1.15, 1.25) for sm in (0.35, 0.5, 0.65, 0.8, 0.95)]
+        locals_, scalps_ = (0.85, 0.95, 1.05, 1.15, 1.25), (0.35, 0.5, 0.65, 0.8, 0.95)
         run = lambda p: simulate(signals, candles, never, never, short=p, **common)
-        label = lambda p: f"short local<={p[0]:.2f} scalp<={p[1]:.2f}"
-    rows.append(make_row(f"БАЗА: {label(base)}", run(base), split_ts))
+        label = lambda p: (f"short local<={p[0]:.2f}" if only == "local" else f"short scalp<={p[1]:.2f}" if only == "scalp"
+                           else f"short local<={p[0]:.2f} scalp<={p[1]:.2f}")
+    if only == "local":
+        grid = [(lm, base[1]) for lm in locals_]
+    elif only == "scalp":
+        grid = [(base[0], sm) for sm in scalps_]
+    else:
+        grid = [(lm, sm) for lm in locals_ for sm in scalps_]
+    rows = [make_row(f"БАЗА: {label(base)}", run(base), split_ts)]
     for p in grid:
         rows.append(make_row(label(p) + ("  *" if p == base else ""), run(p), split_ts))
     print_table(rows)
@@ -299,6 +315,7 @@ def main():
     ap.add_argument("--short-local-max", type=float, default=1.05)
     ap.add_argument("--short-scalp-max", type=float, default=0.65)
     ap.add_argument("--no-short", action="store_true", help="только лонги")
+    ap.add_argument("--only", choices=["local", "scalp"], help="торговать только по одной метрике (вторая игнорируется)")
     ap.add_argument("--confirm", type=int, default=2, help="сколько отчётов подряд нужно для сигнала")
     ap.add_argument("--size", type=float, default=0.1)
     ap.add_argument("--out", default="trades.csv")
@@ -332,8 +349,10 @@ def main():
             raise SystemExit("В файле нет данных о ликвидациях — укажите --liq-file.")
     print(f"Сигналов с Deep-значениями: {len(signals)}, "
           f"{datetime.fromtimestamp(signals[0][0]/1000, timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(signals[-1][0]/1000, timezone.utc):%Y-%m-%d}")
+    if a.only:
+        print(f"РЕЖИМ: только Deep {a.only.capitalize()} (вторая метрика игнорируется)")
     candles = fetch_candles(a.exchange, a.symbol, a.tf, signals[0][0])
-    common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm)
+    common = dict(tp_pct=a.tp, sl_pct=a.sl, fee=a.fee, size=a.size, slip=a.slip, confirm=a.confirm, only=a.only)
     short = None if a.no_short else (a.short_local_max, a.short_scalp_max)
 
     if a.sweep_long or a.sweep_short:
