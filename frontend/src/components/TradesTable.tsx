@@ -2,20 +2,20 @@ import { useEffect, useRef } from 'react';
 import { fmtHold, fmtPct, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import type { Trade } from '../types';
 
-export default function TradesTable({ trades, selected, onSelect }: { trades: Trade[]; selected: number | null; onSelect: (n: number) => void }) {
+export default function TradesTable({ trades, selected, onSelect, top = false }: { trades: Trade[]; selected: number | null; onSelect: (n: number) => void; top?: boolean }) {
   const row = useRef<HTMLTableRowElement>(null);
   useEffect(() => {
     row.current?.scrollIntoView({ block: 'nearest' });
   }, [selected]);
 
-  if (!trades.length) return <div className="empty">Сделок нет — измените параметры</div>;
+  if (!trades.length) return <div className="empty">{top ? 'Сделок по топ-коинам нет — проверьте параметры или скачайте свечи' : 'Сделок нет — измените параметры'}</div>;
   return (
     <div className="table-wrap">
       <table className="trades">
         <thead>
           <tr>
             <th>#</th><th>сторона</th><th>вход (UTC)</th><th>цена</th><th>выход</th><th>цена</th><th>причина</th>
-            <th>тейки</th><th>PnL</th><th>PnL $</th><th>держал</th><th>Local</th><th>Scalp</th>
+            <th>тейки</th><th>PnL</th><th>PnL $</th><th>держал</th>{top ? <><th>монета</th><th>в отчёте</th></> : <><th>Local</th><th>Scalp</th></>}
           </tr>
         </thead>
         <tbody>
@@ -34,8 +34,17 @@ export default function TradesTable({ trades, selected, onSelect }: { trades: Tr
               <td className={signClass(t.pnl_pct)}>{fmtPct(t.pnl_pct)}</td>
               <td className={signClass(t.pnl_usd)}>{fmtUsd(t.pnl_usd)}</td>
               <td>{fmtHold(t.hold_h)}</td>
-              <td>{t.local?.toFixed(2) ?? '–'}</td>
-              <td>{t.scalp?.toFixed(2) ?? '–'}</td>
+              {top ? (
+                <>
+                  <td title={t.partial ? 'Окно ещё не закончилось — сделка может быть не завершена' : undefined}>{t.symbol?.split('/')[0]}{t.partial ? ' ⏳' : ''}</td>
+                  <td>{t.top_value?.toFixed(2) ?? '–'}</td>
+                </>
+              ) : (
+                <>
+                  <td>{t.local?.toFixed(2) ?? '–'}</td>
+                  <td>{t.scalp?.toFixed(2) ?? '–'}</td>
+                </>
+              )}
             </tr>
           ))}
         </tbody>

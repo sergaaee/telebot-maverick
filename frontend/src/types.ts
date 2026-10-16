@@ -38,6 +38,19 @@ export interface Params {
   liq_pct: number;
   date_from: string | null;
   date_to: string | null;
+  /** топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии */
+  top_enabled: boolean;
+  top_side: Side;
+  top_tps: TpLevel[];
+  top_be_after_tp1: boolean;
+  top_sl_pct: number;
+  /** размер позиции в долларах */
+  top_size: number;
+  top_fee: number;
+  top_slip: number;
+  /** сколько суток после сигнала держим сделку и качаем свечи */
+  top_days: number;
+  top_min_value: number;
 }
 
 export interface SourceInfo {
@@ -80,7 +93,7 @@ export interface AppConfig {
   data: DataInfo;
 }
 
-export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN';
+export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME';
 
 /** Частичное или финальное закрытие: метка TP1..TP3 / SL / BE / REV / OPEN, доля от исходной позиции (0..1). */
 export interface Fill {
@@ -115,6 +128,13 @@ export interface Trade {
   scalp: number | null;
   liq_long_k: number | null;
   liq_short_k: number | null;
+  /** только для сделок по топ-коинам */
+  symbol?: string;
+  coin?: string;
+  top_value?: number | null;
+  /** окно ещё не закончилось: сделка может быть не завершена */
+  partial?: boolean;
+  window_end?: number;
 }
 
 export interface Signal {
@@ -129,6 +149,8 @@ export interface Stats {
   sl: number;
   be: number;
   open: number;
+  /** закрыто по времени (топ-коины: вышли N суток) */
+  time: number;
   rev: number;
   winrate: number;
   total_usd: number;
@@ -158,7 +180,36 @@ export interface BacktestResult {
   signals_truncated: boolean;
   equity: [number, number][];
   monthly: { month: string; trades: number; pnl_usd: number; wins: number }[];
+  top: TopSection;
 }
+
+export interface TopSkipped {
+  ts: number;
+  side: 'long' | 'short';
+  coin: string | null;
+  symbol: string | null;
+  reason: string;
+  pending?: boolean;
+}
+
+export interface TopPendingItem {
+  symbol: string;
+  from: number;
+  to: number;
+}
+
+export type TopSection =
+  | { enabled: false }
+  | {
+      enabled: true;
+      stats: Stats;
+      trades: Trade[];
+      by_coin: { symbol: string; coin: string; trades: number; wins: number; pnl_usd: number }[];
+      skipped: TopSkipped[];
+      skipped_total: number;
+      equity: [number, number][];
+      pending: { symbols: number; windows: number; requests: number; items: TopPendingItem[] };
+    };
 
 export interface CandlesResponse {
   tf: number;
@@ -185,6 +236,14 @@ export interface UiState {
 export interface Job {
   id: number;
   symbol: string;
+  /** candles — свечи актива, top — окна свечей топ-коинов */
+  kind: 'candles' | 'top';
+  label: string;
+  /** для top: сколько монет всего / готово */
+  total: number;
+  done: number;
+  /** задача завершена, но часть работы не удалась */
+  warning: string | null;
   status: 'queued' | 'running' | 'done' | 'error';
   count: number;
   last_ts: number | null;

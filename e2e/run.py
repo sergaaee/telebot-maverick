@@ -86,9 +86,12 @@ def make_demo(d: Path):
             w = csv.writer(f)
             w.writerow(hdr)
             for i, (ts, a, b, ll, ls) in enumerate(rows, 1):
+                # блок Top Coin как в настоящих отчётах: TIA и ARB торгуются, WBETH — нет (нет фьючерса)
+                coin = ("TIA-USD      | 10.12", "ARBUSDT | 7.30", "WBETHUSDT | 12.40")[i % 3] if with_liq else None
+                text = f"Deep\nTop Coin\n————————————————\n{coin}\nBTC-USD | 1.02\n" if coin else ""
                 w.writerow([i, datetime.fromtimestamp(ts / 1000, timezone.utc).isoformat(), 1.0,
                             round(a + random.gauss(0, 0.15 * noise), 2), round(b + random.gauss(0, 0.25 * noise), 2),
-                            round(ll, 1) if with_liq else "", round(ls, 1) if with_liq else "", ""])
+                            round(ll, 1) if with_liq else "", round(ls, 1) if with_liq else "", text])
 
 
 def wait_http(url, timeout=40):
@@ -251,7 +254,7 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Добавить и скачать").click(); pg.wait_for_timeout(600)
     check("в ошибке есть похожие активы", "ETH/USDT:USDT" in pg.locator(".add-asset .bad-text").inner_text())
     pg.locator(".add-asset input[type=text]").fill("sol")
-    pg.get_by_role("button", name="Добавить и скачать").click(); pg.wait_for_timeout(700)
+    pg.get_by_role("button", name="Добавить и скачать").click(); pg.wait_for_selector(".toast", timeout=8000); pg.wait_for_timeout(300)
     t_all = toast.all_inner_texts()
     check("после добавления сообщение: качается в фоне, придёт уведомление",
           len(t_all) == 1 and "скачиваются в фоне" in t_all[0] and "придёт уведомление" in t_all[0], f"тостов {len(t_all)}: {t_all}")
@@ -326,6 +329,61 @@ def scenario(pg, base, state_url):
           and pg.locator(".tp-editor label.field.check input").is_checked())
     check("у блока тейков есть подсказки «?»", pg.locator(".tp-editor .help").count() >= 4)
 
+    # --- топ-коины
+    check("пока торговля топ-коинами выключена, вкладок нет", pg.locator(".tabs-row").count() == 0)
+    pg.get_by_role("button", name="Топ-коины", exact=False).first.click() if "▸" in pg.locator("aside.params .group-head", has_text="Топ-коины").inner_text() else None
+    field(pg, "торговать топ-коином").locator("input").check()
+    check("у параметров топ-коинов есть «?»", all(field(pg, l).locator(".help").count() >= 1 for l in ("Размер", "Держать / качать", "Значение в отчёте")))
+    check("у топ-коинов свой редактор тейков (второй на панели)", pg.locator(".tp-editor").count() == 2)
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    tabs = pg.locator(".tabs-row .seg button")
+    check("после включения появились вкладки, у «Топ-коины» отмечена докачка", tabs.count() == 2 and "Топ-коины · 0" in tabs.nth(1).inner_text() and "⏬" in tabs.nth(1).inner_text(), tabs.all_inner_texts().__str__())
+    tabs.nth(1).click(); pg.wait_for_timeout(800)
+    check("на вкладке видно, что свечей нет, и кнопка «Скачать свечи»", pg.locator(".top-pending").count() == 1 and pg.locator(".top-pending button", has_text="Скачать свечи").count() == 1, pg.locator(".top-pending").inner_text()[:120])
+    reasons = pg.locator(".reasons").inner_text()
+    check("пропущенные сигналы объяснены причинами", "нет бессрочного USDT-контракта" in reasons and "нужно скачать свечи" in reasons, reasons[:200])
+    n_pending = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["pending"]
+    check("API: ждут только TIA и ARB, не WBETH", sorted({i["symbol"] for i in n_pending["items"]}) == ["ARB/USDT:USDT", "TIA/USDT:USDT"], str(n_pending["symbols"]))
+    pg.locator(".top-pending button", has_text="Скачать свечи").click(); pg.wait_for_selector(".toast", timeout=8000); pg.wait_for_timeout(300)
+    check("после нажатия: сообщение о фоновой загрузке и ход в шапке", any("скачиваются в фоне" in x for x in pg.locator(".toast").all_inner_texts()) and pg.locator(".chip-job", has_text="Топ-коины").count() == 1,
+          f"{pg.locator('.toast').all_inner_texts()} chips={pg.locator('.chip-job').all_inner_texts()}")
+    pg.wait_for_selector(".toast-success", timeout=40000)
+    check("по завершении уведомление, свечи монет в кеше", "Свечи топ-коинов загружены" in pg.locator(".toast-success").first.inner_text())
+    pg.wait_for_timeout(3500)
+    check("сделки пересчитались автоматически, докачка не нужна", pg.locator(".top-pending").count() == 0 and rows.count() > 0 and "Топ-коины · 0" not in tabs.nth(1).inner_text(), tabs.nth(1).inner_text())
+    heads = pg.locator("table.trades thead th").all_inner_texts()
+    check("таблица топ-коинов: колонки монета и значение в отчёте", "монета" in heads and "в отчёте" in heads, str(heads))
+    coins = {c.strip(" ⏳") for c in pg.locator("table.trades tbody tr td:nth-child(12)").all_inner_texts()}
+    check("в таблице только торгуемые монеты", coins <= {"TIA", "ARB"} and coins, str(coins))
+    top_tr = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["trades"]
+    check("у сделок по монетам размер 100$ и свои цены", all(t["symbol"] in ("TIA/USDT:USDT", "ARB/USDT:USDT") and t["entry"] < 200 for t in top_tr) and len(top_tr) == rows.count(), f"{len(top_tr)} сделок")
+    n_req = len(reqs)
+    rows.nth(0).click(); pg.wait_for_timeout(2500)
+    first = top_tr[0]
+    sym_q = first["symbol"].replace("/", "%2F").replace(":", "%3A")
+    check("клик по сделке открывает график монеты", any("symbol=" + sym_q in r for r in reqs[n_req:]) and first["symbol"].split("/")[0] in pg.locator(".sel-info").inner_text(), pg.locator(".sel-info").inner_text()[:80])
+    ea2, eb2 = first["entry_ts"] // 1000, first["exit_ts"] // 1000
+    v = vr()
+    check("график монеты приближен к сделке", bool(v) and v[0] <= ea2 and v[1] >= eb2 and v[1] - v[0] < 10 * 86400, f"{fmt(v[0])} .. {fmt(v[1])}")
+    other = next(c for c in ("TIA/USDT:USDT", "ARB/USDT:USDT") if c != first["symbol"])
+    pg.locator("table.mini.clickable tbody tr", has_text=other.split("/")[0]).click(); pg.wait_for_timeout(2500)
+    check("клик по монете в разрезе открывает её первую сделку", other.split("/")[0] in pg.locator(".sel-info").inner_text(), pg.locator(".sel-info").inner_text()[:60])
+    check("в сводке видно монету из отчёта и значение", "в отчёте" in pg.locator(".sel-info").inner_text())
+    tabs.nth(0).click(); pg.wait_for_timeout(2500)
+    heads = pg.locator("table.trades thead th").all_inner_texts()
+    check("возврат на основную вкладку: снова Local/Scalp и график основного актива", "Local" in heads and pg.locator(".top-panel, [data-testid=top-panel]").count() == 0 and any("symbol=BTC" in r for r in reqs[n_req:]))
+    # параметры топ-коинов сохраняются и меняют результат
+    num(pg, "Размер").last.fill("250") if False else None
+    top_size = pg.locator("aside.params label.field", has_text="Размер").nth(1).locator("input")
+    top_size.fill("250")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    tabs.nth(1).click(); pg.wait_for_timeout(800)
+    check("размер 250$ отражён в карточке итога", "по 250 $" in pg.locator("[data-testid=top-panel] .card-sub").first.inner_text())
+    pg.wait_for_timeout(900)
+    pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1500)
+    check("после перезагрузки настройки топ-коинов сохранены, вкладки на месте",
+          pg.locator(".tabs-row .seg button").count() == 2 and pg.locator("aside.params label.field", has_text="Размер").nth(1).locator("input").input_value() == "250")
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):
@@ -354,7 +412,7 @@ def scenario(pg, base, state_url):
         pg.mouse.move(5, 5)
         pg.wait_for_timeout(100)
     check("подсказка скрывается", pg.locator(".tooltip").count() == 0)
-    pg.locator(".seg").locator("xpath=following-sibling::*[contains(@class,'help')][1]").hover()
+    pg.locator(".chart-bar .seg").locator("xpath=following-sibling::*[contains(@class,'help')][1]").hover()
     pg.wait_for_timeout(200)
     check("подсказка у переключателя ТФ", pg.locator(".tooltip").count() == 1 and "Авто" in pg.locator(".tooltip").inner_text())
 
@@ -375,11 +433,13 @@ def main():
                    STATE_FILE=str(tmp / "ui_state.json"), ASSETS_FILE=str(tmp / "assets.json"),
                    LOCAL_MIN="1.85", SCALP_MIN="1.25", CONFIRM="4", TP_PCT="6", SL_PCT="2", SIDE="both", ONLY="", COOL_DROP="",
                    COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0", FEE="0.0005", SLIPPAGE="0", ORDER_SIZE="0.1",
+                   TOP_ENABLED="false", TOP_SIDES="long", TOP_TP_LEVELS="", TOP_TP_PCT="5", TOP_SL_PCT="3", TOP_SIZE_USD="100", TOP_FEE="0.0005",
+                   TOP_SLIPPAGE="0", TOP_DAYS="3", TOP_MIN_VALUE="0", TOP_BE_AFTER_TP1="",
                    VITE_PROXY_TARGET=f"http://127.0.0.1:{bp}", VITE_PORT=str(fp))
         procs.append(subprocess.Popen([sys.executable, "-m", "uvicorn", "server:app", "--app-dir", str(ROOT / "e2e"), "--port", str(bp),
-                                       "--log-level", "warning"], cwd=ROOT / "backend", env=env))
+                                       "--log-level", "warning"], cwd=ROOT / "backend", env=env, start_new_session=True))
         procs.append(subprocess.Popen(["npx", "vite", "preview", "--host", "127.0.0.1", "--port", str(fp), "--strictPort"],
-                                      cwd=ROOT / "frontend", env=env, stdout=subprocess.DEVNULL))
+                                      cwd=ROOT / "frontend", env=env, stdout=subprocess.DEVNULL, start_new_session=True))
         wait_http(f"http://127.0.0.1:{bp}/api/health")
         wait_http(f"http://127.0.0.1:{fp}/")
         errors = []
@@ -395,8 +455,11 @@ def main():
             check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 2, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
-        for pr in procs:
-            pr.terminate()
+        for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть
+            try:
+                os.killpg(pr.pid, 15)
+            except OSError:
+                pass
         shutil.rmtree(tmp, ignore_errors=True)
     print("\nИТОГ:", "все проверки прошли" if not fails else f"упало: {fails}")
     sys.exit(1 if fails else 0)

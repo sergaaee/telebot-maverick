@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { addAsset, getConfig, getUiState, putUiState, refreshCandles, removeAsset, runBacktest } from './api';
+import { addAsset, downloadTop, getConfig, getUiState, putUiState, refreshCandles, removeAsset, runBacktest } from './api';
 import EquityChart from './components/EquityChart';
 import Help from './components/Help';
 import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
 import StatsPanel from './components/StatsPanel';
 import Toasts from './components/Toasts';
+import TopPanel from './components/TopPanel';
 import TradesTable from './components/TradesTable';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
@@ -44,6 +45,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [chartError, setChartError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  const [selectedTop, setSelectedTop] = useState<number | null>(null);
+  const [tab, setTab] = useState<'main' | 'top'>('main');
   const [focusKey, setFocusKey] = useState(0); // растёт при каждом явном выборе сделки: график возвращается к ней, даже если она уже выбрана
   const [showLevels, setShowLevels] = useState(true);
   const [showSkipped, setShowSkipped] = useState(false);
@@ -98,6 +101,24 @@ export default function App() {
   const onJobFinished = useCallback(
     (job: Job, restored: boolean) => {
       const ok = job.status === 'done';
+      if (job.kind === 'top') {
+        const partial = ok && !!job.warning;
+        jobsApi.current?.push({
+          kind: ok && !partial ? 'success' : 'error',
+          jobId: job.id,
+          text: ok
+            ? `Свечи топ-коинов загружены (монет: ${job.total})${restored ? ' — пока вы были не здесь' : ''}.${partial ? ` ${job.warning}` : ''}`
+            : `Не удалось скачать свечи топ-коинов: ${job.error ?? 'неизвестная ошибка'}. Повторить можно кнопкой «Скачать свечи» на вкладке «Топ-коины».`,
+          action: ok ? { label: 'Открыть «Топ-коины»', onClick: () => setTab('top') } : undefined,
+        });
+        if (restored) return;
+        notifyBrowser(ok ? 'Свечи топ-коинов загружены' : 'Ошибка загрузки свечей топ-коинов', ok ? `монет: ${job.total}` : job.error ?? '');
+        if (ok) {
+          setReloadKey((k) => k + 1);
+          if (paramsRef.current) void runRef.current?.(paramsRef.current);       // сделки по скачанным окнам считаются заново
+        }
+        return;
+      }
       const here = paramsRef.current?.symbol === job.symbol;
       jobsApi.current?.push({
         kind: ok ? 'success' : 'error',
@@ -141,6 +162,7 @@ export default function App() {
       if (seq !== runSeq.current) return; // пока считали, пользователь переключил источник/актив
       setResult(r);
       setSelected(null);
+      setSelectedTop(null);
     } catch (e) {
       if (seq === runSeq.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -173,6 +195,7 @@ export default function App() {
     setTfMode(tf);
     setResult(null);
     setSelected(null);
+    setSelectedTop(null);
     setEffTf(null);
     setChartError(null);
     void run(np);
@@ -208,6 +231,31 @@ export default function App() {
       });
     } catch (e) {
       setError(`Не удалось запустить загрузку свечей: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+
+  /** «Скачать свечи» топ-коинов: окна «момент сигнала + N суток», недостающие в кеше. Идёт в фоне. */
+  const onDownloadTop = async () => {
+    if (!params) return;
+    setError(null);
+    askNotificationPermission();
+    try {
+      const r = await downloadTop(params);
+      if (!r.job) {
+        push({ kind: 'info', autoCloseMs: 6000, text: 'Скачивать нечего — все нужные свечи уже есть.' });
+        void run(params);
+        return;
+      }
+      track(r.job);
+      push({
+        kind: 'info',
+        autoCloseMs: 14000,
+        text: r.created
+          ? `Свечи топ-коинов (монет: ${r.job.total}) скачиваются в фоне. Как только загрузка завершится, придёт уведомление и сделки пересчитаются.`
+          : 'Свечи топ-коинов уже загружаются — дождитесь уведомления.',
+      });
+    } catch (e) {
+      setError(`Не удалось запустить загрузку свечей топ-коинов: ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -247,13 +295,22 @@ export default function App() {
   };
 
   // ---------- сделки: выбор и навигация ----------
-  const selectTrade = useCallback((n: number) => {
-    setSelected(n);
-    setFocusKey((k) => k + 1);
-  }, []);
+  const topSec = result?.top?.enabled ? result.top : null;
+  const view: 'main' | 'top' = tab === 'top' && topSec ? 'top' : 'main';
+  const selectTrade = useCallback(
+    (n: number) => {
+      if (view === 'top') setSelectedTop(n);
+      else setSelected(n);
+      setFocusKey((k) => k + 1);
+    },
+    [view],
+  );
 
-  const trades = result?.trades ?? NO_TRADES;
-  const selIdx = trades.findIndex((t) => t.n === selected);
+  const mainTrades = result?.trades ?? NO_TRADES;
+  const topTrades = topSec?.trades ?? NO_TRADES;
+  const trades = view === 'top' ? topTrades : mainTrades;
+  const sel = view === 'top' ? selectedTop : selected;
+  const selIdx = trades.findIndex((t) => t.n === sel);
   const selTrade = selIdx >= 0 ? trades[selIdx] : null;
   const step = useCallback(
     (d: number) => {
@@ -263,6 +320,10 @@ export default function App() {
     },
     [trades, selIdx, selectTrade],
   );
+  const pickCoin = (sym: string) => {
+    const t = topTrades.find((x) => x.symbol === sym);
+    if (t) selectTrade(t.n);
+  };
 
   // ← / → переключают сделки (если фокус не в поле ввода)
   useEffect(() => {
@@ -283,8 +344,23 @@ export default function App() {
     () => (asset && asset.count > 0 && config ? { first: asset.first_ts! / 1000, last: asset.last_ts! / 1000, nativeTf: tfSeconds(config.tf) } : null),
     [asset, config],
   );
+  // вкладка «Топ-коины»: график показывает монету выбранной (или первой) сделки, только окна, по которым есть свечи
+  const topChartSymbol = selTrade?.symbol ?? topTrades[0]?.symbol ?? symbol;
+  const chartSymbol = view === 'top' ? topChartSymbol : symbol;
+  const chartTrades = useMemo(() => (view === 'top' ? topTrades.filter((t) => t.symbol === topChartSymbol) : mainTrades), [view, topTrades, mainTrades, topChartSymbol]);
+  const chartRange = useMemo(() => {
+    if (view !== 'top' || !config) return dataRange;
+    if (!chartTrades.length) return null;
+    return {
+      first: Math.min(...chartTrades.map((t) => t.entry_ts)) / 1000,
+      last: Math.max(...chartTrades.map((t) => t.window_end ?? t.exit_ts)) / 1000,
+      nativeTf: tfSeconds(config.tf),
+    };
+  }, [view, chartTrades, config, dataRange]);
+  const topDownloading = activeJobs.some((j) => j.kind === 'top');
   const curSrc = config?.data.sources.find((s) => s.id === (params?.source ?? config.defaults.source));
   const tfOptions = (config && config.timeframes[symbol]) || [];
+  const downloadingSym = (sym: string) => activeJobs.some((j) => j.kind === 'candles' && j.symbol === sym);
 
   return (
     <div className="app">
@@ -297,11 +373,11 @@ export default function App() {
             {asset && asset.count > 0 && <span className="chip">свечей {asset.count.toLocaleString('ru-RU')} · до {fmtDate(asset.last_ts!)}</span>}
             {activeJobs.map((j) => (
               <span className="chip chip-job" key={j.id} title="Фоновая загрузка свечей — по завершении придёт уведомление">
-                ⬇ {j.symbol} · {j.status === 'queued' ? 'в очереди' : `${j.count.toLocaleString('ru-RU')} св.${j.last_ts ? ` · до ${fmtDate(j.last_ts)}` : ''}`}
+                ⬇ {j.kind === 'top' ? `Топ-коины ${j.done}/${j.total}` : j.symbol} · {j.status === 'queued' ? 'в очереди' : `${j.count.toLocaleString('ru-RU')} св.${j.last_ts ? ` · до ${fmtDate(j.last_ts)}` : ''}`}
               </span>
             ))}
-            <button type="button" className="ghost" disabled={activeJobs.some((j) => j.symbol === symbol)} onClick={onRefresh}>
-              {activeJobs.some((j) => j.symbol === symbol) ? 'Качаю свечи…' : 'Обновить свечи'}
+            <button type="button" className="ghost" disabled={downloadingSym(symbol)} onClick={onRefresh}>
+              {downloadingSym(symbol) ? 'Качаю свечи…' : 'Обновить свечи'}
             </button>
             <Help text={HELP.refresh} />
           </div>
@@ -313,11 +389,11 @@ export default function App() {
       {config && !config.data.sources.some((s) => s.exists) && <div className="banner error">Нет ни одного файла истории — выгрузите историю (python cli.py export …) и проверьте SOURCE_*_FILE в backend/.env</div>}
       {(chartError || asset?.error) && (
         <div className="banner warn">
-          {activeJobs.some((j) => j.symbol === symbol)
+          {downloadingSym(symbol)
             ? `Свечи ${symbol} загружаются в фоне — как только закончится, придёт уведомление.`
             : (chartError ?? asset?.error)}
-          <button type="button" className="ghost" disabled={activeJobs.some((j) => j.symbol === symbol)} onClick={onRefresh}>
-            {activeJobs.some((j) => j.symbol === symbol) ? 'Качаю…' : 'Скачать свечи'}
+          <button type="button" className="ghost" disabled={downloadingSym(symbol)} onClick={onRefresh}>
+            {downloadingSym(symbol) ? 'Качаю…' : 'Скачать свечи'}
           </button>
         </div>
       )}
@@ -342,6 +418,19 @@ export default function App() {
         )}
 
         <section className="center">
+          {topSec && (
+            <div className="tabs-row">
+              <div className="seg" role="tablist">
+                <button type="button" role="tab" aria-selected={view === 'main'} className={view === 'main' ? 'on' : ''} onClick={() => setTab('main')}>
+                  Основная стратегия · {mainTrades.length}
+                </button>
+                <button type="button" role="tab" aria-selected={view === 'top'} className={view === 'top' ? 'on' : ''} onClick={() => setTab('top')}>
+                  Топ-коины · {topTrades.length}{topSec.pending.windows > 0 ? ' ⏬' : ''}
+                </button>
+              </div>
+              <Help text={HELP.tab_top} />
+            </div>
+          )}
           <div className="chart-bar">
             <div className="seg">
               <button type="button" className={tfMode === 'auto' ? 'on' : ''} onClick={() => setTfMode('auto')}>
@@ -360,46 +449,64 @@ export default function App() {
             </div>
             <Help text={HELP.nav} />
             <label><input type="checkbox" checked={showLevels} onChange={(e) => setShowLevels(e.target.checked)} /> уровни TP / SL<Help text={HELP.levels} /></label>
-            <label><input type="checkbox" checked={showSkipped} onChange={(e) => setShowSkipped(e.target.checked)} /> пропущенные сигналы<Help text={HELP.skipped} /></label>
+            {view === 'main' && <label><input type="checkbox" checked={showSkipped} onChange={(e) => setShowSkipped(e.target.checked)} /> пропущенные сигналы<Help text={HELP.skipped} /></label>}
             <span className="legend">
-              <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="muted">OPEN</b>
+              <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="muted">{view === 'top' ? 'TIME' : 'OPEN'}</b>
             </span>
             {effTf?.truncated && <span className="chip warn">окно слишком широкое для {tfLabel(effTf.tf)} — показана последняя часть, приблизьте или возьмите ТФ крупнее</span>}
             {result?.signals_truncated && <span className="chip warn">сигналов слишком много, показаны первые 5000</span>}
           </div>
           {selTrade && (
             <div className="sel-info">
-              <b>#{selTrade.n}</b> <span className={selTrade.side === 'long' ? 'pos' : 'neg'}>{selTrade.side === 'long' ? 'лонг' : 'шорт'}</span>
+              <b>#{selTrade.n}</b>{selTrade.symbol && <b> {selTrade.symbol.split('/')[0]}</b>} <span className={selTrade.side === 'long' ? 'pos' : 'neg'}>{selTrade.side === 'long' ? 'лонг' : 'шорт'}</span>
               {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)} · вход {fmtPrice(selTrade.entry)} · TP {selTrade.tps.map(fmtPrice).join(' / ')} · SL {fmtPrice(selTrade.sl)}{selTrade.be ? ' (БУ после TP1)' : ''}
               {' · '}<span className="fills">{selTrade.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}</span>
               {' · '}<b className={signClass(selTrade.pnl_usd)}>{fmtUsd(selTrade.pnl_usd)}</b>
               {selTrade.local != null && <span className="muted"> · Local {selTrade.local.toFixed(2)} / Scalp {selTrade.scalp?.toFixed(2)}</span>}
+              {selTrade.coin && <span className="muted"> · в отчёте {selTrade.coin} {selTrade.top_value?.toFixed(2)}</span>}
+              {selTrade.partial && <span className="warn-text"> · окно ещё не закончилось</span>}
             </div>
           )}
           <div className="price">
             {/* график создаём, когда известен актив: иначе первый запрос свечей уходит с пустым символом */}
             {symbol ? <PriceChart
-              trades={trades}
-              signals={result?.signals ?? NO_SIGNALS}
+              trades={chartTrades}
+              signals={view === 'main' ? result?.signals ?? NO_SIGNALS : NO_SIGNALS}
               showLevels={showLevels}
-              showSkipped={showSkipped}
-              selected={selected}
+              showSkipped={showSkipped && view === 'main'}
+              selected={sel}
               onSelect={selectTrade}
               focusKey={focusKey}
-              symbol={symbol}
+              symbol={chartSymbol}
               tfMode={tfMode}
-              dataRange={dataRange}
+              dataRange={chartRange}
               reloadKey={reloadKey}
               onLoadError={setChartError}
               onTfInfo={(tf, truncated) => setEffTf({ tf, truncated })}
             /> : <div className="empty">Загрузка…</div>}
           </div>
-          <div className="equity-title">Капитал, $ (накопленный результат по закрытым сделкам)</div>
-          <div className="equity">{result && result.equity.length > 1 ? <EquityChart equity={result.equity} splitTs={result.range.split_ts} /> : <div className="empty">нет данных</div>}</div>
-          <TradesTable trades={trades} selected={selected} onSelect={selectTrade} />
+          <div className="equity-title">Капитал, $ (накопленный результат по закрытым сделкам{view === 'top' ? ' с топ-коинами' : ''})</div>
+          <div className="equity">
+            {view === 'top' && topSec ? (
+              topSec.equity.length > 1 ? <EquityChart key="top" equity={topSec.equity} splitTs={null} /> : <div className="empty">нет данных</div>
+            ) : result && result.equity.length > 1 ? (
+              <EquityChart key="main" equity={result.equity} splitTs={result.range.split_ts} />
+            ) : (
+              <div className="empty">нет данных</div>
+            )}
+          </div>
+          <TradesTable trades={trades} selected={sel} onSelect={selectTrade} top={view === 'top'} />
         </section>
 
-        <section className="right">{result ? <StatsPanel result={result} /> : <div className="empty">{loading ? 'Считаю…' : 'Нет результата'}</div>}</section>
+        <section className="right">
+          {result && view === 'top' && topSec && params ? (
+            <TopPanel top={topSec} params={params} downloading={topDownloading} onDownload={() => void onDownloadTop()} onPickCoin={pickCoin} />
+          ) : result ? (
+            <StatsPanel result={result} />
+          ) : (
+            <div className="empty">{loading ? 'Считаю…' : 'Нет результата'}</div>
+          )}
+        </section>
       </main>
       <Toasts toasts={toasts} onClose={dismiss} />
     </div>

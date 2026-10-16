@@ -39,6 +39,14 @@ export const getCandles = (symbol: string, startSec?: number, endSec?: number, t
 export const refreshCandles = (symbol: string) =>
   request<{ job: Job; created: boolean }>('/api/candles/refresh?' + new URLSearchParams({ symbol }).toString(), { method: 'POST' });
 
+/** Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + N суток) для текущих параметров. */
+export const downloadTop = (p: Params) =>
+  request<{ job: Job | null; created: boolean; windows: number }>('/api/top/download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(p),
+  });
+
 export const addAsset = (symbol: string) =>
   request<AddAssetResult>('/api/assets', {
     method: 'POST',

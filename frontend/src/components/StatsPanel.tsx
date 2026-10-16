@@ -1,7 +1,7 @@
 import { fmtPct, fmtPf, fmtUsd, signClass } from '../format';
 import type { BacktestResult, Stats } from '../types';
 
-function Card({ label, value, cls = '', sub }: { label: string; value: string; cls?: string; sub?: string }) {
+export function Card({ label, value, cls = '', sub }: { label: string; value: string; cls?: string; sub?: string }) {
   return (
     <div className="card">
       <div className="card-label">{label}</div>

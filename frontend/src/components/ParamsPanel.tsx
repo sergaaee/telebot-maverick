@@ -52,13 +52,15 @@ function Num({ label, help, value, onChange, step = 0.05, suffix }: {
 }
 
 /** Тейк-профиты частями: число уровней (1–3), расстояние и доля позиции на каждом, перенос стопа в безубыток после первого. */
-function TpEditor({ p, onChange }: { p: Params; onChange: (p: Params) => void }) {
-  const n = p.tps.length;
-  const err = validateTps(p.tps);
-  const sum = sumShares(p.tps);
-  const setLevel = (i: number, patch: Partial<TpLevel>) =>
-    onChange({ ...p, tps: p.tps.map((l, k) => (k === i ? { ...l, ...patch } : l)) });
-  const setCount = (k: number) => onChange({ ...p, tps: resizeTps(p.tps, k), be_after_tp1: k > 1 ? p.be_after_tp1 : false });
+function TpEditor({ tps, be, onTps, onBe }: { tps: TpLevel[]; be: boolean; onTps: (t: TpLevel[]) => void; onBe: (b: boolean) => void }) {
+  const n = tps.length;
+  const err = validateTps(tps);
+  const sum = sumShares(tps);
+  const setLevel = (i: number, patch: Partial<TpLevel>) => onTps(tps.map((l, k) => (k === i ? { ...l, ...patch } : l)));
+  const setCount = (k: number) => {
+    onTps(resizeTps(tps, k));
+    if (k < 2) onBe(false);
+  };
   return (
     <div className="tp-editor">
       <div className="field">
@@ -74,7 +76,7 @@ function TpEditor({ p, onChange }: { p: Params; onChange: (p: Params) => void })
         <span>расстояние <Help text={HELP.tp_level_pct} /></span>
         <span>закрыть <Help text={HELP.tp_level_share} /></span>
       </div>
-      {p.tps.map((l, i) => (
+      {tps.map((l, i) => (
         <div className="tp-row" key={i}>
           <b>TP{i + 1}</b>
           <span className="input-wrap">
@@ -90,11 +92,11 @@ function TpEditor({ p, onChange }: { p: Params; onChange: (p: Params) => void })
       <div className={`tp-sum ${err ? 'bad' : 'ok'}`}>
         Σ долей: {sum}%{err ? ` — ${err}` : ''}
         {n > 1 && Math.abs(sum - 100) > 0.001 && (
-          <button type="button" className="link" onClick={() => onChange({ ...p, tps: fillRemainder(p.tps) })}>дополнить до 100%</button>
+          <button type="button" className="link" onClick={() => onTps(fillRemainder(tps))}>дополнить до 100%</button>
         )}
       </div>
       <label className="field check">
-        <input type="checkbox" checked={p.be_after_tp1 && n > 1} disabled={n < 2} onChange={(e) => onChange({ ...p, be_after_tp1: e.target.checked })} />
+        <input type="checkbox" checked={be && n > 1} disabled={n < 2} onChange={(e) => onBe(e.target.checked)} />
         <Label text="В безубыток после 1-го тейка" help="be_after_tp1" />
       </label>
     </div>
@@ -123,7 +125,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
   const setCoolMode = (m: string) =>
     onChange({ ...p, cool_drop: m === 'drop' ? 0.1 : null, cool_declines: m === 'declines' ? 2 : null });
   const liqOn = p.liq_hours != null;
-  const tpErr = validateTps(p.tps);
+  const tpErr = validateTps(p.tps) ?? (p.top_enabled ? validateTps(p.top_tps) : null);
   const src = sources.find((s) => s.id === p.source);
   const liqSrc = p.liq_source ? sources.find((s) => s.id === p.liq_source) : src;
   const asset = assets.find((a) => a.symbol === p.symbol);
@@ -254,12 +256,38 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       </Section>
 
       <Section title="Выход и издержки" help="groupExit">
-        <TpEditor p={p} onChange={onChange} />
+        <TpEditor tps={p.tps} be={p.be_after_tp1} onTps={(t) => onChange({ ...p, tps: t })} onBe={(v) => onChange({ ...p, be_after_tp1: v })} />
         <Num label="Стоп-лосс" help="sl_pct" value={p.sl_pct} step={0.5} suffix="%" onChange={num('sl_pct')} />
         <Num label="Размер" help="size" value={p.size} step={0.01} suffix="BTC" onChange={num('size')} />
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
         <Num label="Проскальзывание" help="slip" value={+(p.slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('slip', (v ?? 0) / 100)} />
         <Num label="Пауза после стопа" help="cooldown_h" value={p.cooldown_h} step={1} suffix="ч" onChange={(v) => set('cooldown_h', v ?? 0)} />
+      </Section>
+
+      <Section title="Топ-коины" help="groupTop" open={p.top_enabled}>
+        <label className="field check">
+          <input type="checkbox" checked={p.top_enabled} onChange={(e) => set('top_enabled', e.target.checked)} />
+          <Label text="торговать топ-коином отчёта" help="top_enabled" />
+        </label>
+        {p.top_enabled && (
+          <>
+            <label className="field">
+              <Label text="Сторона" help="top_side" />
+              <select value={p.top_side} onChange={(e) => set('top_side', e.target.value as Side)}>
+                <option value="long">только лонг</option>
+                <option value="short">только шорт</option>
+                <option value="both">лонг + шорт</option>
+              </select>
+            </label>
+            <TpEditor tps={p.top_tps} be={p.top_be_after_tp1} onTps={(t) => onChange({ ...p, top_tps: t })} onBe={(v) => onChange({ ...p, top_be_after_tp1: v })} />
+            <Num label="Стоп-лосс" help="top_sl_pct" value={p.top_sl_pct} step={0.5} suffix="%" onChange={num('top_sl_pct')} />
+            <Num label="Размер" help="top_size" value={p.top_size} step={10} suffix="$" onChange={num('top_size')} />
+            <Num label="Комиссия за сторону" help="top_fee" value={+(p.top_fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('top_fee', (v ?? 0) / 100)} />
+            <Num label="Проскальзывание" help="top_slip" value={+(p.top_slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('top_slip', (v ?? 0) / 100)} />
+            <Num label="Держать / качать" help="top_days" value={p.top_days} step={0.5} suffix="сут" onChange={(v) => set('top_days', v ?? 3)} />
+            <Num label="Значение в отчёте ≥" help="top_min_value" value={p.top_min_value} step={0.5} onChange={(v) => set('top_min_value', v ?? 0)} />
+          </>
+        )}
       </Section>
 
       <Section title="Фильтр: остывание метрик" help="groupCool" open={coolMode !== 'off'}>

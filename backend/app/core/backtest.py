@@ -375,7 +375,7 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
 
 def stats(trades):
     if not trades:
-        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "rev": 0, "winrate": 0, "total_usd": 0,
+        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "time": 0, "rev": 0, "winrate": 0, "total_usd": 0,
                 "avg_pct": 0, "profit_factor": 0, "max_dd_usd": 0}
     wins = [t["pnl_usd"] for t in trades if t["pnl_usd"] > 0]
     losses = [-t["pnl_usd"] for t in trades if t["pnl_usd"] <= 0]
@@ -389,6 +389,7 @@ def stats(trades):
             "sl": sum(t["reason"] == "SL" for t in trades),
             "be": sum(t["reason"] == "BE" for t in trades),
             "open": sum(t["reason"] == "OPEN" for t in trades),
+            "time": sum(t["reason"] == "TIME" for t in trades),
             "rev": sum(t["reason"] == "REV" for t in trades),
             "winrate": 100 * len(wins) / len(trades),
             "total_usd": eq,
