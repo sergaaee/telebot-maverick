@@ -544,3 +544,13 @@ def test_avg_flag_missing_in_old_config_means_off(env):
     old = {k: v for k, v in validate(_pyr_config()["params"], env.s.defaults)[0].items() if k != "pyramid_avg"}
     env.s.defaults["pyramid_avg"] = True
     assert env.engine.evaluate(old)["params"]["pyramid_avg"] is False
+
+
+def test_old_stored_config_ignores_env_deep_global_defaults(env):
+    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items() if k not in ("global_min", "short_global_max")}      # сохранён до появления Deep Global
+    env.s.defaults.update(global_min=99.0, short_global_max=-99.0)                                                                       # а в .env пороги задали
+    res = env.engine.evaluate(old)
+    assert res["params"]["global_min"] is None and res["params"]["short_global_max"] is None
+    assert res["stats"]["total"]["trades"] == env.engine.evaluate({**old, "global_min": None})["stats"]["total"]["trades"]
+    new, _ = validate(UI_CONFIG["params"], env.s.defaults)                                                                                # новый импорт фиксирует значения явно
+    assert new["global_min"] == 99.0

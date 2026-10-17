@@ -5,7 +5,7 @@ export interface TpLevel {
   pct: number;
   share: number;
 }
-export type Only = 'local' | 'scalp' | null;
+export type Only = 'local' | 'scalp' | 'global' | null;
 
 /** Параметры, как их отдаёт и принимает бэкенд (fee/slip — доли, не проценты). */
 export interface Params {
@@ -20,6 +20,9 @@ export interface Params {
   scalp_min: number;
   short_local_max: number;
   short_scalp_max: number;
+  /** Deep Global (необязательно): лонг при DG ≥ global_min, шорт при DG ≤ short_global_max; null — не учитывается */
+  global_min: number | null;
+  short_global_max: number | null;
   confirm: number;
   /** тейки частями: от 1 до 3, доли в сумме 100% */
   tps: TpLevel[];
@@ -38,7 +41,7 @@ export interface Params {
   fee: number;
   slip: number;
   cooldown_h: number;
-  cool_metric: 'scalp' | 'local';
+  cool_metric: 'scalp' | 'local' | 'global';
   cool_drop: number | null;
   cool_declines: number | null;
   liq_hours: number | null;
@@ -153,6 +156,7 @@ export interface Trade {
   hold_h: number;
   local: number | null;
   scalp: number | null;
+  global?: number | null;
   liq_long_k: number | null;
   liq_short_k: number | null;
   /** номер ноги позиции (1 — вход, 2+ — доборы), номер позиции и признак добора */

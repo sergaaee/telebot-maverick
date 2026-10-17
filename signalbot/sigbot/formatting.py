@@ -78,11 +78,18 @@ def sizing_line(result, add=False):
     return f"💼 Объём ≈ <b>{num(notional)} $</b> (маржа {num(notional / p['leverage'])} $ · {pct:g}% × {p['leverage']:g}× · {mode}; баланс {num(bal)} $)"
 
 
+ONLY_NAMES = {"local": "DL", "scalp": "DS", "global": "DG"}
+
+
 def config_summary(cfg, result=None):
     p = cfg["params"]
     bits = [f"{esc(str(p.get('source')))} · {esc(str(p.get('symbol')))}", f"side {p.get('side')}", f"подтв. {p.get('confirm')}"]
     if p.get("only"):
-        bits.append(f"только {p['only']}")
+        bits.append(f"только {ONLY_NAMES.get(p['only'], p['only'])}")
+    if p.get("global_min") is not None:
+        bits.append(f"DG ≥ {p['global_min']:g}")
+    if p.get("short_global_max") is not None:
+        bits.append(f"шорт DG ≤ {p['short_global_max']:g}")
     if p.get("trend_enabled"):
         bits.append("тренд EMA " + "/".join(str(x) for x in p.get("trend_emas", [])) + f" {p.get('trend_tf')}")
     if p.get("top_enabled"):

@@ -15,7 +15,7 @@ export default function TradesTable({ trades, selected, onSelect, top = false }:
         <thead>
           <tr>
             <th>#</th><th>сторона</th><th>вход (UTC)</th><th>цена</th><th>выход</th><th>цена</th><th>причина</th>
-            <th>тейки</th><th>PnL</th><th>PnL $</th><th>держал</th>{top ? <><th>монета</th><th>в отчёте</th></> : <><th>Local</th><th>Scalp</th></>}
+            <th>тейки</th><th>PnL</th><th>PnL $</th><th>держал</th>{top ? <><th>монета</th><th>в отчёте</th></> : <><th>Local</th><th>Scalp</th><th>Global</th></>}
           </tr>
         </thead>
         <tbody>
@@ -43,6 +43,7 @@ export default function TradesTable({ trades, selected, onSelect, top = false }:
                 <>
                   <td>{t.local?.toFixed(2) ?? '–'}</td>
                   <td>{t.scalp?.toFixed(2) ?? '–'}</td>
+                  <td>{t.global?.toFixed(2) ?? '–'}</td>
                 </>
               )}
             </tr>

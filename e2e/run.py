@@ -554,6 +554,28 @@ def scenario(pg, base, state_url):
     check("старый конфиг без новых полей: пирамидинг и SL-режим выключены, пауза 0", not field(pg, "пирамидинг (доборы в позицию)").locator("input").is_checked()
           and not field(pg, "не ставить SL").locator("input").is_checked() and num(pg, "Пауза между сигналами").input_value() == "0" and pg.locator(".tag-add").count() == 0)
 
+    # --- Deep Global: пороги входа (по умолчанию выключены), «?», влияние на результат, конфиг и обратная совместимость
+    check("Deep Global: поля порогов лонга/шорта есть, пустые по умолчанию, с «?»", all(field(pg, l).locator(".help").count() == 1 and field(pg, l).locator("input").input_value() == "" for l in ("Global ≥", "Global ≤")))
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    n_dg0 = pg.locator("table.trades tbody tr").count()
+    num(pg, "Global ≥").fill("5"); num(pg, "Global ≤").fill("-5")                      # в демо-отчётах DG = 1.0: ни лонг, ни шорт не пройдут
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    check("жёсткие пороги Global отсекают все входы", pg.locator("table.trades tbody tr").count() == 0 and n_dg0 > 0, f"было {n_dg0}")
+    num(pg, "Global ≥").fill("0.5"); num(pg, "Global ≤").fill("1.5")                    # DG = 1.0 проходит оба условия — результат как без порогов
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    check("мягкие пороги Global не меняют результат", pg.locator("table.trades tbody tr").count() == n_dg0)
+    with pg.expect_download() as dl3:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg3 = _json.loads(Path(dl3.value.path()).read_text(encoding="utf-8"))
+    check("в скачанном конфиге есть пороги Global", cfg3["params"]["global_min"] == 0.5 and cfg3["params"]["short_global_max"] == 1.5)
+    cfg3["params"].pop("global_min"); cfg3["params"].pop("short_global_max")
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg3))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("старый конфиг без Global: пороги выключены, результат прежний", num(pg, "Global ≥").input_value() == "" and num(pg, "Global ≤").input_value() == "" and pg.locator("table.trades tbody tr").count() == n_dg0)
+    api_dg = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({only: 'global'})}).then(r => r.status)""")
+    check("API: режим «только Global» без порогов — ошибка валидации", api_dg == 422, str(api_dg))
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):
@@ -652,9 +674,9 @@ def main():
             pg.on("console", lambda m: errors.append(f"после «{STEP[0]}»: {m.type}: {m.text}") if m.type in ("error", "warning") else None)
             pg.on("pageerror", lambda e: errors.append(f"после «{STEP[0]}»: pageerror: {e}\n{(getattr(e, 'stack', '') or '')[:700]}"))
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
-            expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив
+            expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив и запрос «только Global» без порогов
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 2, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 3, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

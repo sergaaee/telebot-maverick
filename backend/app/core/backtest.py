@@ -335,6 +335,20 @@ def apply_only(local_min, scalp_min, short, only):
     return local_min, scalp_min, short
 
 
+def resolve_entry(local_min, scalp_min, global_min, short, short_global_max, only):
+    """Пороги входа с учётом режима «только одна метрика»: остальные метрики не участвуют ни для лонга, ни для шорта.
+    only: None | 'local' | 'scalp' | 'global'. Возвращает (local_min, scalp_min, global_min, short, short_global_max)."""
+    inf = float("inf")
+    if only == "global":
+        local_min = scalp_min = -inf
+        short = None if short is None else (inf, inf)
+        return local_min, scalp_min, global_min, short, short_global_max
+    local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
+    if only in ("local", "scalp"):
+        global_min = short_global_max = None
+    return local_min, scalp_min, global_min, short, short_global_max
+
+
 class AvgPosition:
     """Позиция с усреднением (пирамидинг «усредняет позу»): доборы входят в ОДНУ позицию, и после каждого добора тейки, стоп и безубыток
     считаются от новой средней цены входа. Позиция идёт по свечам постепенно (advance), потому что добор приходит в середине её жизни.
@@ -565,28 +579,31 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
              short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False, event_filter=None,
-             pyramid=None, signal_gap_h=0.0, sl_hold_strong=False, skipped=None):
-    """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
+             pyramid=None, signal_gap_h=0.0, sl_hold_strong=False, skipped=None, global_min=None, short_global_max=None):
+    """global_min / short_global_max — пороги Deep Global (None — не учитывается; в режиме only='global' учитывается только он).
+    short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
     tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
     be_after_tp1 — после первого тейка переносить стоп в цену входа.
     Одна позиция одновременно: сигнал в ту же сторону игнорируется, в противоположную — разворот
     (закрытие по open свечи входа + новая позиция)."""
-    local_min, scalp_min, short = apply_only(local_min, scalp_min, short, only)
+    local_min, scalp_min, global_min, short, short_global_max = resolve_entry(local_min, scalp_min, global_min, short, short_global_max, only)
     levels = normalize_tps(tps if tps else [(tp_pct, 100)])
-    events = entries(signals, local_min, scalp_min, confirm, short, liq, cool)
+    events = entries(signals, local_min, scalp_min, confirm, short, liq, cool, global_min, short_global_max)
     if event_filter:
         events = [e for e in events if event_filter(*e)]
-    hold = strong_checker(signals, local_min, scalp_min, short) if sl_hold_strong else None
+    hold = strong_checker(signals, local_min, scalp_min, short, global_min, short_global_max) if sl_hold_strong else None
     return run_events(events, candles, levels, sl_pct, fee, size, slip, cooldown_h, be_after_tp1,
                       pyramid=pyramid, signal_gap_h=signal_gap_h, hold=hold, skipped=skipped)
 
 
-def strong_checker(signals, local_min, scalp_min, short):
+def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_global_max=None):
     """hold(d, ts_мс) -> выполняется ли СЕЙЧАС условие входа по последнему отчёту не позже ts_мс (для лонга — пороги лонга, для шорта — шорта).
     Пороги уже учитывают режим «только Local / только Scalp» (apply_only): лишняя метрика не участвует. Нет отчёта — не сильны."""
     rep_ts = [s[0] for s in signals]
-    long_ok = [should_long({"local": s[1], "scalp": s[2]}, local_min, scalp_min) for s in signals]
-    short_ok = [should_short({"local": s[1], "scalp": s[2]}, *short) if short is not None else False for s in signals]
+    def sig(s):
+        return {"local": s[1], "scalp": s[2], "global": s[7] if len(s) > 7 else None}
+    long_ok = [should_long(sig(s), local_min, scalp_min, global_min) for s in signals]
+    short_ok = [should_short(sig(s), *short, short_global_max) if short is not None else False for s in signals]
 
     def hold(d, t):
         k = bisect_right(rep_ts, t) - 1

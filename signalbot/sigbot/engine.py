@@ -10,7 +10,8 @@ from app.service import ParamError
 
 # Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
 # чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
-LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False}
+LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False,
+              "global_min": None, "short_global_max": None}
 
 
 class EvalError(RuntimeError):
@@ -84,10 +85,10 @@ class Engine:
         row = next((r for r in reversed(rows) if r[0] == ts), None)
         if not row:
             return {}
-        out = {"dl": row[1], "ds": row[2], "liq_long_k": row[3], "liq_short_k": row[4], "top_coin": row[5], "top_value": row[6], "dg": None}
+        out = {"dl": row[1], "ds": row[2], "liq_long_k": row[3], "liq_short_k": row[4], "top_coin": row[5], "top_value": row[6], "dg": row[7] if len(row) > 7 else None}
         try:
             last = self.store.latest(params["source"])
-            if last and last["ts"] == ts:
+            if last and last["ts"] == ts and out["dg"] is None:
                 out["dg"] = last["dg"]
         except (KeyError, FileNotFoundError):
             pass
