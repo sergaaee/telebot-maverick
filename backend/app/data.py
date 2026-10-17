@@ -27,6 +27,7 @@ class DataStore:
         self._lock = threading.Lock()
         self._raw = {}                  # id источника -> (mtime, [отчёты])
         self._sig = {}                  # (источник, источник ликвидаций) -> (ключ, данные)
+        self._latest = {}               # id источника -> (mtime, последний отчёт)
         self._candles = {}              # символ -> (mtime, свечи, времена)
         self._extra = self._load_extra()  # активы, добавленные из интерфейса
 
@@ -68,6 +69,47 @@ class DataStore:
         with self._lock:
             self._sig[(source_id, liq_id)] = (key, merged)
         return merged
+
+    def latest(self, source_id):
+        """Последний отчёт источника с метриками: время, DG/DL/DS, топ-коин и ликвидации (None, если отчётов нет)."""
+        import csv
+
+        from .core.signal_parser import parse_liquidation, parse_top_coin
+
+        src = self.source(source_id)
+        m = _mtime(src.file)
+        if m is None:
+            raise FileNotFoundError(f"Нет файла с историей источника «{src.label}»: {src.file}")
+        with self._lock:
+            c = self._latest.get(source_id)
+            if c and c[0] == m:
+                return c[1]
+        last = None
+        with open(src.file, newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                if r.get("deep_local") and r.get("deep_scalp"):
+                    last = r
+        out = None
+        if last:
+            text = last.get("text") or ""
+            top = parse_top_coin(text)
+            liq = parse_liquidation(text)
+
+            def num(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            from datetime import datetime
+            out = {"ts": int(datetime.fromisoformat(last["date_utc"]).timestamp() * 1000), "dg": num(last.get("deep_global")),
+                   "dl": num(last["deep_local"]), "ds": num(last["deep_scalp"]),
+                   "top_coin": top["coin"] if top else None, "top_value": top["value"] if top else None,
+                   "liq_long_k": num(last.get("liq_long_k")) if last.get("liq_long_k") not in (None, "") else (liq["long"] if liq else None),
+                   "liq_short_k": num(last.get("liq_short_k")) if last.get("liq_short_k") not in (None, "") else (liq["short"] if liq else None)}
+        with self._lock:
+            self._latest[source_id] = (m, out)
+        return out
 
     def first_signal_ts(self):
         """Самый ранний отчёт среди всех доступных источников — с него качаем свечи."""

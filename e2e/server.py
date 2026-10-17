@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.config import load_settings  # noqa: E402
 from app.core import backtest  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.history_sync import HistorySync  # noqa: E402
 from app.markets import MarketsCache  # noqa: E402
 
 EXCHANGE_SYMBOLS = {"BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "DOGE/USDT:USDT", "FAIL/USDT:USDT", "ETHW/USDT:USDT", "TIA/USDT:USDT", "ARB/USDT:USDT"}
@@ -59,4 +60,27 @@ def top_runner(job, progress):
         progress(count, windows[-1][1])
 
 
-app = create_app(load_settings(), markets=MarketsCache(lambda: EXCHANGE_SYMBOLS), runner=runner, top_runner=top_runner)
+_calls = {}
+
+
+def sync_exporter(path, chat):
+    """Поддельная выгрузка Telegram: первый вызов (при запуске сервера) ничего не добавляет, каждый следующий для binance дописывает новый отчёт."""
+    import csv
+    from datetime import datetime, timedelta
+
+    _calls[chat] = _calls.get(chat, 0) + 1
+    if _calls[chat] == 1 or "bn" not in str(path):
+        return 0
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    last = rows[-1]
+    ts = datetime.fromisoformat(last["date_utc"]) + timedelta(minutes=30)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow([int(last["id"]) + 1, ts.isoformat(), 0.8, 1.9, 1.3, last["liq_long_k"], last["liq_short_k"],
+                                "Top Coin\n————————————————\nTIA-USD      | 8.80\n"])
+    return 1
+
+
+_settings = load_settings()
+app = create_app(_settings, markets=MarketsCache(lambda: EXCHANGE_SYMBOLS), runner=runner, top_runner=top_runner,
+                 sync=HistorySync(list(_settings.sources.values()), _settings.sync_min, exporter=sync_exporter))

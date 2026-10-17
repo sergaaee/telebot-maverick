@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { addAsset, downloadTop, getConfig, getUiState, putUiState, refreshCandles, removeAsset, runBacktest } from './api';
+import { addAsset, downloadTop, getConfig, getLatest, getSync, runSync, getUiState, putUiState, refreshCandles, removeAsset, runBacktest } from './api';
 import EquityChart from './components/EquityChart';
 import Help from './components/Help';
+import MetricsBar from './components/MetricsBar';
 import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
 import StatsPanel from './components/StatsPanel';
@@ -12,7 +13,7 @@ import { parseConfig } from './configIO';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
 import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
-import type { AppConfig, BacktestResult, Job, Params, Signal, TfMode, Trade, UiState } from './types';
+import type { AppConfig, BacktestResult, Job, LatestSource, Params, Signal, SyncStatus, TfMode, Trade, UiState } from './types';
 
 const profileKey = (source: string, symbol: string) => `${source}|${symbol}`;
 
@@ -47,6 +48,8 @@ export default function App() {
   const [chartError, setChartError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [selectedTop, setSelectedTop] = useState<number | null>(null);
+  const [latest, setLatest] = useState<LatestSource[]>([]);
+  const [sync, setSync] = useState<SyncStatus | null>(null);
   const [tab, setTab] = useState<'main' | 'top'>('main');
   const [focusKey, setFocusKey] = useState(0); // растёт при каждом явном выборе сделки: график возвращается к ней, даже если она уже выбрана
   const [showLevels, setShowLevels] = useState(true);
@@ -152,6 +155,48 @@ export default function App() {
   const configRef = useRef<AppConfig | null>(null);
   const switchRef = useRef<((t: { source?: string; symbol?: string }) => void) | null>(null);
   const runRef = useRef<((p: Params) => Promise<void>) | null>(null);
+
+  // ---------- текущие метрики и подгрузка истории ----------
+  const syncSeen = useRef<Map<string, number> | null>(null);
+  const pollMetrics = useCallback(async () => {
+    try {
+      const [l, s] = await Promise.all([getLatest(), getSync()]);
+      setLatest(l);
+      setSync(s);
+      // сервер подтянул новые сообщения: говорим об этом один раз
+      const seen = syncSeen.current;
+      const next = new Map(s.sources.map((x) => [x.id, x.added_total]));
+      if (seen) {
+        const fresh = s.sources.filter((x) => x.added_total > (seen.get(x.id) ?? 0));
+        if (fresh.length) {
+          const n = fresh.reduce((a, x) => a + (x.added_total - (seen.get(x.id) ?? 0)), 0);
+          jobsApi.current?.push({
+            kind: 'info',
+            autoCloseMs: 20000,
+            text: `Подгружены новые сообщения ботов (${fresh.map((x) => x.label).join(', ')}): +${n}. Чтобы учесть их в расчёте — «Пересчитать»; свечи докачайте кнопкой «Обновить свечи».`,
+            action: { label: 'Пересчитать', onClick: () => paramsRef.current && void runRef.current?.(paramsRef.current) },
+          });
+        }
+      }
+      syncSeen.current = next;
+    } catch {
+      /* бэкенд временно недоступен — повторим */
+    }
+  }, []);
+  useEffect(() => {
+    void pollMetrics();
+    const t = setInterval(() => void pollMetrics(), 20000);
+    return () => clearInterval(t);
+  }, [pollMetrics]);
+  const onSyncNow = async () => {
+    try {
+      setSync(await runSync());
+      setTimeout(() => void pollMetrics(), 1500);
+      setTimeout(() => void pollMetrics(), 6000);
+    } catch (e) {
+      setError(`Не удалось запустить обновление истории: ${e instanceof Error ? e.message : e}`);
+    }
+  };
 
   // ---------- расчёт ----------
   const run = useCallback(async (p: Params) => {
@@ -423,6 +468,7 @@ export default function App() {
         )}
       </header>
 
+      {params && latest.length > 0 && <MetricsBar latest={latest} sync={sync} params={params} onSync={() => void onSyncNow()} />}
       {error && <div className="banner error">{error}</div>}
       {(result?.warnings ?? []).map((w) => <div className="banner warn" key={w}>{w}</div>)}
       {config && !config.data.sources.some((s) => s.exists) && <div className="banner error">Нет ни одного файла истории — выгрузите историю (python cli.py export …) и проверьте SOURCE_*_FILE в backend/.env</div>}

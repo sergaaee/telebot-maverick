@@ -1,5 +1,6 @@
 """FastAPI-бэкенд интерактивного просмотра бэктеста. Запуск: python cli.py serve (из папки backend/)."""
 import json
+from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 from .config import Settings, load_settings
 from .core import backtest
 from .data import DataStore
+from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
 from .schemas import BacktestParams
@@ -19,7 +21,7 @@ class AssetIn(BaseModel):
     symbol: str = Field(min_length=1, max_length=40, description="актив: ETH, ETHUSDT, ETH/USDT или ETH/USDT:USDT")
 
 
-def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None" = None, runner=None, top_runner=None) -> FastAPI:
+def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None" = None, runner=None, top_runner=None, sync: "HistorySync | None" = None) -> FastAPI:
     """markets, runner и top_runner подменяются в тестах (без обращения к бирже)."""
     s = settings or load_settings()
     store = DataStore(s)
@@ -59,9 +61,19 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         return markets.symbols()
 
     jobs = JobManager(runner or default_runner, on_done=on_done, top_runner=top_runner or default_top_runner)
-    app = FastAPI(title="telebot-maverick backtest viewer")
+    if sync is None:
+        sync = HistorySync(list(s.sources.values()), s.sync_min, enabled=s.sync_enabled,
+                           disabled_reason=None if s.sync_enabled else "выключено: нет TG_API_ID/TG_API_HASH в .env (или HISTORY_SYNC=false)")
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        sync.start()                       # подгрузка при запуске сервера и затем каждые HISTORY_SYNC_MIN минут
+        yield
+        sync.stop()
+
+    app = FastAPI(title="telebot-maverick backtest viewer", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["*"], allow_headers=["*"])
-    app.state.settings, app.state.store, app.state.jobs = s, store, jobs
+    app.state.settings, app.state.store, app.state.jobs, app.state.sync = s, store, jobs, sync
 
     @app.get("/api/health")
     def health():
@@ -78,6 +90,30 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         return {"defaults": s.defaults, "timeframes": tfs, "exchange": s.exchange, "symbols": store.symbols(),
                 "user_symbols": store.user_symbols(), "symbol": s.symbol, "tf": s.candle_tf, "max_bars": s.max_bars,
                 "data": store.info()}
+
+    # ---------------- текущие метрики и подгрузка истории ----------------
+    @app.get("/api/latest")
+    def latest():
+        """Последний отчёт каждого источника: DG / DL / DS, топ-коин, ликвидации."""
+        out = []
+        for src in s.sources.values():
+            try:
+                row = store.latest(src.id)
+            except FileNotFoundError:
+                row = None
+            out.append({"id": src.id, "label": src.label, "report": row})
+        return {"sources": out}
+
+    @app.get("/api/sync")
+    def sync_status():
+        return sync.snapshot()
+
+    @app.post("/api/sync/run")
+    def sync_run():
+        """Подгрузить новые сообщения прямо сейчас (не дожидаясь очередного срока)."""
+        if not sync.enabled:
+            raise HTTPException(409, sync.disabled_reason or "Подгрузка выключена")
+        return {"started": sync.trigger(), **sync.snapshot()}
 
     # ---------------- свечи ----------------
     @app.get("/api/candles")

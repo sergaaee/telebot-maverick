@@ -1,4 +1,4 @@
-import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, Params, UiState } from './types';
+import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, Params, SyncStatus, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -60,6 +60,13 @@ export const removeAsset = (symbol: string) =>
 export const getJobs = () => request<{ jobs: Job[] }>('/api/jobs').then((r) => r.jobs);
 
 export const ackJob = (id: number) => request<Job>(`/api/jobs/${id}/ack`, { method: 'POST' });
+
+export const getLatest = () => request<{ sources: LatestSource[] }>('/api/latest').then((r) => r.sources);
+
+export const getSync = () => request<SyncStatus>('/api/sync');
+
+/** Подгрузить новые сообщения Telegram сейчас, не дожидаясь срока. */
+export const runSync = () => request<SyncStatus & { started: boolean }>('/api/sync/run', { method: 'POST' });
 
 export const getUiState = () => request<UiState>('/api/ui-state');
 

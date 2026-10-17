@@ -134,3 +134,6 @@ select.wide { width: 100%; }
 .ema-row { display: flex; gap: 12px; margin-top: 4px; } .ema-row label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
 .cfg-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 .cfg-import { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; } .cfg-import textarea { width: 100%; box-sizing: border-box; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px; font: 11px/1.4 ui-monospace, monospace; resize: vertical; }
+.metrics-bar { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; padding: 6px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.mb-title { color: var(--muted); } .mb-src { display: inline-flex; gap: 10px; align-items: center; } .mb-val b { font-variant-numeric: tabular-nums; }
+.mb-sync { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }

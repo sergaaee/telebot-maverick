@@ -276,6 +276,46 @@ export interface Job {
   acked: boolean;
 }
 
+/** Последний отчёт источника. */
+export interface LatestReport {
+  ts: number;
+  dg: number | null;
+  dl: number;
+  ds: number;
+  top_coin: string | null;
+  top_value: number | null;
+  liq_long_k: number | null;
+  liq_short_k: number | null;
+}
+
+export interface LatestSource {
+  id: string;
+  label: string;
+  report: LatestReport | null;
+}
+
+/** Подгрузка новых сообщений Telegram на сервере. Время — секунды (unix). */
+export interface SyncSource {
+  id: string;
+  label: string;
+  chat: string;
+  status: 'idle' | 'running' | 'ok' | 'error';
+  last_run: number | null;
+  last_ok: number | null;
+  added: number;
+  added_total: number;
+  error: string | null;
+}
+
+export interface SyncStatus {
+  enabled: boolean;
+  reason: string | null;
+  running: boolean;
+  interval_min: number;
+  next_run: number | null;
+  sources: SyncSource[];
+}
+
 export interface AddAssetResult {
   symbol: string;
   added: boolean;

@@ -50,12 +50,21 @@ def _path(name, default):
     return p if p.is_absolute() else (BACKEND_DIR / p).resolve()
 
 
+def _source_chat(source_id):
+    """SOURCE_<ID>_CHAT; запасные значения для привычных источников: coinbase — основной канал (TG_CHANNEL_ID), binance — бот maverickBinance (2119980662)."""
+    v = _opt(f"SOURCE_{source_id.upper()}_CHAT")
+    if v:
+        return v
+    return {"coinbase": _opt("TG_CHANNEL_ID") or "3217240841", "binance": "2119980662"}.get(source_id)
+
+
 @dataclass(frozen=True)
 class Source:
     """Источник метрик: файл истории одного Telegram-бота/канала."""
     id: str
     label: str
     file: Path
+    chat: "str | None" = None          # чат Telegram (id или имя) для автоподгрузки сообщений на сервере
 
 
 def _load_sources():
@@ -66,7 +75,7 @@ def _load_sources():
         f = _opt(f"SOURCE_{i.upper()}_FILE")
         if f:
             p = Path(f)
-            out[i] = Source(i, _opt(f"SOURCE_{i.upper()}_LABEL") or i, p if p.is_absolute() else (BACKEND_DIR / p).resolve())
+            out[i] = Source(i, _opt(f"SOURCE_{i.upper()}_LABEL") or i, p if p.is_absolute() else (BACKEND_DIR / p).resolve(), _source_chat(i))
     legacy_liq = None
     if not out:                                   # старый формат: один файл (+ отдельный файл ликвидаций)
         out["default"] = Source("default", "История", _path("HISTORY_FILE", "../history.csv"))
@@ -92,6 +101,8 @@ class Settings:
     host: str
     port: int
     cors_origins: list = field(default_factory=list)
+    sync_enabled: bool = False       # подгрузка сообщений Telegram на сервере (нужны TG_API_ID/TG_API_HASH)
+    sync_min: float = 32.0           # период подгрузки, минут
     defaults: dict = field(default_factory=dict)
 
 
@@ -143,6 +154,7 @@ def load_settings() -> Settings:
         max_bars=_num("MAX_BARS", 3000, int),
         host=_opt("HOST") or "127.0.0.1",
         port=_num("PORT", 8000, int),
+        sync_enabled=_bool("HISTORY_SYNC", bool(_opt("TG_API_ID") and _opt("TG_API_HASH"))), sync_min=_num("HISTORY_SYNC_MIN", 32.0),
         cors_origins=[o.strip() for o in (_opt("CORS_ORIGINS") or "").split(",") if o.strip()],
         defaults=defaults,
     )
