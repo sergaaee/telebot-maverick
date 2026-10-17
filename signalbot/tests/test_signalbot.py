@@ -7,16 +7,17 @@ import pytest
 from app.config import load_settings
 from app.core import backtest
 from app.data import DataStore
-from sigbot.bot import SignalBot
+from app.db import Database
+from sigbot.bot import SignalService
 from sigbot.config import BotSettings
 from sigbot.configs import ConfigError, parse_configs, validate
 from sigbot.engine import Engine
-from sigbot.store import ConfigStore
 
 M = 60_000
 H = 3_600_000
 T0 = 1_700_000_000_000 // M * M
-CHAT = 111
+CHAT = 111          # Telegram id пользователя alice
+BOB = 222
 
 
 def _iso(ms):
@@ -47,8 +48,8 @@ class FakeTG:
     def download(self, file_id):
         return self.files[file_id]
 
-    def texts(self):
-        return [t for _, t in self.sent]
+    def texts(self, chat=None):
+        return [t for c, t in self.sent if chat is None or c == chat]
 
 
 def candles(n, step=0.0004, start=T0):
@@ -74,19 +75,28 @@ def env(tmp_path, monkeypatch):
                      CONFIRM="2", LOCAL_MIN="1.65", SCALP_MIN="2.0", SIDE="long", TP_PCT="3", SL_PCT="1", TP_LEVELS="", BE_AFTER_TP1="",
                      COOL_DROP="", COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0", TOP_ENABLED="false", FEE="0", SLIPPAGE="0").items():
         monkeypatch.setenv(k, v)
+    monkeypatch.setenv("DB_FILE", str(tmp_path / "users.db"))
     s = load_settings()
     ds = DataStore(s)
+    db = Database(s.db_file)
+    alice = db.add_user("alice", "alice-password")
+    bob = db.add_user("bob", "bob-password-1")
+    db.add_user("carol", "carol-password")                       # без Telegram
+    db.link_telegram("alice", CHAT)
+    db.link_telegram("bob", BOB)
     engine = Engine(s, ds, None, price_fn=lambda sym: 100.0, candles_fn=lambda sym: None, windows_fn=lambda w: None)
     tg = FakeTG()
     now = {"t": (T0 + 30 * H) / 1000}
-    bot = SignalBot(s, tg, ConfigStore(tmp_path / "bot.json"), engine, BotSettings(token="x", chats=[CHAT], max_age_min=180, live_price=True),
-                    clock=lambda: now["t"])
-    bot.hist, bot.now, bot.tg, bot.tmp = hist, now, tg, tmp_path
+    bot = SignalService(s, tg, db, engine, BotSettings(token="x", max_age_min=180, live_price=True), clock=lambda: now["t"])
+    bot.hist, bot.now, bot.tg, bot.tmp, bot.db, bot.alice, bot.bob = hist, now, tg, tmp_path, db, alice, bob
+    bot.evals = []
+    real = engine.evaluate
+    engine.evaluate = lambda params: (bot.evals.append(1), real(params))[1]
     return bot
 
 
 def msg(text=None, chat=CHAT, doc=None, caption=None):
-    m = {"chat": {"id": chat}}
+    m = {"chat": {"id": chat}, "from": {"id": chat, "username": "u%d" % chat}}
     if text is not None:
         m["text"] = text
     if doc:
@@ -124,31 +134,52 @@ def test_validate(env):
 
 
 # ---------------- доступ и импорт ----------------
-def test_access_denied_shows_chat_id(env):
+def test_unlinked_telegram_cannot_use_bot_and_gets_instructions(env):
     env.handle_update(msg("/list", chat=999))
-    assert "999" in env.tg.texts()[0] and "SIGNALBOT_CHATS" in env.tg.texts()[0]
-    assert env.cfgs.configs == []
+    assert "не привязан" in env.tg.texts()[0] and env.db.list_configs() == []
     env.handle_update(msg(json.dumps(UI_CONFIG), chat=999))
-    assert env.cfgs.configs == []
+    assert env.db.list_configs() == []
+    env.handle_update(msg("/start", chat=999))
+    assert "Привязать Telegram" in env.tg.texts()[-1]
+    env.handle_update(msg("/start"))                                          # привязанному — полная справка
+    assert "Как добавить конфиг" in env.tg.texts()[-1]
+
+
+def test_link_flow_and_attempt_limit(env):
+    carol = env.db.get_user("carol")
+    code = env.db.create_link_code(carol["id"])
+    env.handle_update(msg("/link", chat=555))
+    assert "Формат" in env.tg.texts()[-1]
+    env.handle_update(msg("/link WRONGCODE", chat=555))
+    assert "не подошёл" in env.tg.texts()[-1]
+    env.handle_update(msg(f"/link {code}", chat=555))
+    assert "carol" in env.tg.texts()[-1] and env.db.user_by_telegram(555)["login"] == "carol"
+    env.handle_update(msg(json.dumps(UI_CONFIG), chat=555))                    # теперь можно добавлять конфиги
+    assert len(env.db.list_configs(carol["id"])) == 1
+    env.handle_update(msg("/unlink", chat=555))
+    assert env.db.user_by_telegram(555) is None
+    for _ in range(6):                                                         # перебор кода ограничен
+        env.handle_update(msg("/link AAAAAAAA", chat=777))
+    assert "Слишком много попыток" in env.tg.texts()[-1]
 
 
 def test_import_text_and_file_and_add_command(env):
     env.handle_update(msg(json.dumps(UI_CONFIG)))                                                    # просто текстом
-    assert len(env.cfgs.configs) == 1 and "Принято" in env.tg.texts()[-1] and "bogus" in env.tg.texts()[-1]
+    assert len(env.db.list_configs(env.alice['id'])) == 1 and "Принято" in env.tg.texts()[-1] and "bogus" in env.tg.texts()[-1]
     env.tg.files["f1"] = json.dumps(UI_CONFIG).encode()
     env.handle_update(msg(doc={"file_id": "f1", "file_name": "maverick-config_default_BTC.json"}, caption="Файловый"))   # файлом, имя из подписи
-    assert env.cfgs.find("Файловый")
+    assert env.db.find_config(env.alice['id'], "Файловый")
     env.handle_update(msg("/add Командный\n" + json.dumps(UI_CONFIG["params"])))
-    assert env.cfgs.find("Командный")
+    assert env.db.find_config(env.alice['id'], "Командный")
     env.handle_update(msg("/add Командный " + json.dumps(UI_CONFIG["params"] | {"confirm": 5})))        # то же имя — обновление
-    assert len([c for c in env.cfgs.configs if c["name"] == "Командный"]) == 1 and env.cfgs.find("Командный")["params"]["confirm"] == 5
+    assert len([c for c in env.db.list_configs(env.alice['id']) if c["name"] == "Командный"]) == 1 and env.db.find_config(env.alice['id'], "Командный")["params"]["confirm"] == 5
     env.handle_update(msg(json.dumps(UI_CONFIG)))                                                    # без имени — уникальное
-    assert len({c["name"] for c in env.cfgs.configs}) == len(env.cfgs.configs) == 4
+    assert len({c["name"] for c in env.db.list_configs(env.alice['id'])}) == len(env.db.list_configs(env.alice['id'])) == 4
     n = len(env.tg.sent)
     env.handle_update(msg("{не json"))
-    assert "разобрать" in env.tg.texts()[-1] and len(env.cfgs.configs) == 4 and len(env.tg.sent) == n + 1
+    assert "разобрать" in env.tg.texts()[-1] and len(env.db.list_configs(env.alice['id'])) == 4 and len(env.tg.sent) == n + 1
     env.handle_update(msg(json.dumps(UI_CONFIG["params"] | {"sl_pct": -3})))
-    assert "Не принято" in env.tg.texts()[-1] and len(env.cfgs.configs) == 4
+    assert "Не принято" in env.tg.texts()[-1] and len(env.db.list_configs(env.alice['id'])) == 4
     env.handle_update(msg(json.dumps(UI_CONFIG["params"] | {"source": "nope"})))
     assert "источник" in env.tg.texts()[-1]
     env.tg.files["f2"] = b"x"
@@ -174,7 +205,7 @@ def test_baseline_then_new_signal_once_with_stats(env):
     t = env.tg.texts()[0]
     for need in ("ЛОНГ", "BTC/USDT:USDT", "DG", "DL", "DS", "2.00", "План сделки", "TP1", "TP2", "SL", "Статистика конфига", "Sharpe", "Winrate", "Объём", "Топ-коин"):
         assert need in t, (need, t)
-    assert env.cfgs.configs[0]["alerts"] == 1
+    assert env.db.list_configs(env.alice['id'])[0]["alerts"] == 1
     env.cycle()
     assert len(env.tg.sent) == 1                                                                                  # повтор не отправляется
     # серия оборвалась и началась новая -> второй сигнал
@@ -222,7 +253,7 @@ def test_commands(env):
     got = json.loads(content)
     assert name.endswith(".json") and got["format"] == "maverick-config" and got["params"]["deposit"] == 5000
     env.handle_update(msg("/rename 1 Новое имя"))
-    assert env.cfgs.find("новое имя")
+    assert env.db.find_config(env.alice['id'], "новое имя")
     env.handle_update(msg("/pause 1"))
     start = T0 + 10 * H // 2
     append_reports(env.hist, LONG(start, 3), 11)
@@ -236,7 +267,7 @@ def test_commands(env):
     env.handle_update(msg("/status"))
     assert "Состояние" in env.tg.texts()[-1]
     env.handle_update(msg("/remove Новое имя"))
-    assert env.cfgs.configs == []
+    assert env.db.list_configs(env.alice['id']) == []
     env.handle_update(msg("/stats 7"))
     assert "не найден" in env.tg.texts()[-1]
     env.handle_update(msg("/help"))
@@ -261,20 +292,63 @@ def test_trend_blocked_signal_is_not_sent(env):
 def test_state_persists_between_restarts(env):
     env.handle_update(msg(json.dumps(UI_CONFIG)))
     env.cycle()
-    again = ConfigStore(env.tmp / "bot.json")
-    assert again.configs[0]["baseline"] is True and again.configs[0]["name"] and again.data["next_id"] == 2
+    again = Database(env.s.db_file).list_configs(env.alice["id"])
+    assert again[0]["baseline"] is True and again[0]["name"] and again[0]["last_ts"] == 0 or again[0]["baseline"]
 
 
-def test_telegram_split_and_token_not_leaked():
-    from sigbot.telegram import TelegramAPI, TelegramError, split_text
+def test_users_are_isolated(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG), chat=CHAT))
+    env.handle_update(msg("/add Боба " + json.dumps(UI_CONFIG["params"]), chat=BOB))
+    a, b = env.db.list_configs(env.alice["id"]), env.db.list_configs(env.bob["id"])
+    assert len(a) == 1 and len(b) == 1 and b[0]["name"] == "Боба"
+    env.tg.sent.clear()
+    env.handle_update(msg("/list", chat=BOB))
+    assert "Боба" in env.tg.texts(BOB)[0] and a[0]["name"] not in env.tg.texts(BOB)[0]
+    for cmd in ("/stats", "/get", "/remove", "/pause", "/rename"):                        # чужой номер/имя недоступен
+        env.handle_update(msg(f"{cmd} {a[0]['id']} x" if cmd == "/rename" else f"{cmd} {a[0]['id']}", chat=BOB))
+        env.handle_update(msg(f"{cmd} {a[0]['name']}", chat=BOB))
+    assert env.tg.docs == [] and len(env.db.list_configs(env.alice["id"])) == 1 and not env.db.list_configs(env.alice["id"])[0]["paused"]
+    assert all("не найден" in t or "Укажите" in t for t in env.tg.texts(BOB)[1:])
+    # одно и то же имя у разных пользователей — не конфликт
+    env.handle_update(msg("/add Общее " + json.dumps(UI_CONFIG["params"]), chat=CHAT))
+    env.handle_update(msg("/add Общее " + json.dumps(UI_CONFIG["params"]), chat=BOB))
+    assert env.db.find_config(env.alice["id"], "Общее") and env.db.find_config(env.bob["id"], "Общее")
+
+
+def test_signals_go_to_owner_only_and_identical_configs_are_evaluated_once(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG), chat=CHAT))
+    env.handle_update(msg(json.dumps(UI_CONFIG), chat=BOB))
+    env.handle_update(msg(json.dumps(UI_CONFIG["params"] | {"confirm": 9}), chat=BOB))            # третий, другие параметры
+    env.cycle()
+    assert len(env.tg.texts(CHAT)) == 2 and len(env.tg.texts(BOB)) == 4                         # ответ на импорт и карточка — на каждый из двух конфигов
+    assert len(env.evals) == 2                                                                  # два уникальных набора параметров на три конфига
+    env.tg.sent.clear()
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.evals.clear()
+    env.cycle()
+    assert len(env.tg.texts(CHAT)) == 1 and "ЛОНГ" in env.tg.texts(CHAT)[0]
+    assert len(env.tg.texts(BOB)) == 1 and "ЛОНГ" in env.tg.texts(BOB)[0]                     # второй пользователь получил свой сигнал
+    assert len(env.evals) == 2
+    # у пользователя без Telegram и на паузе сигналов нет
+    carol = env.db.get_user("carol")
+    env.db.add_config(carol["id"], "Каролины", validate(UI_CONFIG["params"], env.s.defaults)[0])
+    env.tg.sent.clear()
+    env.cycle()
+    assert env.tg.sent == []
+
+
+def test_unlinked_user_stops_receiving_but_keeps_configs(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.handle_update(msg("/unlink"))
+    assert len(env.db.list_configs(env.alice["id"])) == 1
+    env.tg.sent.clear()
+    env.cycle()
+    assert env.tg.sent == []
+
+
+def test_telegram_split():
+    from sigbot.transport import split_text
     parts = split_text("\n".join(["строка " * 50] * 40))
     assert len(parts) > 1 and all(len(p) <= 4000 for p in parts)
-    import httpx
-
-    def boom(request):
-        raise httpx.ConnectError("secret-url-with-TOKEN123", request=request)
-
-    api = TelegramAPI("TOKEN123", httpx.Client(transport=httpx.MockTransport(boom)))
-    with pytest.raises(TelegramError) as e:
-        api.send_message(1, "x")
-    assert "TOKEN123" not in str(e.value)

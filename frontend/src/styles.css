@@ -137,3 +137,13 @@ select.wide { width: 100%; }
 .metrics-bar { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; padding: 6px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
 .mb-title { color: var(--muted); } .mb-src { display: inline-flex; gap: 10px; align-items: center; } .mb-val b { font-variant-numeric: tabular-nums; }
 .mb-sync { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }
+
+/* вход и меню пользователя */
+.login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.login-card { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px; }
+.login-card h1 { margin: 0 0 4px; font-size: 20px; } .login-card h1 span { color: var(--muted); font-weight: 400; }
+.login-card label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.login-card input { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 14px; }
+.user-menu { margin-left: auto; position: relative; }
+.user-pop { position: absolute; right: 0; top: 34px; z-index: 30; min-width: 250px; display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.4); font-size: 12px; }
+.link-code { display: flex; flex-direction: column; gap: 4px; } .link-code code { font-size: 15px; letter-spacing: 1px; user-select: all; background: var(--panel-2); padding: 4px 6px; border-radius: 4px; }

@@ -2,8 +2,13 @@ import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, L
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
+/** Событие «сессия закончилась»: корневой компонент возвращает пользователя на экран входа. */
+export const UNAUTH_EVENT = 'mav-unauth';
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, init);
+  // служебный заголовок — защита от CSRF (межсайтовая форма не может его отправить); cookie сессии уходит автоматически
+  const res = await fetch(BASE + path, { ...init, credentials: 'include', headers: { 'X-Maverick': '1', ...(init?.headers ?? {}) } });
+  if (res.status === 401 && !path.startsWith('/api/auth/')) window.dispatchEvent(new Event(UNAUTH_EVENT));
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -16,6 +21,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return res.json() as Promise<T>;
 }
+
+export interface Me {
+  login: string;
+  is_admin: boolean;
+  telegram: boolean;
+  telegram_name: string | null;
+}
+export interface MeResponse {
+  auth_enabled: boolean;
+  user: Me;
+  bot_username: string | null;
+}
+
+export const getAuthStatus = () => request<{ auth_enabled: boolean; users_exist: boolean }>('/api/auth/status');
+export const getMe = () => request<MeResponse>('/api/auth/me');
+export const login = (login: string, password: string) =>
+  request<{ user: Me; bot_username: string | null }>('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login, password }),
+  });
+export const logout = () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
+export const telegramLinkCode = () => request<{ code: string; ttl_min: number; bot_username: string | null }>('/api/me/telegram/link-code', { method: 'POST' });
+export const telegramUnlink = () => request<{ ok: boolean }>('/api/me/telegram', { method: 'DELETE' });
 
 export const getConfig = () => request<AppConfig>('/api/config');
 

@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 H = 3600
+USER_PASS = "demo-pass-123"
 fails = []
 STEP = ["start"]       # последняя выполненная проверка — для привязки ошибок браузера к шагу сценария
 
@@ -117,8 +118,18 @@ def scenario(pg, base, state_url):
     reqs = []
     pg.on("request", lambda r: reqs.append(r.url.split("candles")[1]) if "/api/candles?" in r.url else None)
     pg.goto(base + "/?debug")
+    pg.wait_for_selector("form.login-card", timeout=30000)
+    check("без входа видна только форма логина, данных нет", pg.locator("table.trades").count() == 0 and pg.get_by_role("button", name="Войти").is_disabled())
+    check("анонимный запрос к API отклонён", pg.evaluate("fetch('/api/config').then(r => r.status)") == 401)
+    pg.get_by_label("Логин").fill("tester"); pg.get_by_label("Пароль").fill("не-тот-пароль")
+    pg.get_by_role("button", name="Войти").click()
+    pg.wait_for_selector(".login-card .banner.error", timeout=10000)
+    check("неверный пароль: понятная ошибка, остаёмся на форме", "Неверный логин или пароль" in pg.locator(".login-card .banner.error").inner_text() and pg.locator("table.trades").count() == 0)
+    pg.get_by_label("Пароль").fill(USER_PASS)
+    pg.get_by_role("button", name="Войти").click()
     pg.wait_for_selector("table.trades tbody tr", timeout=30000)
     pg.wait_for_timeout(1500)
+    check("после входа видны данные, в шапке имя пользователя", "tester" in pg.locator("[data-testid=user-button]").inner_text())
     vr = lambda: pg.evaluate("(() => { const r = window.__chart.timeScale().getVisibleRange(); return r ? [r.from, r.to] : null })()")
     rows = pg.locator("table.trades tbody tr")
 
@@ -134,7 +145,7 @@ def scenario(pg, base, state_url):
     pg.wait_for_timeout(3000)
 
     # --- выбор сделки и ТФ
-    tr = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({})}).then(r => r.json())""")["trades"][4]
+    tr = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({})}).then(r => r.json())""")["trades"][4]
     ea, eb = tr["entry_ts"] // 1000, tr["exit_ts"] // 1000
     pad = max((eb - ea) * 0.6, 6 * H)
     exp = (ea - pad, eb + pad)
@@ -323,7 +334,7 @@ def scenario(pg, base, state_url):
     rows.nth(hit).scroll_into_view_if_needed(); rows.nth(hit).click(); pg.wait_for_timeout(2500)
     info = pg.locator(".sel-info").inner_text()
     check("сводка сделки показывает исполнения частями и БУ", "TP1 70%" in info and "БУ после TP1" in info, info[-90:])
-    bes = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'},
+    bes = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'},
         body: JSON.stringify({tps:[{pct:3,share:70},{pct:6,share:30}], be_after_tp1:true})}).then(r => r.json())""")
     reasons = {t["reason"] for t in bes["trades"]}
     check("API: сделки с безубытком и частичными тейками", {"TP", "SL"} & reasons and all(abs(sum(f["share"] for f in t["fills"]) - 1) < 1e-9 for t in bes["trades"]), str(sorted(reasons)))
@@ -346,7 +357,7 @@ def scenario(pg, base, state_url):
     check("на вкладке видно, что свечей нет, и кнопка «Скачать свечи»", pg.locator(".top-pending").count() == 1 and pg.locator(".top-pending button", has_text="Скачать свечи").count() == 1, pg.locator(".top-pending").inner_text()[:120])
     reasons = pg.locator(".reasons").inner_text()
     check("пропущенные сигналы объяснены причинами", "нет бессрочного USDT-контракта" in reasons and "нужно скачать свечи" in reasons, reasons[:200])
-    n_pending = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["pending"]
+    n_pending = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["pending"]
     check("API: ждут только TIA и ARB, не WBETH", sorted({i["symbol"] for i in n_pending["items"]}) == ["ARB/USDT:USDT", "TIA/USDT:USDT"], str(n_pending["symbols"]))
     pg.locator(".top-pending button", has_text="Скачать свечи").click(); pg.wait_for_selector(".toast", timeout=8000); pg.wait_for_timeout(300)
     check("после нажатия: сообщение о фоновой загрузке и ход в шапке", any("скачиваются в фоне" in x for x in pg.locator(".toast").all_inner_texts()) and pg.locator(".chip-job", has_text="Топ-коины").count() == 1,
@@ -359,7 +370,7 @@ def scenario(pg, base, state_url):
     check("таблица топ-коинов: колонки монета и значение в отчёте", "монета" in heads and "в отчёте" in heads, str(heads))
     coins = {c.strip(" ⏳") for c in pg.locator("table.trades tbody tr td:nth-child(12)").all_inner_texts()}
     check("в таблице только торгуемые монеты", coins <= {"TIA", "ARB"} and coins, str(coins))
-    top_tr = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["trades"]
+    top_tr = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["trades"]
     check("у сделок по монетам размер 100$ и свои цены", all(t["symbol"] in ("TIA/USDT:USDT", "ARB/USDT:USDT") and t["entry"] < 200 for t in top_tr) and len(top_tr) == rows.count(), f"{len(top_tr)} сделок")
     n_req = len(reqs)
     rows.nth(0).click(); pg.wait_for_timeout(2500)
@@ -398,8 +409,8 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
     chip = pg.locator(".chip", has_text="тренд:")
     check("после запуска виден чип с числом отсечённых сигналов", chip.count() == 1 and "отсечено" in chip.inner_text(), chip.all_inner_texts().__str__())
-    api_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({trend_enabled: true, trend_emas: [20, 50], trend_tf: '1h'})}).then(r => r.json())""")
-    base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({trend_enabled: false})}).then(r => r.json())""")
+    api_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({trend_enabled: true, trend_emas: [20, 50], trend_tf: '1h'})}).then(r => r.json())""")
+    base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({trend_enabled: false})}).then(r => r.json())""")
     check("API: с трендом сделок не больше, отсечённые сигналы помечены", len(api_t["trades"]) <= len(base_t["trades"]) and api_t["trend"]["blocked"] > 0 and not any(s["taken"] and s["trend_blocked"] for s in api_t["signals"]), str(api_t["trend"]))
     emas.nth(0).uncheck(); emas.nth(1).uncheck()
     check("без выбранных EMA запуск заблокирован", pg.get_by_role("button", name="Исправьте тейки").is_disabled() or pg.locator("button.run").is_disabled())
@@ -408,8 +419,8 @@ def scenario(pg, base, state_url):
     # --- депозит, доля на сделку, плечо, Шарп
     check("в статистике есть коэффициент Шарпа", pg.locator(".card-label", has_text="Коэф. Шарпа").count() == 1 and pg.locator(".card-label", has_text="Коэф. Шарпа").locator("xpath=following-sibling::div[1]").inner_text() != "")
     check("у депозита, доли и плеча есть «?»", all(field(pg, l).first.locator(".help").count() == 1 for l in ("Депозит", "Доля депозита на сделку", "Плечо")))
-    base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({deposit: 10000, trade_pct: 10, leverage: 1})}).then(r => r.json())""")
-    lev_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({deposit: 10000, trade_pct: 10, leverage: 3})}).then(r => r.json())""")
+    base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({deposit: 10000, trade_pct: 10, leverage: 1})}).then(r => r.json())""")
+    lev_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({deposit: 10000, trade_pct: 10, leverage: 3})}).then(r => r.json())""")
     check("API: плечо ×3 утраивает объём и результат первой сделки", abs(lev_t["trades"][0]["notional"] / base_t["trades"][0]["notional"] - 3) < 1e-9 and abs(lev_t["trades"][0]["pnl_usd"] / base_t["trades"][0]["pnl_usd"] - 3) < 1e-9)
     num(pg, "Плечо").fill("4"); num(pg, "Депозит").fill("5000"); num(pg, "Доля депозита на сделку").fill("20")
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
@@ -500,6 +511,33 @@ def scenario(pg, base, state_url):
     pg.wait_for_timeout(200)
     check("подсказка у переключателя ТФ", pg.locator(".tooltip").count() == 1 and "Авто" in pg.locator(".tooltip").inner_text())
 
+    # --- несколько пользователей: у каждого свои настройки, данные общие
+    pg.mouse.move(5, 5)
+    num(pg, "Стоп-лосс").first.fill("5")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    pg.wait_for_timeout(1500)                                        # состояние сохраняется с задержкой 600 мс
+    rows_before = pg.locator("table.trades tbody tr").count()
+    pg.locator("[data-testid=user-button]").click()
+    check("в меню пользователя: Telegram не привязан, есть кнопка привязки", "не привязан" in pg.locator("[data-testid=user-pop]").inner_text() and pg.get_by_role("button", name="Привязать Telegram").count() == 1)
+    pg.get_by_role("button", name="Привязать Telegram").click(); pg.wait_for_selector(".link-code code", timeout=5000)
+    code_txt = pg.locator(".link-code code").inner_text()
+    check("показан одноразовый код для команды /link", code_txt.startswith("/link ") and len(code_txt.split()[1]) == 8, code_txt)
+    pg.get_by_test_id("logout").click()
+    pg.wait_for_selector("form.login-card", timeout=10000)
+    check("после выхода снова форма логина, API закрыт", pg.locator("table.trades").count() == 0 and pg.evaluate("fetch('/api/ui-state').then(r => r.status)") == 401)
+    pg.get_by_label("Логин").fill("second"); pg.get_by_label("Пароль").fill(USER_PASS)
+    pg.get_by_role("button", name="Войти").click()
+    pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1200)
+    check("второй пользователь: свои настройки (стоп по умолчанию 2), те же общие данные", num(pg, "Стоп-лосс").first.input_value() == "2" and pg.locator("table.trades tbody tr").count() > 0)
+    pg.get_by_test_id("user-button").click(); pg.get_by_test_id("logout").click()
+    pg.wait_for_selector("form.login-card", timeout=10000)
+    pg.get_by_label("Логин").fill("tester"); pg.get_by_label("Пароль").fill(USER_PASS)
+    pg.get_by_role("button", name="Войти").click()
+    pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1200)
+    check("первый пользователь после повторного входа: подгружены его последние настройки", num(pg, "Стоп-лосс").first.input_value() == "5" and pg.locator("table.trades tbody tr").count() == rows_before)
+    pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000)
+    check("сессия переживает перезагрузку страницы (без повторного ввода пароля)", num(pg, "Стоп-лосс").first.input_value() == "5")
+
 
 def main():
     from playwright.sync_api import sync_playwright
@@ -508,13 +546,18 @@ def main():
     procs = []
     try:
         make_demo(tmp)
+        sys.path.insert(0, str(ROOT / "backend"))
+        from app.db import Database
+        db = Database(tmp / "e2e.db")
+        db.add_user("tester", USER_PASS)
+        db.add_user("second", USER_PASS)
         if not (ROOT / "frontend" / "dist" / "index.html").exists():
             sys.exit("Сначала соберите фронтенд: (cd frontend && npm ci && npm run build)")
         bp, fp = free_port(), free_port()
         env = dict(os.environ, SOURCES="coinbase,binance", SOURCE_DEFAULT="binance", SOURCE_COINBASE_LABEL="Coinbase Maverick",
                    SOURCE_COINBASE_FILE=str(tmp / "history_cb.csv"), SOURCE_BINANCE_LABEL="Binance Maverick",
                    SOURCE_BINANCE_FILE=str(tmp / "history_bn.csv"), CACHE_DIR=str(tmp / "cache"), LIQ_SOURCE="", HISTORY_FILE="", SYMBOLS="BTC/USDT:USDT,ETH/USDT:USDT", SYMBOL_DEFAULT="BTC/USDT:USDT",
-                   STATE_FILE=str(tmp / "ui_state.json"), ASSETS_FILE=str(tmp / "assets.json"),
+                   STATE_FILE=str(tmp / "ui_state.json"), ASSETS_FILE=str(tmp / "assets.json"), DB_FILE=str(tmp / "e2e.db"), AUTH_ENABLED="true", SIGNALBOT_USERNAME="demo_bot",
                    LOCAL_MIN="1.85", SCALP_MIN="1.25", CONFIRM="4", TP_PCT="6", SL_PCT="2", SIDE="both", ONLY="", COOL_DROP="",
                    COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0", FEE="0.0005", SLIPPAGE="0", ORDER_SIZE="0.1",
                    TOP_ENABLED="false", TOP_SIDES="long", TOP_TP_LEVELS="", TOP_TP_PCT="5", TOP_SL_PCT="3", TOP_SIZE_USD="100", TOP_FEE="0.0005",
@@ -535,7 +578,7 @@ def main():
             pg.on("pageerror", lambda e: errors.append(f"после «{STEP[0]}»: pageerror: {e}\n{(getattr(e, 'stack', '') or '')[:700]}"))
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив
-            other = [e for e in errors if e not in expected]
+            other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
             check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 2, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:

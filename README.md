@@ -18,6 +18,22 @@ e2e/         проверка интерфейса в настоящем бра�
 Пользовательские данные лежат в **корне репозитория** и не коммитятся: `history*.csv` (выгрузки), `data/` (кеш свечей и
 `ui_state.json` с вашим выбором), `*.session` (сессии Telegram), `trades.csv`.
 
+## Пользователи и вход
+
+На сайт входят по логину и паролю. **Регистрации на сайте нет** — пользователей создаёт администратор в консоли сервера:
+
+```bash
+cd backend
+python cli.py user add ЛОГИН         # пароль спросит; первый пользователь — администратор
+python cli.py user list              # passwd / disable / enable / remove / link / unlink / link-code / import-legacy — python cli.py user -h
+```
+
+После входа подгружаются последние сохранённые настройки именно этого пользователя (выбор источника и актива, параметры по каждой связке, таймфрейм);
+конфиги бота сигналов и привязка Telegram — тоже его. Всё хранится в SQLite (`data/maverick.db`, `DB_FILE`). **Данные рынка общие для всех** (история
+сообщений ботов, свечи, активы из «＋ Добавить актив…») — их никто не качает заново. Пароли хранятся хэшем (scrypt), сессия — HttpOnly-cookie
+(`SESSION_DAYS`, `COOKIE_SECURE=true` за HTTPS), есть защита от перебора пароля и CSRF. Если до этого пользователь был один (вы), первый
+`user add` переносит ваши прежние настройки и конфиги бота в его аккаунт. `AUTH_ENABLED=false` отключает вход (только для локальной разработки).
+
 ## Быстрый старт
 
 ```bash
@@ -46,7 +62,8 @@ npm run dev                       # http://localhost:5173, /api проксиру
 |---|---|
 | Источники метрик | `SOURCES=coinbase,binance`, `SOURCE_<ID>_FILE`, `SOURCE_<ID>_LABEL`, `SOURCE_DEFAULT`, `LIQ_SOURCE`, `LIQ_MAX_AGE_H` |
 | Активы и свечи | `EXCHANGE`, `SYMBOLS`, `SYMBOL_DEFAULT`, `CANDLE_TF`, `CACHE_DIR`, `MAX_BARS` |
-| Сервер | `HOST`, `PORT`, `CORS_ORIGINS`, `STATE_FILE`, `ASSETS_FILE` |
+| Пользователи | `AUTH_ENABLED`, `DB_FILE`, `SESSION_DAYS`, `COOKIE_SECURE`, `SIGNALBOT_USERNAME` |
+| Сервер | `HOST`, `PORT`, `CORS_ORIGINS`, `ASSETS_FILE` (`STATE_FILE` — только источник для переноса старых настроек) |
 | Стратегия (умолчания) | `SIDE`, `ONLY`, `LOCAL_MIN`, `SCALP_MIN`, `SHORT_LOCAL_MAX`, `SHORT_SCALP_MAX`, `CONFIRM`, `TP_PCT` или `TP_LEVELS`, `BE_AFTER_TP1`, `SL_PCT`, `DEPOSIT`, `TRADE_PCT`, `LEVERAGE`, `COMPOUND`, `FEE`, `SLIPPAGE` |
 | Тренд (умолчания) | `TREND_ENABLED`, `TREND_EMAS` (20,50,100,200), `TREND_TF` |
 | Топ-коины (умолчания) | `TOP_ENABLED`, `TOP_SIDES`, `TOP_TP_PCT` или `TOP_TP_LEVELS`, `TOP_BE_AFTER_TP1`, `TOP_SL_PCT`, `TOP_SIZE_USD`, `TOP_FEE`, `TOP_SLIPPAGE`, `TOP_DAYS`, `TOP_MIN_VALUE` |
@@ -111,7 +128,7 @@ npm run dev                       # http://localhost:5173, /api проксиру
   сразу применяет его и запускает расчёт. Работает и с «голым» объектом параметров. Неизвестные поля пропускаются (об этом сообщит уведомление), а если
   актива или источника из конфига у вас нет, остаются текущие.
 - **Запоминание выбора**: последний источник и актив, а также все параметры и таймфрейм **по каждой связке «источник + актив»**
-  хранятся на сервере в `STATE_FILE` (по умолчанию `data/ui_state.json`). Переживают перезапуск бэкенда, браузера и работают из
+  хранятся на сервере в базе пользователя (`DB_FILE`). Переживают перезапуск бэкенда, браузера и работают из
   любого браузера. «Сбросить к env» возвращает значения из `.env` для текущей связки.
 
 ## Консоль

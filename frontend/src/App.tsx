@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Me } from './api';
 import { addAsset, downloadTop, getConfig, getLatest, getSync, runSync, getUiState, putUiState, refreshCandles, removeAsset, runBacktest } from './api';
 import EquityChart from './components/EquityChart';
 import Help from './components/Help';
@@ -7,6 +8,7 @@ import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
 import StatsPanel from './components/StatsPanel';
 import Toasts from './components/Toasts';
+import UserMenu from './components/UserMenu';
 import TopPanel from './components/TopPanel';
 import TradesTable from './components/TradesTable';
 import { parseConfig } from './configIO';
@@ -39,7 +41,15 @@ function loadProfile(cfg: AppConfig, source: string, symbol: string, st: UiState
 const NO_TRADES: Trade[] = [];
 const NO_SIGNALS: Signal[] = [];
 
-export default function App() {
+interface AppProps {
+  me: Me;
+  authEnabled: boolean;
+  botUsername: string | null;
+  onProfileChanged: () => void;
+  onLogout: () => void;
+}
+
+export default function App({ me, authEnabled, botUsername, onProfileChanged, onLogout }: AppProps) {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [params, setParams] = useState<Params | null>(null);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -466,6 +476,7 @@ export default function App() {
             <Help text={HELP.refresh} />
           </div>
         )}
+        <UserMenu me={me} authEnabled={authEnabled} botUsername={botUsername} onChanged={onProfileChanged} onLogout={onLogout} />
       </header>
 
       {params && latest.length > 0 && <MetricsBar latest={latest} sync={sync} params={params} onSync={() => void onSyncNow()} />}
