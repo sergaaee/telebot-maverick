@@ -84,7 +84,7 @@ def env(tmp_path, monkeypatch):
     db.add_user("carol", "carol-password")                       # без Telegram
     db.link_telegram("alice", CHAT)
     db.link_telegram("bob", BOB)
-    engine = Engine(s, ds, None, price_fn=lambda sym: 100.0, candles_fn=lambda sym: None, windows_fn=lambda w: None)
+    engine = Engine(s, ds, None, price_fn=lambda sym: 100.0, candles_fn=lambda sym, progress=None: None, windows_fn=lambda w: None)
     tg = FakeTG()
     now = {"t": (T0 + 30 * H) / 1000}
     bot = SignalService(s, tg, db, engine, BotSettings(token="x", max_age_min=180, live_price=True), clock=lambda: now["t"])
@@ -352,3 +352,106 @@ def test_telegram_split():
     from sigbot.transport import split_text
     parts = split_text("\n".join(["строка " * 50] * 40))
     assert len(parts) > 1 and all(len(p) <= 4000 for p in parts)
+
+
+# ---------------- долгий подсчёт: уведомления, /cancel, пауза на лету, бюджет топ-коинов ----------------
+import threading  # noqa: E402
+
+from sigbot.engine import Cancelled  # noqa: E402
+
+
+def _two_configs(env):
+    env.handle_update(msg(json.dumps({"configs": [UI_CONFIG, UI_CONFIG["params"] | {"confirm": 3}]})))
+    return env.db.list_configs(env.alice["id"])
+
+
+def test_cancel_interrupts_download_pauses_unfinished_and_keeps_ready(env):
+    c1, c2 = _two_configs(env)
+    calls = []
+
+    def slow_download(sym, progress=None):
+        calls.append(sym)
+        for i in range(3):
+            if i == 1:                                   # пользователь нажимает /cancel посреди загрузки (из другого потока)
+                t = threading.Thread(target=lambda: env.handle_update(msg("/cancel")))
+                t.start()
+                t.join()
+            progress(i, 0)                               # как fetch_candles: после каждой порции
+
+    env.engine._candles_fn = slow_download
+    env.cycle()
+    assert calls == ["BTC/USDT:USDT"]                    # загрузка прервана, второй конфиг в этом цикле не стартовал
+    cfgs = env.db.list_configs(env.alice["id"])
+    assert all(c["paused"] and not c["baseline"] for c in cfgs)
+    texts = " ".join(env.tg.texts(CHAT))
+    assert "Остановил подсчёт" in texts and "На паузе" in texts and "принят" not in texts
+    # после этого /resume по одному конфигу — считается только он
+    env.engine._candles_fn = lambda sym, progress=None: None
+    env.tg.sent.clear()
+    env.handle_update(msg(f"/resume {c1['id']}"))
+    env.cycle()
+    got = env.db.list_configs(env.alice["id"])
+    assert got[0]["baseline"] and not got[0]["paused"] and got[1]["paused"] and not got[1]["baseline"]
+    assert sum("принят" in t for t in env.tg.texts(CHAT)) == 1
+
+
+def test_pause_or_remove_takes_effect_before_config_is_reached(env):
+    c1, c2 = _two_configs(env)
+    seen = []
+
+    def candles(sym, progress=None):
+        seen.append(sym)
+        env.db.update_config(c2["id"], paused=True)      # пока считается первый, второй ставят на паузу
+    env.engine._candles_fn = candles
+    env.cycle()
+    assert not env.db.get_config(c2["id"])["baseline"] and env.db.get_config(c1["id"])["baseline"]
+    assert sum("принят" in t for t in env.tg.texts(CHAT)) == 1
+    env.db.update_config(c2["id"], paused=False)
+    env.db.remove_config(c2["id"])                       # удалённый конфиг не считается и не падает
+    env.cycle(force=True)
+
+
+def test_first_download_is_announced_and_failure_reported_once(env):
+    import os
+    path = backtest.cache_path("binanceusdm", "BTC/USDT:USDT", "1m", str(env.s.cache_dir))
+    os.rename(path, path + ".bak")                      # свечей актива ещё нет
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+
+    def boom(sym, progress=None):
+        raise SystemExit("биржа не отвечает")
+    env.engine._candles_fn = boom
+    env.tg.sent.clear()
+    env.cycle()
+    env.cycle()
+    t = env.tg.texts(CHAT)
+    assert sum("Свечей" in x and "ещё нет" in x for x in t) == 2 and "/cancel" in t[0]       # объявление перед каждой попыткой
+    assert sum("⚠️" in x and "биржа не отвечает" in x for x in t) == 1                        # а об одной и той же ошибке — один раз
+    os.rename(path + ".bak", path)
+    env.engine._candles_fn = lambda sym, progress=None: None
+    env.cycle()
+    assert any("принят" in x for x in env.tg.texts(CHAT))
+
+
+def test_check_does_not_block_and_forces_recalculation(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()
+    n = len(env.evals)
+    env.tg.sent.clear()
+    env.handle_update(msg("/check"))                     # сразу отвечает, расчёт — в цикле
+    assert "Проверка запущена" in env.tg.texts()[0] and len(env.evals) == n
+    env.cycle()
+    assert len(env.evals) == n + 1
+
+
+def test_top_windows_have_time_budget_and_dont_delay_card(env):
+    cfg = json.loads(json.dumps(UI_CONFIG))
+    cfg["params"] |= {"top_enabled": True, "top_side": "long"}
+    cfg["params"].pop("bogus")
+    env.b = BotSettings(token="x", max_age_min=180, live_price=True, top_windows=5, top_budget_sec=0)
+    env.handle_update(msg(json.dumps(cfg)))
+    got = []
+    env.engine._windows_fn = lambda w: got.append(list(w))
+    env.engine.pending_windows = lambda res, limit: ([("TIA/USDT:USDT", i * 1000, i * 1000 + 10) for i in range(3)], 3)
+    env.cycle()
+    assert any("принят" in t for t in env.tg.texts(CHAT))             # карточка пришла, не дожидаясь окон
+    assert len(got) == 1                                              # бюджет 0 -> за цикл одно окно

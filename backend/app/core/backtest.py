@@ -222,7 +222,11 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR, progress=
         pages += 1
         print(f"\r  свечи: {len(candles)}", end="", flush=True)
         if progress:
-            progress(len(candles), batch[-1][0])
+            try:
+                progress(len(candles), batch[-1][0])
+            except BaseException:          # загрузку прервали (например, командой отмены): сохраняем скачанное, оно не пропадёт
+                save()
+                raise
         if pages % 20 == 0:
             save()
         time.sleep(0.3)  # мягче к лимитам, чем enableRateLimit по умолчанию

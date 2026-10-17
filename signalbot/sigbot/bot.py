@@ -13,7 +13,7 @@ from app.db import DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
-from .engine import EvalError, fingerprint
+from .engine import Cancelled, EvalError, fingerprint
 from .transport import TelegramError
 
 log = logging.getLogger("signalbot")
@@ -27,6 +27,8 @@ class SignalService:
         self._fp = {}                       # id конфига -> отпечаток файлов истории на момент последнего расчёта
         self._cycle_lock = threading.Lock()
         self._link_tries = {}
+        self._cancel = set()                # пользователи, нажавшие /cancel: их текущий подсчёт прерывается
+        self._force = set()                 # пользователи, запросившие /check
         self._wake = threading.Event()
         self._stop = threading.Event()
         self.last_cycle = None
@@ -229,9 +231,20 @@ class SignalService:
         self.send(chat, "\n\n".join(parts))
 
     def cmd_check(self, chat, user, arg):
-        self.send(chat, "🔎 Проверяю…")
-        self.cycle(force=True, only_user=user["id"])
-        self.send(chat, "Проверка завершена: новые сигналы (если были) пришли отдельными сообщениями.")
+        self._force.add(user["id"])
+        self._wake.set()
+        self.send(chat, "🔎 Проверка запущена — новые сигналы (если есть) придут отдельными сообщениями. Если идёт долгий подсчёт, он сначала завершится: остановить — /cancel.")
+
+    def cmd_cancel(self, chat, user, arg):
+        """Останавливает текущий подсчёт/загрузку свечей. Конфиги, которые ещё не были посчитаны до конца, ставятся на паузу (вернуть: /resume)."""
+        if self._cycle_lock.locked():                       # прерывать есть что, только если подсчёт сейчас идёт
+            self._cancel.add(user["id"])
+        paused = []
+        for c in self.db.list_configs(user["id"]):
+            if not c["baseline"] and not c["paused"]:
+                self.db.update_config(c["id"], paused=True)
+                paused.append(f"#{c['id']} {esc(c['name'])}")
+        self.send(chat, "⛔ Остановил подсчёт." + (f"\nНа паузе (ещё не посчитаны): {', '.join(paused)}. Вернуть по одному: /resume &lt;№&gt;." if paused else ""))
 
     def cmd_status(self, chat, user, arg):
         rows = ["📡 <b>Состояние</b>", f"Аккаунт: <b>{esc(user['login'])}</b>"]
@@ -256,28 +269,50 @@ class SignalService:
 
     # ---------------- цикл проверки сигналов ----------------
     def cycle(self, force=False, only_user=None):
-        """Проходит по конфигам всех привязанных пользователей. Одинаковые параметры считаются один раз за цикл."""
+        """Проходит по конфигам всех привязанных пользователей. Одинаковые параметры считаются один раз за цикл.
+        Сначала уже посчитанные конфиги (их сигналы не ждут чужих долгих загрузок), потом новые. Перед каждым конфигом он читается из базы
+        заново, поэтому /pause, /remove и /cancel действуют до того, как до конфига дойдёт очередь."""
         with self._cycle_lock:
+            forced, self._force = self._force, set()
             users = {u["id"]: u for u in self.db.list_users() if u["telegram_id"] and not u["disabled"]}
-            memo = {"eval": {}, "candles": {}}
-            for cfg in self.db.list_configs():
-                user = users.get(cfg["user_id"])
-                if not user or cfg["paused"] or (only_user and cfg["user_id"] != only_user):
+            memo = {"eval": {}, "candles": {}, "top": {}}
+            todo = sorted(self.db.list_configs(), key=lambda c: (not c["baseline"], c["id"]))
+            for stale in todo:
+                cfg = self.db.get_config(stale["id"])
+                user = users.get(stale["user_id"])
+                if not cfg or not user or cfg["paused"] or (only_user and cfg["user_id"] != only_user):
+                    continue
+                if user["id"] in self._cancel:
                     continue
                 try:
-                    self._process(cfg, user, force, memo)
+                    self._process(cfg, user, force or user["id"] in forced, memo)
+                except Cancelled:
+                    log.info("подсчёт %s отменён пользователем %s", cfg["name"], user["login"])
                 except Exception as e:                       # сбой одного конфига не останавливает остальные
                     log.exception("конфиг %s (%s)", cfg["name"], user["login"])
-                    self.db.update_config(cfg["id"], error=(str(e) or type(e).__name__)[:300])
+                    err = (str(e) or type(e).__name__)[:300]
+                    if err != cfg["error"]:                  # о новой ошибке сообщаем один раз, а не каждый цикл
+                        self.send(user["telegram_id"], f"⚠️ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(err)}\nПовторю автоматически; остановить — /cancel или /pause {cfg['id']}.")
+                    self.db.update_config(cfg["id"], error=err)
+            self._download_top(memo, users)
+            self._cancel.clear()
         self.last_cycle = self.clock()
 
-    def _evaluate(self, params, memo):
+    def _evaluate(self, params, memo, user):
         """Свечи актива обновляются и расчёт делается один раз на одинаковые параметры, даже если они у разных пользователей."""
         key = json.dumps(params, sort_keys=True, default=str)
         if key not in memo["eval"]:
             sym = params["symbol"]
             if sym not in memo["candles"]:
-                memo["candles"][sym] = self.engine.refresh_candles(sym)
+                if not self.engine.store.has_candles(sym):
+                    self.send(user["telegram_id"], f"⏳ Свечей <b>{esc(sym)}</b> ещё нет — скачиваю историю с первого отчёта. "
+                                                   "Первый раз это занимает несколько минут (по одной загрузке на актив). Остановить: /cancel")
+
+                def progress(count, ts):
+                    if user["id"] in self._cancel:
+                        raise Cancelled()
+
+                memo["candles"][sym] = self.engine.refresh_candles(sym, progress)
             memo["eval"][key] = (self.engine.evaluate(params), memo["candles"][sym])
         return memo["eval"][key]
 
@@ -286,7 +321,7 @@ class SignalService:
         fp = fingerprint(self.s, p)
         if not force and cfg["baseline"] and self._fp.get(cfg["id"]) == fp:
             return
-        res, warn = self._evaluate(p, memo)
+        res, warn = self._evaluate(p, memo, user)
         label = self.s.sources[p["source"]].label
         upd = {"error": None}
         if not cfg["baseline"]:
@@ -314,16 +349,29 @@ class SignalService:
                 upd["alerts"] = cfg["alerts"] + sent
         self.db.update_config(cfg["id"], **upd)
         self._fp[cfg["id"]] = fp
-        # докачка окон свечей топ-коинов для статистики (понемногу за цикл)
+        # окна свечей топ-коинов для статистики докачиваются в конце цикла, с ограничением по времени (карточка и сигналы от них не зависят)
         if p.get("top_enabled"):
             wins, _ = self.engine.pending_windows(res, self.b.top_windows)
-            if wins:
-                err = self.engine.download_windows(wins)
-                if not err:
-                    self._fp.pop(cfg["id"], None)            # пересчитаем статистику топ-коинов в следующем цикле
-                    memo["eval"].clear()
-                else:
-                    log.warning(err)
+            for w in wins:
+                memo["top"].setdefault(w, set()).add(cfg["id"])
+
+    def _download_top(self, memo, users):
+        """Докачивает окна по одному, пока не вышел бюджет времени цикла (SIGNALBOT_TOP_BUDGET_SEC) или не нажата /cancel."""
+        t0 = time.monotonic()
+        done = set()
+        for w, cfg_ids in list(memo["top"].items()):
+            if time.monotonic() - t0 > self.b.top_budget_sec and done:
+                break
+            owners = {c["user_id"] for c in (self.db.get_config(i) for i in cfg_ids) if c}
+            if owners and owners <= self._cancel:
+                continue
+            err = self.engine.download_windows([w])
+            if err:
+                log.warning(err)
+                break
+            done |= cfg_ids
+        for i in done:
+            self._fp.pop(i, None)                            # статистика топ-коинов пересчитается в следующем цикле
 
     def wait(self, timeout):
         self._wake.wait(timeout)

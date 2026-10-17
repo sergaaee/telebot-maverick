@@ -26,6 +26,7 @@ class BotSettings:
     sync_min: float = 5.0
     live_price: bool = True                         # показывать цену входа/уровни от текущей цены биржи
     top_windows: int = 10                           # сколько окон свечей топ-коинов докачивать за один цикл
+    top_budget_sec: float = 60.0                    # и не дольше стольких секунд за цикл (первое окно качается всегда)
 
 
 def load_bot_settings() -> BotSettings:
@@ -34,5 +35,5 @@ def load_bot_settings() -> BotSettings:
         token=_opt("SIGNALBOT_TOKEN"),
         poll_sec=_num("SIGNALBOT_POLL_SEC", 60.0), max_age_min=_num("SIGNALBOT_MAX_AGE_MIN", 180.0),
         sync=_bool("SIGNALBOT_SYNC", has_tg) and has_tg, sync_min=_num("SIGNALBOT_SYNC_MIN", 5.0),
-        live_price=_bool("SIGNALBOT_LIVE_PRICE", True), top_windows=_num("SIGNALBOT_TOP_WINDOWS", 10, int),
+        live_price=_bool("SIGNALBOT_LIVE_PRICE", True), top_windows=_num("SIGNALBOT_TOP_WINDOWS", 10, int), top_budget_sec=_num("SIGNALBOT_TOP_BUDGET_SEC", 60.0),
     )

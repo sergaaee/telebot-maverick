@@ -12,6 +12,10 @@ class EvalError(RuntimeError):
     pass
 
 
+class Cancelled(Exception):
+    """Пользователь отменил подсчёт (/cancel)."""
+
+
 def fingerprint(settings, params):
     """Меняется, когда изменились файлы истории, от которых зависит конфиг, — тогда нужен пересчёт."""
     out = []
@@ -33,19 +37,21 @@ class Engine:
         self._windows_fn = windows_fn or self._download_windows
 
     # ---------- данные ----------
-    def _download_candles(self, symbol):
-        backtest.fetch_candles(self.s.exchange, symbol, self.s.candle_tf, self.store.first_signal_ts(), str(self.s.cache_dir))
+    def _download_candles(self, symbol, progress=None):
+        backtest.fetch_candles(self.s.exchange, symbol, self.s.candle_tf, self.store.first_signal_ts(), str(self.s.cache_dir), progress=progress)
 
     def _download_windows(self, windows):
         for sym, a, b in windows:
             backtest.fetch_window(self.s.exchange, sym, self.s.candle_tf, a, b, str(self.s.cache_dir))
 
-    def refresh_candles(self, symbol):
+    def refresh_candles(self, symbol, progress=None):
         """Первичная загрузка или докачка хвоста свечей актива. Ошибка сети не фатальна, если свечи уже есть."""
         try:
-            self._candles_fn(symbol)
+            self._candles_fn(symbol, progress)
             self.store.reload_candles(symbol)
             return None
+        except Cancelled:
+            raise
         except BaseException as e:                      # fetch_candles завершается SystemExit при недоступной бирже
             if not self.store.has_candles(symbol):
                 raise EvalError(f"Нет свечей {symbol} и не удалось их скачать: {e or type(e).__name__}") from None
