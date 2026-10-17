@@ -16,6 +16,8 @@ interface Props {
   onAddAsset: (symbol: string) => Promise<string | null>;
   onRemoveAsset: (symbol: string) => void;
   loading: boolean;
+  /** сколько секунд идёт расчёт */
+  elapsed?: number;
   onChange: (p: Params) => void;
   onRun: () => void;
   /** смена источника или актива: App сохраняет текущие настройки и подхватывает сохранённые для новой связки */
@@ -120,7 +122,7 @@ function Section({ title, help, children, open = true }: { title: string; help?:
   );
 }
 
-export default function ParamsPanel({ params: p, sources, assets, activeJobs, onAddAsset, onRemoveAsset, loading, onChange, onRun, onSwitch, onReset, onImportConfig, tfMode }: Props) {
+export default function ParamsPanel({ params: p, sources, assets, activeJobs, onAddAsset, onRemoveAsset, loading, elapsed = 0, onChange, onRun, onSwitch, onReset, onImportConfig, tfMode }: Props) {
   const set = <K extends keyof Params>(k: K, v: Params[K]) => onChange({ ...p, [k]: v });
   const num = (k: NumKey) => (v: number | null) => onChange({ ...p, [k]: v } as Params);
   const coolMode: 'off' | 'drop' | 'declines' = p.cool_drop != null ? 'drop' : p.cool_declines != null ? 'declines' : 'off';
@@ -447,7 +449,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       </Section>
 
       <button type="button" className="run" disabled={loading || !!tpErr} onClick={onRun} title={tpErr ?? undefined}>
-        {loading ? 'Считаю…' : tpErr ? 'Исправьте тейки' : 'Запустить'}
+        {loading ? <><span className="spinner light" /> Считаю…{elapsed > 0 ? ` ${elapsed} с` : ''}</> : tpErr ? 'Исправьте тейки' : 'Запустить'}
       </button>
     </aside>
   );

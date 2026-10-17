@@ -49,11 +49,27 @@ interface AppProps {
   onLogout: () => void;
 }
 
+/** Сколько секунд идёт текущий расчёт (обновляется 4 раза в секунду, пока active). */
+function useElapsed(active: boolean): number {
+  const [sec, setSec] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setSec(0);
+      return;
+    }
+    const t0 = Date.now();
+    const id = setInterval(() => setSec(Math.floor((Date.now() - t0) / 1000)), 250);
+    return () => clearInterval(id);
+  }, [active]);
+  return sec;
+}
+
 export default function App({ me, authEnabled, botUsername, onProfileChanged, onLogout }: AppProps) {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [params, setParams] = useState<Params | null>(null);
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const elapsed = useElapsed(loading);
   const [error, setError] = useState<string | null>(null);
   const [chartError, setChartError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -457,7 +473,8 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
   const downloadingSym = (sym: string) => activeJobs.some((j) => j.kind === 'candles' && j.symbol === sym);
 
   return (
-    <div className="app">
+    <div className="app" aria-busy={loading}>
+      <div className={`progress-bar${loading ? ' on' : ''}`} role="progressbar" aria-hidden={!loading} aria-label="Идёт расчёт" />
       <header>
         <h1>Maverick <span>· бэктест</span></h1>
         {config && (
@@ -494,7 +511,8 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
         </div>
       )}
 
-      <main>
+      <main className={loading ? 'calc' : ''}>
+        {loading && <div className="calc-badge" role="status"><span className="spinner" /> Считаю… {elapsed > 0 ? `${elapsed} с` : ''}</div>}
         {params && config ? (
           <ParamsPanel
             params={params}
@@ -504,6 +522,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
             onAddAsset={onAddAsset}
             onRemoveAsset={(s) => void onRemoveAsset(s)}
             loading={loading}
+            elapsed={elapsed}
             onChange={setParams}
             onRun={() => void run(params)}
             onSwitch={switchTo}
@@ -604,7 +623,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
           ) : result ? (
             <StatsPanel result={result} />
           ) : (
-            <div className="empty">{loading ? 'Считаю…' : 'Нет результата'}</div>
+            <div className="empty">{loading ? <span className="busy"><span className="spinner" /> Считаю…</span> : 'Нет результата'}</div>
           )}
         </section>
       </main>

@@ -42,11 +42,6 @@ class MarketsCache:
         self._lock = threading.Lock()
         self._at, self._data = 0.0, set()
 
-    @property
-    def version(self):
-        """Меняется при каждом обновлении списка рынков (для кеша результатов); обращения к бирже не делает."""
-        return self._at
-
     def symbols(self) -> set:
         with self._lock:
             if not self._data or time.time() - self._at > self._ttl:
