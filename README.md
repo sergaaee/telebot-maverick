@@ -10,6 +10,7 @@ backend/     Python: FastAPI-API для интерфейса, движок бэ�
   tools/       bot.py, trader.py (биржа), export_history.py (выгрузка истории из Telegram)
   tests/       pytest: движок, API, экспорт
   cli.py       консольная точка входа: serve | backtest | export | bot
+signalbot/   Telegram-бот сигналов: принимает конфиги (файлом/текстом) и присылает новые сигналы со статистикой конфига (см. signalbot/README.md)
 frontend/    React + TypeScript + Vite + lightweight-charts: график, сигналы, TP/SL, статистика
 e2e/         проверка интерфейса в настоящем браузере на синтетических данных
 ```

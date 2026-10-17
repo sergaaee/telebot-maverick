@@ -286,6 +286,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     taken = {t["signal_ts"] for t in trades}
     limit = 5000
     signals_out = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken, "trend_blocked": ts in blocked_ts} for ts, d in confirmed[:limit]]
+    last_signals = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken, "trend_blocked": ts in blocked_ts} for ts, d in confirmed[-30:]]
 
     rep = {s[0]: s for s in sigs}
     out_trades = [_trade_out(i, t, rep) for i, t in enumerate(trades, 1)]
@@ -330,6 +331,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "trades": out_trades,
         "signals": signals_out,
         "signals_truncated": len(confirmed) > limit,
+        "last_signals": last_signals,                  # самые свежие подтверждённые сигналы (для бота: список signals обрезается по первым 5000)
         "equity": equity,
         "monthly": list(monthly.values()),
         "top": top,
