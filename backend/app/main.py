@@ -260,7 +260,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     @app.post("/api/backtest")
     def run(params: BacktestParams):
         try:
-            return run_backtest(store, s.defaults, params, available_fn=available_fn, available_token=markets.version)
+            return run_backtest(store, s.defaults, params, available_fn=available_fn)
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
         except ParamError as e:
@@ -270,7 +270,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     def top_download(params: BacktestParams, request: Request):
         """Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + TOP_DAYS) для текущих параметров."""
         try:
-            res = run_backtest(store, s.defaults, params, available_fn=available_fn, available_token=markets.version)
+            res = run_backtest(store, s.defaults, params, available_fn=available_fn)
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
         except ParamError as e:

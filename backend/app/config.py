@@ -108,9 +108,6 @@ class Settings:
     session_days: float = 30.0
     cookie_secure: bool = False      # true — если сайт открыт по HTTPS
     bot_username: "str | None" = None   # @имя бота сигналов (для подсказки на сайте)
-    result_cache: bool = True        # кеш результатов бэктеста (память + data/results)
-    result_cache_mem: int = 64
-    result_cache_files: int = 300
     candles_sync: bool = True        # подгрузка свечей при запуске и по расписанию
     candles_sync_min: float = 5.0
     candles_sync_symbols: list = field(default_factory=list)   # какие активы (пусто — все из SYMBOLS)
@@ -168,7 +165,6 @@ def load_settings() -> Settings:
         sync_enabled=_bool("HISTORY_SYNC", bool(_opt("TG_API_ID") and _opt("TG_API_HASH"))), sync_min=_num("HISTORY_SYNC_MIN", 32.0),
         auth_enabled=_bool("AUTH_ENABLED", True), db_file=_path("DB_FILE", "../data/maverick.db"), session_days=_num("SESSION_DAYS", 30.0),
         cookie_secure=_bool("COOKIE_SECURE", False), bot_username=(_opt("SIGNALBOT_USERNAME") or "").lstrip("@") or None,
-        result_cache=_bool("RESULT_CACHE", True), result_cache_mem=_num("RESULT_CACHE_MEM", 64, int), result_cache_files=_num("RESULT_CACHE_FILES", 300, int),
         candles_sync=_bool("CANDLES_SYNC", True), candles_sync_min=_num("CANDLES_SYNC_MIN", 5.0),
         candles_sync_symbols=[x.strip() for x in (_opt("CANDLES_SYNC_SYMBOLS") or "").split(",") if x.strip()],
         cors_origins=[o.strip() for o in (_opt("CORS_ORIGINS") or "").split(",") if o.strip()],
