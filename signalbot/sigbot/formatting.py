@@ -61,18 +61,21 @@ def stats_block(stats, params, rng=None, title="📈 <b>Статистика к�
         f"Средняя сделка {pct(t['avg_pct'], 3)} · ср. плюс/минус {usd(t['avg_win_usd'])} / {usd(t['avg_loss_usd'])}",
         f"Серия убытков до {t['max_loss_streak']} · TP {t['tp']} · SL {t['sl']} · БУ {t['be']}",
     ]
+    if t.get("adds"):
+        lines.append(f"Позиций {t['positions']} · доборов {t['adds']} (сделок считается по ногам)")
     return "\n".join(lines)
 
 
-def sizing_line(result):
+def sizing_line(result, add=False):
     p, t = result["params"], result["stats"]["total"]
     bal = p["deposit"] + (t["total_usd"] if p.get("compound", True) else 0)
     if bal <= 0:
         return "💼 Счёт в бэктесте обнулён"
     base = bal if p.get("compound", True) else p["deposit"]
-    notional = base * p["trade_pct"] / 100 * p["leverage"]
+    pct = p["pyramid_pct"] if add and p.get("pyramid_pct") else p["trade_pct"]
+    notional = base * pct / 100 * p["leverage"]
     mode = "сложный %" if p.get("compound", True) else "фикс. сумма"
-    return f"💼 Объём ≈ <b>{num(notional)} $</b> (маржа {num(notional / p['leverage'])} $ · {p['trade_pct']:g}% × {p['leverage']:g}× · {mode}; баланс {num(bal)} $)"
+    return f"💼 Объём ≈ <b>{num(notional)} $</b> (маржа {num(notional / p['leverage'])} $ · {pct:g}% × {p['leverage']:g}× · {mode}; баланс {num(bal)} $)"
 
 
 def config_summary(cfg, result=None):
@@ -84,13 +87,20 @@ def config_summary(cfg, result=None):
         bits.append("тренд EMA " + "/".join(str(x) for x in p.get("trend_emas", [])) + f" {p.get('trend_tf')}")
     if p.get("top_enabled"):
         bits.append("топ-коины")
+    if p.get("pyramid_enabled"):
+        bits.append(f"пирамидинг до {p.get('pyramid_max')}×{p.get('pyramid_pct'):g}%")
+    if p.get("signal_gap_h"):
+        bits.append(f"пауза между сигналами {p['signal_gap_h']:g} ч")
+    if p.get("sl_hold_strong"):
+        bits.append("SL после остывания метрик")
     return " · ".join(bits)
 
 
 def signal_message(cfg, result, sig, report, plan, entry_price, top, source_label, stale_note=None):
     p = result["params"]
+    add = bool(sig.get("pyramid"))
     head = [
-        f"{side_line(sig['side'])}  ·  <b>{esc(str(p['symbol']))}</b>",
+        f"{side_line(sig['side'])}  ·  <b>{esc(str(p['symbol']))}</b>" + (f"  ·  ➕ <b>ДОБОР #{sig.get('leg', 2) - 1}</b> к открытой позиции" if add else ""),
         f"📋 Конфиг: <b>{esc(cfg['name'])}</b>  <i>({esc(source_label)})</i>",
         f"🕒 Отчёт: {ts_str(sig['ts'])}",
     ]
@@ -115,7 +125,7 @@ def signal_message(cfg, result, sig, report, plan, entry_price, top, source_labe
         trade.append(f"{tp} · SL {pct(-p['sl_pct'] if sig['side'] == 'long' else p['sl_pct'], 1)}"
                      + ("  ·  БУ после TP1" if p.get("be_after_tp1") and len(p["tps"]) > 1 else ""))
         trade.append("<i>Цена биржи недоступна — уровни в процентах от цены входа.</i>")
-    trade.append(sizing_line(result))
+    trade.append(sizing_line(result, add))
     blocks = ["\n".join(head), *m, "\n".join(trade)]
     if top:
         blocks.append(top_block(top, sig, p, result))

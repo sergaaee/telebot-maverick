@@ -11,7 +11,7 @@ import Toasts from './components/Toasts';
 import UserMenu from './components/UserMenu';
 import TopPanel from './components/TopPanel';
 import TradesTable from './components/TradesTable';
-import { parseConfig } from './configIO';
+import { LEGACY_OFF, parseConfig } from './configIO';
 import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
 import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
@@ -35,7 +35,8 @@ function loadProfile(cfg: AppConfig, source: string, symbol: string, st: UiState
   if (saved.tp_pct != null && !saved.tps) saved.tps = [{ pct: saved.tp_pct, share: 100 }];
   delete saved.tp_pct;
   if (saved.liq_source && !cfg.data.sources.some((s) => s.id === saved.liq_source)) delete saved.liq_source;
-  return { params: { ...cfg.defaults, ...saved, source, symbol }, tf: prof?.tf ?? 'auto' };
+  const legacy = prof ? Object.fromEntries(Object.entries(LEGACY_OFF).filter(([k]) => !(k in saved))) : {};     // профиль сохранён до появления этих возможностей
+  return { params: { ...cfg.defaults, ...legacy, ...saved, source, symbol }, tf: prof?.tf ?? 'auto' };
 }
 
 const NO_TRADES: Trade[] = [];

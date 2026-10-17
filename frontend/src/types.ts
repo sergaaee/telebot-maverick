@@ -50,6 +50,16 @@ export interface Params {
   trend_enabled: boolean;
   trend_emas: number[];
   trend_tf: string;
+  /** пирамидинг: добор в позицию по новым подтверждённым сигналам той же стороны (каждый добор — своя нога со своими тейками и стопом) */
+  pyramid_enabled: boolean;
+  pyramid_max: number;
+  /** размер добора, % депозита */
+  pyramid_pct: number;
+  pyramid_gap_h: number;
+  /** минимум часов между открытиями позиций */
+  signal_gap_h: number;
+  /** стоп-лосс не действует, пока метрики удовлетворяют условию входа */
+  sl_hold_strong: boolean;
   /** топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии */
   top_enabled: boolean;
   top_side: Side;
@@ -143,6 +153,10 @@ export interface Trade {
   scalp: number | null;
   liq_long_k: number | null;
   liq_short_k: number | null;
+  /** номер ноги позиции (1 — вход, 2+ — доборы), номер позиции и признак добора */
+  leg?: number;
+  group?: number;
+  pyramid?: boolean;
   /** только для сделок по топ-коинам */
   symbol?: string;
   coin?: string;
@@ -157,6 +171,8 @@ export interface Signal {
   side: 'long' | 'short';
   taken: boolean;
   trend_blocked?: boolean;
+  /** почему сигнал не открыл сделку */
+  reason?: string | null;
 }
 
 export interface Stats {
@@ -180,6 +196,9 @@ export interface Stats {
   max_loss_streak: number;
   exposure_pct: number;
   expectancy_usd: number;
+  /** позиций (группа ног) и доборов */
+  positions: number;
+  adds: number;
   /** годовой Шарп по дневным доходностям; null — мало данных */
   sharpe: number | null;
   return_pct: number | null;
@@ -198,6 +217,7 @@ export interface BacktestResult {
   trades: Trade[];
   signals: Signal[];
   signals_truncated: boolean;
+  skipped_reasons: Record<string, number>;
   equity: [number, number][];
   monthly: { month: string; trades: number; pnl_usd: number; wins: number }[];
   top: TopSection;

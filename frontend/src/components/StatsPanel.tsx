@@ -37,9 +37,19 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
         {result.params.tps.length > 1 && (
           <Card label="Дошли до тейков" value={t.tp_reach.slice(0, result.params.tps.length).join(' / ')} sub={result.params.tps.map((_, i) => `TP${i + 1}`).join(' / ')} />
         )}
+        {t.adds > 0 && <Card label="Позиций / доборов" value={`${t.positions} / ${t.adds}`} sub="сделок считается по ногам" />}
         <Card label="Серия убытков" value={String(t.max_loss_streak)} sub="макс. подряд" />
         <Card label="В позиции" value={`${t.exposure_pct.toFixed(0)}%`} sub="доля времени" />
       </div>
+
+      {Object.keys(result.skipped_reasons ?? {}).length > 0 && (
+        <>
+          <h3>Пропущенные сигналы</h3>
+          <ul className="reasons" data-testid="skipped-reasons">
+            {Object.entries(result.skipped_reasons).sort((a, b) => b[1] - a[1]).map(([r, n]) => <li key={r}><b>{n}</b> — {r}</li>)}
+          </ul>
+        </>
+      )}
 
       <h3>Разрезы</h3>
       <table className="mini">

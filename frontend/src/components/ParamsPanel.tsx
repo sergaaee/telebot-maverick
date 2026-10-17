@@ -335,6 +335,26 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
         <Num label="Проскальзывание" help="slip" value={+(p.slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('slip', (v ?? 0) / 100)} />
         <Num label="Пауза после стопа" help="cooldown_h" value={p.cooldown_h} step={1} suffix="ч" onChange={(v) => set('cooldown_h', v ?? 0)} />
+        <label className="field check">
+          <input type="checkbox" checked={p.sl_hold_strong} onChange={(e) => set('sl_hold_strong', e.target.checked)} />
+          <Label text="не ставить SL, пока метрики сильны" help="sl_hold_strong" />
+        </label>
+        {p.sl_hold_strong && <div className="src-info warn-text">пока метрики выше порогов входа, убыток по позиции не ограничен</div>}
+      </Section>
+
+      <Section title="Пирамидинг и паузы" help="groupPyramid" open={p.pyramid_enabled || p.signal_gap_h > 0}>
+        <Num label="Пауза между сигналами" help="signal_gap_h" value={p.signal_gap_h} step={1} suffix="ч" onChange={(v) => set('signal_gap_h', Math.max(0, v ?? 0))} />
+        <label className="field check">
+          <input type="checkbox" checked={p.pyramid_enabled} onChange={(e) => set('pyramid_enabled', e.target.checked)} />
+          <Label text="пирамидинг (доборы в позицию)" help="pyramid_on" />
+        </label>
+        {p.pyramid_enabled && (
+          <>
+            <Num label="Максимум доборов" help="pyramid_max" value={p.pyramid_max} step={1} onChange={(v) => set('pyramid_max', Math.max(1, Math.round(v ?? 1)))} />
+            <Num label="Размер добора" help="pyramid_pct" value={p.pyramid_pct} step={1} suffix="% деп." onChange={num('pyramid_pct')} />
+            <Num label="Пауза между доборами" help="pyramid_gap_h" value={p.pyramid_gap_h} step={1} suffix="ч" onChange={(v) => set('pyramid_gap_h', Math.max(0, v ?? 0))} />
+          </>
+        )}
       </Section>
 
       <Section title="Топ-коины" help="groupTop" open={p.top_enabled}>

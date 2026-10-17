@@ -161,3 +161,4 @@ main { position: relative; }
 .calc .center, .calc .right { opacity: .5; transition: opacity .25s; }
 .calc-badge { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 20; display: inline-flex; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--accent); border-radius: 999px; padding: 5px 14px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
 @media (prefers-reduced-motion: reduce) { .progress-bar::before { animation: none; width: 100%; left: 0; opacity: .7; } .spinner { animation-duration: 2.4s; } }
+.tag-add { color: #e0b050; }

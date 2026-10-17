@@ -14,6 +14,9 @@ export function configFileName(p: Params): string {
 /** параметры, у которых null означает «выключено», даже если в .env задано значение */
 const NULLABLE = new Set(['only', 'liq_source', 'cool_drop', 'cool_declines', 'liq_hours', 'date_from', 'date_to']);
 
+/** Возможности, появившиеся позже: в старом конфиге их нет, и они ДОЛЖНЫ быть выключены (а не браться из умолчаний .env), чтобы результат не менялся. */
+export const LEGACY_OFF = { pyramid_enabled: false, signal_gap_h: 0, sl_hold_strong: false } as const;
+
 const kind = (v: unknown) => (Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v);
 
 /**
@@ -44,6 +47,7 @@ export function parseConfig(text: string, envDefaults: Params): { params: Params
     if (ok) out[k] = v;
     else ignored.push(k);
   }
+  for (const [k, v] of Object.entries(LEGACY_OFF)) if (!(k in src)) out[k] = v;
   const tf = obj.tf === 'auto' || typeof obj.tf === 'number' ? (obj.tf as TfMode) : null;
   return { params: out as unknown as Params, tf, ignored };
 }

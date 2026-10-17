@@ -1,4 +1,5 @@
 """Запуск бэктеста и подготовка данных для интерфейса (сделки, сигналы, статистика)."""
+import heapq
 import math
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
@@ -64,18 +65,24 @@ def _filters(eff):
 DAY_MS = 86_400_000
 
 
-def apply_sizing(trades, deposit, trade_pct, leverage, compound=True):
-    """Размер каждой сделки = база × trade_pct% × плечо (база: при compound — текущий баланс, иначе начальный депозит; баланс = депозит + закрытые результаты, т.е. со сложным процентом).
-    pnl_pct у сделки — доходность на объём, поэтому pnl_usd пересчитывается последовательно. Баланс ≤ 0 — торговля прекращается (счёт слит)."""
+def apply_sizing(trades, deposit, trade_pct, leverage, compound=True, pyramid_pct=None):
+    """Размер каждой сделки = база × доля% × плечо (база: при compound — текущий баланс, иначе начальный депозит; баланс = депозит + УЖЕ закрытые
+    результаты, т.е. сложный процент). Первая нога позиции берёт trade_pct, доборы (leg > 1) — pyramid_pct.
+    pnl_pct у сделки — доходность на объём, поэтому pnl_usd пересчитывается по порядку открытия; результат ноги попадает в баланс с момента её
+    закрытия (ноги одной позиции перекрываются). Баланс ≤ 0 — торговля прекращается (счёт слит)."""
     bal = deposit
-    for t in trades:
+    pending = []                                         # (время закрытия, результат $) ещё открытых ног
+    for t in sorted(trades, key=lambda x: (x["entry_ts"], x.get("leg", 1))):
+        while pending and pending[0][0] <= t["entry_ts"]:
+            bal += heapq.heappop(pending)[1]
         base = bal if compound else deposit            # простой процент: каждый раз доля от НАЧАЛЬНОГО депозита
-        notional = (max(base, 0.0) if bal > 0 else 0.0) * trade_pct / 100 * leverage
+        pct = pyramid_pct if (t.get("leg", 1) > 1 and pyramid_pct) else trade_pct
+        notional = (max(base, 0.0) if bal > 0 else 0.0) * pct / 100 * leverage
         t["margin"] = notional / leverage
         t["notional"] = notional
         t["pnl_usd"] = notional * t["pnl_pct"] / 100
-        bal += t["pnl_usd"]
-        t["balance_after"] = bal
+        heapq.heappush(pending, (t["exit_ts"], t["pnl_usd"]))
+        t["balance_after"] = bal + t["pnl_usd"]
 
 
 def sharpe_ratio(trades, deposit):
@@ -109,10 +116,18 @@ def _extra_stats(trades, span_ms, deposit=None):
     wins = [x for x in pn if x > 0]
     losses = [x for x in pn if x <= 0]
     streak = best = 0
-    for x in pn:
+    for x in (t["pnl_usd"] for t in sorted(trades, key=lambda x: (x["exit_ts"], x["entry_ts"]))):
         streak = streak + 1 if x <= 0 else 0
         best = max(best, streak)
-    held = sum(t["exit_ts"] - t["entry_ts"] for t in trades)
+    held, cur_end = 0, None                            # время в позиции: объединение интервалов (ноги одной позиции перекрываются)
+    for t in sorted(trades, key=lambda x: x["entry_ts"]):
+        a, b = t["entry_ts"], t["exit_ts"]
+        if cur_end is None or a > cur_end:
+            held += b - a
+            cur_end = b
+        elif b > cur_end:
+            held += b - cur_end
+            cur_end = b
     return {
         "avg_win_usd": sum(wins) / len(wins) if wins else 0.0,
         "avg_loss_usd": sum(losses) / len(losses) if losses else 0.0,
@@ -126,6 +141,8 @@ def _extra_stats(trades, span_ms, deposit=None):
         "max_dd_pct": _max_dd_pct(pn, deposit) if deposit else None,
         # сколько сделок дошли до первого / второго / третьего тейка
         "tp_reach": [sum(t["tp_hits"] >= k for t in trades) for k in (1, 2, 3)],
+        "positions": len({t.get("group", i) for i, t in enumerate(trades)}),
+        "adds": sum(1 for t in trades if t.get("leg", 1) > 1),
     }
 
 
@@ -140,7 +157,7 @@ def _trade_out(n, t, rep):
         "local": r[1] if r else None, "scalp": r[2] if r else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
-    for k in ("symbol", "coin", "top_value", "partial", "window_end"):
+    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid"):
         if k in t:
             out[k] = t[k]
     return out
@@ -267,9 +284,20 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         if not emas:
             raise ParamError("Фильтр тренда: выберите хотя бы одну EMA")
         allow = trend.build_trend(candles_all, eff["trend_tf"], emas)       # EMA считается по всей истории свечей (прогрев), а не только по периоду
-    trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, **common, **extra)
+    pyramid, pyr_pct = None, None
+    if eff.get("pyramid_enabled"):
+        room = int((100 - eff["trade_pct"]) // eff["pyramid_pct"])          # сколько доборов помещается в 100% депозита вместе с первой ногой
+        if room < 1:
+            raise ParamError(f"Пирамидинг: первая нога {eff['trade_pct']:g}% депозита, на добор ({eff['pyramid_pct']:g}%) места не остаётся")
+        if room < eff["pyramid_max"]:
+            warnings.append(f"Пирамидинг: {eff['trade_pct']:g}% + {eff['pyramid_max']} × {eff['pyramid_pct']:g}% больше депозита — доборов не больше {room}")
+        pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0}, eff["pyramid_pct"]
+    skipped = []
+    trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, pyramid=pyramid,
+                               signal_gap_h=eff.get("signal_gap_h") or 0.0, sl_hold_strong=bool(eff.get("sl_hold_strong")), skipped=skipped,
+                               **common, **extra)
 
-    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True))
+    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True), pyr_pct)
     if eff["sl_pct"] * eff["leverage"] >= 100:
         warnings.append(f"Плечо {eff['leverage']:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа, бэктест этого не моделирует")
 
@@ -285,8 +313,21 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         blocked_ts = set()
     taken = {t["signal_ts"] for t in trades}
     limit = 5000
-    signals_out = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken, "trend_blocked": ts in blocked_ts} for ts, d in confirmed[:limit]]
-    last_signals = [{"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken, "trend_blocked": ts in blocked_ts} for ts, d in confirmed[-30:]]
+    why = {ts: reason for ts, _side, reason in skipped}
+    for ts in blocked_ts:
+        why[ts] = "против тренда"
+
+    def sig_out(ts, d):
+        return {"ts": ts, "side": "long" if d == 1 else "short", "taken": ts in taken, "trend_blocked": ts in blocked_ts,
+                "reason": None if ts in taken else why.get(ts)}
+
+    signals_out = [sig_out(ts, d) for ts, d in confirmed[:limit]]
+    last_signals = [sig_out(ts, d) for ts, d in confirmed[-30:]]
+    skipped_reasons = {}
+    for ts, d in confirmed:
+        if ts not in taken:
+            r = why.get(ts, "другое")
+            skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
 
     rep = {s[0]: s for s in sigs}
     out_trades = [_trade_out(i, t, rep) for i, t in enumerate(trades, 1)]
@@ -302,7 +343,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     equity, cum = [], 0.0
     if trades:
         equity.append([trades[0]["entry_ts"], 0.0])
-    for t in trades:
+    for t in sorted(trades, key=lambda x: (x["exit_ts"], x["entry_ts"])):
         cum += t["pnl_usd"]
         equity.append([t["exit_ts"], cum])
     monthly = {}
@@ -331,6 +372,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "trades": out_trades,
         "signals": signals_out,
         "signals_truncated": len(confirmed) > limit,
+        "skipped_reasons": skipped_reasons,
         "last_signals": last_signals,                  # самые свежие подтверждённые сигналы (для бота: список signals обрезается по первым 5000)
         "equity": equity,
         "monthly": list(monthly.values()),
