@@ -23,11 +23,13 @@ class Job:
     created_at: float = field(default_factory=time.time)
     started_at: "float | None" = None
     finished_at: "float | None" = None
-    acked: bool = False             # пользователь уже видел уведомление о завершении
+    acked_by: set = field(default_factory=set, repr=False)   # кто из пользователей уже закрыл уведомление о завершении
 
-    def to_dict(self):
+    def to_dict(self, user_id=None):
+        """user_id — для кого: поле acked показывает, закрыл ли именно этот пользователь уведомление (загрузки общие для всех)."""
         d = asdict(self)
         d.pop("payload", None)
+        d["acked"] = user_id in d.pop("acked_by")
         return d
 
 
@@ -104,8 +106,8 @@ class JobManager:
         return [j for j in self.list() if j.status in ("queued", "running") and (symbol is None or j.symbol == symbol)
                 and (kind is None or j.kind == kind)]
 
-    def ack(self, job_id):
+    def ack(self, job_id, user_id=None):
         j = self._jobs.get(job_id)
         if j:
-            j.acked = True
+            j.acked_by.add(user_id)
         return j

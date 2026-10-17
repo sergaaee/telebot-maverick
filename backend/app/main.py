@@ -2,11 +2,13 @@
 import json
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .auth import COOKIE, LoginLimiter, make_dependency
 from .config import Settings, load_settings
+from .db import Database, DbError
 from .core import backtest
 from .data import DataStore
 from .candle_sync import CandleSync
@@ -15,7 +17,11 @@ from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
 from .schemas import BacktestParams
 from .service import ParamError, run_backtest
-from .state import read_state, write_state
+
+
+class LoginIn(BaseModel):
+    login: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class AssetIn(BaseModel):
@@ -85,7 +91,9 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         sync.stop()
         candle_sync.stop()
 
-    app = FastAPI(title="telebot-maverick backtest viewer", lifespan=lifespan)
+    db = Database(s.db_file)
+    limiter = LoginLimiter()
+    app = FastAPI(title="telebot-maverick backtest viewer", lifespan=lifespan, dependencies=[Depends(make_dependency(db, s))])
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["*"], allow_headers=["*"])
     app.state.settings, app.state.store, app.state.jobs, app.state.sync = s, store, jobs, sync
 
@@ -104,6 +112,52 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         return {"defaults": s.defaults, "timeframes": tfs, "exchange": s.exchange, "symbols": store.symbols(),
                 "user_symbols": store.user_symbols(), "symbol": s.symbol, "tf": s.candle_tf, "max_bars": s.max_bars,
                 "data": store.info()}
+
+    # ---------------- вход, выход, профиль ----------------
+    def public_user(u):
+        return {"login": u["login"], "is_admin": u["is_admin"], "telegram": bool(u["telegram_id"]), "telegram_name": u["telegram_name"]}
+
+    @app.get("/api/auth/status")
+    def auth_status():
+        return {"auth_enabled": s.auth_enabled, "users_exist": db.user_count() > 0}
+
+    @app.get("/api/auth/me")
+    def auth_me(request: Request):
+        if not s.auth_enabled:
+            return {"auth_enabled": False, "user": public_user(request.state.user), "bot_username": s.bot_username}
+        user = db.session_user(request.cookies.get(COOKIE))
+        if not user:
+            raise HTTPException(401, "Требуется вход")
+        return {"auth_enabled": True, "user": public_user(user), "bot_username": s.bot_username}
+
+    @app.post("/api/auth/login")
+    def auth_login(body: LoginIn, request: Request, response: Response):
+        key = ((request.client.host if request.client else "?"), body.login.lower())
+        limiter.check(key)
+        user = db.check_login(body.login, body.password)
+        if not user:
+            limiter.fail(key)
+            raise HTTPException(401, "Неверный логин или пароль")
+        limiter.ok(key)
+        token = db.create_session(user["id"], s.session_days)
+        response.set_cookie(COOKIE, token, max_age=int(s.session_days * 86400), httponly=True, samesite="lax", secure=s.cookie_secure, path="/")
+        return {"user": public_user(user), "bot_username": s.bot_username}
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request, response: Response):
+        db.delete_session(request.cookies.get(COOKIE))
+        response.delete_cookie(COOKIE, path="/")
+        return {"ok": True}
+
+    @app.post("/api/me/telegram/link-code")
+    def telegram_link_code(request: Request):
+        """Одноразовый код (10 минут): отправьте его боту командой /link КОД — Telegram привяжется к этому пользователю."""
+        return {"code": db.create_link_code(request.state.user["id"]), "ttl_min": 10, "bot_username": s.bot_username}
+
+    @app.delete("/api/me/telegram")
+    def telegram_unlink(request: Request):
+        db.unlink_telegram(request.state.user["id"])
+        return {"ok": True}
 
     # ---------------- текущие метрики и подгрузка истории ----------------
     @app.get("/api/latest")
@@ -144,18 +198,18 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         return {"tf": tf_, "bars": bars, "truncated": truncated}
 
     @app.post("/api/candles/refresh")
-    def refresh(symbol: "str | None" = Query(None)):
+    def refresh(request: Request, symbol: "str | None" = Query(None)):
         """Ставит в фон загрузку/докачку свечей актива и сразу возвращает задачу (ход — GET /api/jobs)."""
         try:
             sym = store._symbol(symbol)
         except KeyError as e:
             raise HTTPException(422, str(e.args[0]))
         job, created = jobs.submit(sym)
-        return {"job": job.to_dict(), "created": created}
+        return {"job": job.to_dict(request.state.user["id"]), "created": created}
 
     # ---------------- активы ----------------
     @app.post("/api/assets")
-    def add_asset(body: AssetIn):
+    def add_asset(body: AssetIn, request: Request):
         """Добавляет актив: проверяет символ на бирже и запускает в фоне загрузку свечей.
         Если актив уже есть, а свечей нет — тоже запускает загрузку."""
         try:
@@ -175,7 +229,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         job = None
         if added or not store.has_candles(sym):
             job, _ = jobs.submit(sym)
-        return {"symbol": sym, "added": added, "job": job.to_dict() if job else None}
+        return {"symbol": sym, "added": added, "job": job.to_dict(request.state.user["id"]) if job else None}
 
     @app.delete("/api/assets")
     def remove_asset(symbol: str = Query(...)):
@@ -190,15 +244,17 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     # ---------------- фоновые задачи ----------------
     @app.get("/api/jobs")
-    def list_jobs():
-        return {"jobs": [j.to_dict() for j in jobs.list()]}
+    def list_jobs(request: Request):
+        uid = request.state.user["id"]
+        return {"jobs": [j.to_dict(uid) for j in jobs.list()]}
 
     @app.post("/api/jobs/{job_id}/ack")
-    def ack_job(job_id: int):
-        j = jobs.ack(job_id)
+    def ack_job(job_id: int, request: Request):
+        uid = request.state.user["id"]
+        j = jobs.ack(job_id, uid)
         if j is None:
             raise HTTPException(404, "Задача не найдена")
-        return j.to_dict()
+        return j.to_dict(uid)
 
     # ---------------- бэктест ----------------
     @app.post("/api/backtest")
@@ -211,7 +267,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             raise HTTPException(422, str(e))
 
     @app.post("/api/top/download")
-    def top_download(params: BacktestParams):
+    def top_download(params: BacktestParams, request: Request):
         """Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + TOP_DAYS) для текущих параметров."""
         try:
             res = run_backtest(store, s.defaults, params, available_fn=available_fn)
@@ -226,18 +282,18 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         for it in items:
             windows.setdefault(it["symbol"], []).append([it["from"], it["to"]])
         job, created = jobs.submit("top", kind="top", label=f"Топ-коины: {len(windows)} монет", payload={"windows": windows}, total=len(windows))
-        return {"job": job.to_dict(), "created": created, "windows": len(items)}
+        return {"job": job.to_dict(request.state.user["id"]), "created": created, "windows": len(items)}
 
     # ---- состояние интерфейса (выбранные источник/актив/ТФ и параметры по каждой связке) хранится на сервере ----
     @app.get("/api/ui-state")
-    def get_ui_state():
-        return read_state(s.state_file)
+    def get_ui_state(request: Request):
+        return db.get_ui_state(request.state.user["id"])
 
     @app.put("/api/ui-state")
-    def put_ui_state(state: dict = Body(...)):
+    def put_ui_state(request: Request, state: dict = Body(...)):
         if len(json.dumps(state)) > 500_000:
             raise HTTPException(413, "Слишком большое состояние")
-        write_state(s.state_file, state)
+        db.put_ui_state(request.state.user["id"], state)
         return {"ok": True}
 
     return app

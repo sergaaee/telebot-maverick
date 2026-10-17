@@ -3,6 +3,7 @@
     python cli.py serve                       # API для интерфейса (host/port из .env)
     python cli.py backtest history.csv ...    # бэктест и свипы (флаги как раньше, см. --help)
     python cli.py export history.csv --chat 2119980662
+    python cli.py user add LOGIN              # пользователи сайта и бота сигналов (регистрация только здесь), см. python cli.py user -h
     python cli.py bot                         # Telegram-бот (DRY_RUN=true по умолчанию)
 
 Рабочая папка переключается в корень репозитория: history*.csv, trades.csv, data/ и файлы сессий Telethon лежат там.
@@ -14,7 +15,7 @@ from app.config import ROOT, load_settings
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("serve", "backtest", "export", "bot"):
+    if len(sys.argv) < 2 or sys.argv[1] not in ("serve", "backtest", "export", "bot", "user"):
         raise SystemExit(__doc__)
     cmd = sys.argv.pop(1)
     os.chdir(ROOT)
@@ -26,6 +27,9 @@ def main():
     elif cmd == "backtest":
         from app.core.backtest import main as run
         run()
+    elif cmd == "user":
+        from tools import users
+        users.main(sys.argv[1:])
     elif cmd == "export":
         import argparse
         import asyncio

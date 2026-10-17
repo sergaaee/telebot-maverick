@@ -192,7 +192,6 @@ def test_ui_state_roundtrip(client, tmp_path):
     state = {"last": {"source": "binance", "symbol": "ETH/USDT:USDT"}, "profiles": {"binance|ETH/USDT:USDT": {"confirm": 3}}}
     assert client.put("/api/ui-state", json=state).json() == {"ok": True}
     assert client.get("/api/ui-state").json() == state
-    assert (tmp_path / "state.json").exists()
     assert client.put("/api/ui-state", json=["не", "объект"]).status_code == 422
 
 
