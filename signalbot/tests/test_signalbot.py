@@ -455,3 +455,70 @@ def test_top_windows_have_time_budget_and_dont_delay_card(env):
     env.cycle()
     assert any("принят" in t for t in env.tg.texts(CHAT))             # карточка пришла, не дожидаясь окон
     assert len(got) == 1                                              # бюджет 0 -> за цикл одно окно
+
+
+# ---------------- пирамидинг, паузы и обратная совместимость конфигов ----------------
+PYR = {"pyramid_enabled": True, "pyramid_max": 2, "pyramid_pct": 5, "trade_pct": 20}
+
+
+def _pyr_config(extra=None):
+    cfg = json.loads(json.dumps(UI_CONFIG))
+    cfg["params"].pop("bogus")
+    cfg["params"] |= PYR | (extra or {})
+    return cfg
+
+
+def _signals_text(env):
+    return [t for t in env.tg.texts(CHAT) if "План сделки" in t]
+
+
+def test_pyramid_adds_are_announced_as_adds_with_limits_inside_candles(env):
+    env.handle_update(msg(json.dumps(_pyr_config())))
+    env.cycle()
+    env.tg.sent.clear()
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 5), 11)                    # серия из 5 отчётов -> события на 2-м ... 5-м
+    env.now["t"] = (start + 5 * H // 2) / 1000
+    env.cycle()
+    got = _signals_text(env)
+    assert len(got) == 3                                             # вход + 2 добора; четвёртое подтверждение — «максимум доборов»
+    assert "ДОБОР" not in got[0] and "ДОБОР #1" in got[1] and "ДОБОР #2" in got[2]
+    assert "20%" in got[0] and "5%" in got[1] and "5%" in got[2]       # объём первой ноги и доборов по их долям депозита
+    assert env.db.list_configs(env.alice["id"])[0]["alerts"] == 3
+
+
+def test_pyramid_beyond_candles_and_gap(env):
+    env.handle_update(msg(json.dumps(_pyr_config({"pyramid_gap_h": 1}))))
+    env.cycle()
+    env.tg.sent.clear()
+    candle_end = backtest.read_cache(backtest.cache_path("binanceusdm", "BTC/USDT:USDT", "1m", str(env.s.cache_dir)))[-1][0]
+    late = candle_end + 3 * H                                        # свечей входа ещё нет
+    append_reports(env.hist, LONG(late, 5), 11)
+    env.now["t"] = (late + 3 * H) / 1000
+    env.cycle()
+    got = _signals_text(env)
+    assert len(got) == 2 and "ДОБОР" not in got[0] and "ДОБОР #1" in got[1]       # события через 30 мин: часовая пауза пропускает каждое второе
+
+
+def test_no_pyramid_means_old_behavior(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()
+    env.tg.sent.clear()
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 5), 11)
+    env.now["t"] = (start + 5 * H // 2) / 1000
+    env.cycle()
+    assert len(_signals_text(env)) == 1 and "ДОБОР" not in _signals_text(env)[0]
+
+
+def test_old_stored_config_stays_off_even_if_env_defaults_enable_new_features(env):
+    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items()
+           if k not in ("pyramid_enabled", "pyramid_max", "pyramid_pct", "pyramid_gap_h", "signal_gap_h", "sl_hold_strong")}      # как сохранён до обновления
+    env.s.defaults.update(pyramid_enabled=True, signal_gap_h=5, sl_hold_strong=True)                                              # а в .env включили
+    res = env.engine.evaluate(old)
+    assert res["params"]["pyramid_enabled"] is False and res["params"]["signal_gap_h"] == 0 and res["params"]["sl_hold_strong"] is False
+    new, _ = validate(UI_CONFIG["params"], env.s.defaults)                                                                         # новый импорт фиксирует значения явно
+    assert new["pyramid_enabled"] is True and new["signal_gap_h"] == 5
+    cfg, _ = env.db.add_config(env.alice["id"], "Старый", old)
+    env.cycle()
+    assert "принят" in env.tg.texts(CHAT)[-1] and "пирамидинг" not in env.tg.texts(CHAT)[-1].lower()

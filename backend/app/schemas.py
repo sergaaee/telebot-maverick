@@ -41,6 +41,13 @@ class BacktestParams(BaseModel):
     liq_pct: Optional[float] = Field(None, ge=0, le=100)
     date_from: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     date_to: Optional[str] = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    # пирамидинг, паузы между сигналами, «стоп-лосс не ставить, пока метрики выше порогов входа»
+    pyramid_enabled: Optional[bool] = None
+    pyramid_max: Optional[int] = Field(None, ge=1, le=20, description="максимум доборов за позицию")
+    pyramid_pct: Optional[float] = Field(None, gt=0, le=100, description="размер каждого добора, % депозита")
+    pyramid_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между доборами")
+    signal_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между открытиями позиций")
+    sl_hold_strong: Optional[bool] = None
     # торговля только по тренду (EMA на таймфрейме trend_tf)
     trend_enabled: Optional[bool] = None
     trend_emas: Optional[list[Literal[20, 50, 100, 200]]] = Field(None, min_length=1, max_length=4)

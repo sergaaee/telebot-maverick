@@ -8,6 +8,11 @@ from app.schemas import BacktestParams
 from app.service import ParamError
 
 
+# Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
+# чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
+LEGACY_OFF = {"pyramid_enabled": False, "signal_gap_h": 0.0, "sl_hold_strong": False}
+
+
 class EvalError(RuntimeError):
     pass
 
@@ -66,7 +71,7 @@ class Engine:
     # ---------- расчёт ----------
     def evaluate(self, params):
         try:
-            return service.run_backtest(self.store, self.s.defaults, BacktestParams(**params), available_fn=(self.markets.symbols if self.markets else None))
+            return service.run_backtest(self.store, self.s.defaults, BacktestParams(**{**LEGACY_OFF, **params}), available_fn=(self.markets.symbols if self.markets else None))
         except (ParamError, FileNotFoundError) as e:
             raise EvalError(str(e)) from None
 
@@ -89,33 +94,60 @@ class Engine:
         return out
 
     @staticmethod
+    def pyramid_limit(p):
+        """Сколько доборов реально разрешено (как в сервисе: первая нога + доборы не больше 100% депозита)."""
+        if not p.get("pyramid_enabled"):
+            return 0
+        room = int((100 - p["trade_pct"]) // p["pyramid_pct"])
+        return max(0, min(p["pyramid_max"], room))
+
+    @staticmethod
     def new_signals(result, last_ts):
-        """Сигналы после last_ts, по которым стратегия ОТКРЫЛА БЫ новую позицию (повторные подтверждения той же серии, пока позиция
-        открыта, сигналами не считаются). Внутри диапазона свечей это `taken` из бэктеста; свежие сигналы, для которых свечи входа ещё
-        нет, определяются по состоянию последней сделки и порядку самих сигналов. Отсечённые фильтром тренда пропускаются."""
+        """Сигналы после last_ts, по которым стратегия ОТКРЫЛА БЫ новую позицию или (при пирамидинге) сделала бы ДОБОР. Повторные подтверждения
+        той же серии, пока позиция открыта и доборы не разрешены, сигналами не считаются. Внутри диапазона свечей это `taken` из бэктеста;
+        свежие сигналы, для которых свечи входа ещё нет, определяются по состоянию позиции на конец данных и порядку самих сигналов
+        (паузы, лимит и интервал доборов учитываются так же, как в расчёте). Отсечённые фильтром тренда пропускаются.
+        У возвращаемого сигнала есть `pyramid` (добор или нет) и `leg` (номер ноги)."""
+        p = result["params"]
         candles_last = result["range"]["candles_last_ts"]
         trades = result["trades"]
-        # состояние позиции на момент конца свечей
-        cur_side = None
+        by_signal = {t["signal_ts"]: t for t in trades}
+        max_adds = Engine.pyramid_limit(p)
+        gap_sig = (p.get("signal_gap_h") or 0) * 3.6e6
+        gap_pyr = (p.get("pyramid_gap_h") or 0) * 3.6e6
+        # состояние на конец свечей: какая позиция ещё открыта (ноги с причиной OPEN), сколько в ней доборов и когда открывалась
+        open_side = next((t["side"] for t in trades if t["reason"] == "OPEN"), None)
+        group = [t for t in trades if t.get("group") == trades[-1].get("group")] if trades else []
+        adds = max((t.get("leg", 1) for t in group), default=1) - 1
+        last_open_ts = min((t["entry_ts"] for t in group), default=None)
+        last_leg_ts = max((t["entry_ts"] for t in group), default=None)
         cooldown_until = 0
-        if trades:
-            lt = trades[-1]
-            if lt["reason"] == "OPEN":
-                cur_side = lt["side"]
-            elif lt["reason"] == "SL" and result["params"].get("cooldown_h"):
-                cooldown_until = lt["exit_ts"] + result["params"]["cooldown_h"] * 3.6e6
+        if group and p.get("cooldown_h"):
+            last = max(group, key=lambda t: t["exit_ts"])
+            if last["reason"] == "SL":
+                cooldown_until = last["exit_ts"] + p["cooldown_h"] * 3.6e6
         out = []
         for s in result["last_signals"]:
             if s["trend_blocked"] or s["ts"] <= last_ts:
                 continue
             if s["ts"] <= candles_last:
                 if s["taken"]:
-                    out.append(s)
+                    t = by_signal.get(s["ts"], {})
+                    out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid"))})
                 continue
-            if s["ts"] < cooldown_until or cur_side == s["side"]:
+            if open_side == s["side"]:                               # позиция открыта в ту же сторону: добор или пропуск
+                if adds >= max_adds or (gap_pyr and last_leg_ts is not None and s["ts"] < last_leg_ts + gap_pyr):
+                    continue
+                adds += 1
+                last_leg_ts = s["ts"]
+                out.append({**s, "leg": adds + 1, "pyramid": True})
                 continue
-            cur_side = s["side"]
-            out.append(s)
+            if open_side is None and s["ts"] < cooldown_until:      # пауза после стопа (только когда позиции нет)
+                continue
+            if gap_sig and last_open_ts is not None and s["ts"] < last_open_ts + gap_sig:
+                continue
+            open_side, adds, last_open_ts, last_leg_ts = s["side"], 0, s["ts"], s["ts"]
+            out.append({**s, "leg": 1, "pyramid": False})
         return out
 
     # ---------- план сделки ----------

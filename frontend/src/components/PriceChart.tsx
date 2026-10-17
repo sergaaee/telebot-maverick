@@ -91,7 +91,7 @@ export default function PriceChart(props: Props) {
           position: long ? 'belowBar' : 'aboveBar',
           shape: long ? 'arrowUp' : 'arrowDown',
           color: long ? COLORS.up : COLORS.down,
-          text: labels ? `${long ? 'L' : 'S'}${tr.n}` : '',
+          text: labels ? (tr.pyramid ? `+${(tr.leg ?? 2) - 1}` : `${long ? 'L' : 'S'}${tr.n}`) : '',
           size: 1.4,
         });
       // каждое исполнение (частичные тейки и финальное закрытие) — свой маркер

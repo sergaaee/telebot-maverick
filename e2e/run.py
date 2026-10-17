@@ -359,7 +359,7 @@ def scenario(pg, base, state_url):
     check("пропущенные сигналы объяснены причинами", "нет бессрочного USDT-контракта" in reasons and "нужно скачать свечи" in reasons, reasons[:200])
     n_pending = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({top_enabled: true})}).then(r => r.json())""")["top"]["pending"]
     check("API: ждут только TIA и ARB, не WBETH", sorted({i["symbol"] for i in n_pending["items"]}) == ["ARB/USDT:USDT", "TIA/USDT:USDT"], str(n_pending["symbols"]))
-    pg.locator(".top-pending button", has_text="Скачать свечи").click(); pg.wait_for_selector(".toast", timeout=8000); pg.wait_for_timeout(300)
+    pg.locator(".top-pending button", has_text="Скачать свечи").click(); pg.wait_for_selector(".toast:has-text('скачиваются в фоне')", timeout=8000); pg.wait_for_timeout(300)
     check("после нажатия: сообщение о фоновой загрузке и ход в шапке", any("скачиваются в фоне" in x for x in pg.locator(".toast").all_inner_texts()) and pg.locator(".chip-job", has_text="Топ-коины").count() == 1,
           f"{pg.locator('.toast').all_inner_texts()} chips={pg.locator('.chip-job').all_inner_texts()}")
     pg.wait_for_selector(".toast-success", timeout=40000)
@@ -495,6 +495,47 @@ def scenario(pg, base, state_url):
     check("после расчёта анимация исчезла, кнопка снова активна", pg.locator(".progress-bar.on").count() == 0 and not pg.locator("button.run").is_disabled()
           and pg.locator(".app").get_attribute("aria-busy") == "false" and pg.locator("button.run").inner_text() == "Запустить")
     pg.unroute("**/api/backtest")
+
+    # --- пирамидинг, паузы, «стоп не ставить, пока метрики сильны»
+    sec = pg.get_by_role("button", name="Пирамидинг и паузы")
+    if "▸" in sec.inner_text():
+        sec.click()
+    check("секция «Пирамидинг и паузы» есть, пауза между сигналами с «?»", field(pg, "Пауза между сигналами").locator(".help").count() == 1)
+    check("по умолчанию пирамидинг выключен, доборов нет", not field(pg, "пирамидинг (доборы в позицию)").locator("input").is_checked() and pg.locator(".tag-add").count() == 0
+          and pg.locator(".card-label", has_text="Позиций / доборов").count() == 0)
+    field(pg, "пирамидинг (доборы в позицию)").locator("input").check()
+    check("у новых параметров есть «?»", all(field(pg, l).locator(".help").count() == 1 for l in ("Максимум доборов", "Размер добора", "Пауза между доборами"))
+          and field(pg, "не ставить SL").locator(".help").count() == 1)
+    num(pg, "Максимум доборов").fill("2"); num(pg, "Размер добора").fill("5")
+    field(pg, "не ставить SL").locator("input").check()
+    check("при «SL после остывания» показано предупреждение о неограниченном убытке", "не ограничен" in pg.locator("aside.params").inner_text())
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("в статистике появились позиции/доборы и причины пропусков", pg.locator(".card-label", has_text="Позиций / доборов").count() == 1
+          and pg.locator("[data-testid=skipped-reasons] li").count() >= 1, pg.locator("[data-testid=skipped-reasons]").inner_text()[:120] if pg.locator("[data-testid=skipped-reasons]").count() else "нет блока")
+    check("в таблице сделок доборы помечены", pg.locator(".tag-add").count() > 0)
+    api_p = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({pyramid_enabled: true, pyramid_max: 2, pyramid_pct: 5, trade_pct: 10, compound: false, deposit: 10000, leverage: 1})}).then(r => r.json())""")
+    legs = api_p["trades"]
+    first_leg = next(t for t in legs if t["leg"] == 1)
+    one_add = next(t for t in legs if t["leg"] == 2 and t["group"] == first_leg["group"]) if any(t["leg"] == 2 and t["group"] == first_leg["group"] for t in legs) else next(t for t in legs if t["leg"] == 2)
+    check("API: добор берёт 5% депозита, вход — 10%; число доборов ограничено", abs(first_leg["notional"] - 1000) < 1e-6 and abs(one_add["notional"] - 500) < 1e-6
+          and max(t["leg"] for t in legs) <= 3 and api_p["stats"]["total"]["adds"] > 0)
+    gap = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({signal_gap_h: 24, pyramid_gap_h: 24, pyramid_enabled: true})}).then(r => r.json())""")
+    check("API: паузы дают причины пропуска", "пауза между сигналами" in gap["skipped_reasons"] or "пауза между доборами" in gap["skipped_reasons"], str(gap["skipped_reasons"]))
+    # конфиг: новые поля уходят в файл; старый файл без них ВЫКЛЮЧАЕТ возможности
+    with pg.expect_download() as dl2:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg2 = _json.loads(Path(dl2.value.path()).read_text(encoding="utf-8"))
+    check("в скачанном конфиге есть новые поля", cfg2["params"]["pyramid_enabled"] is True and cfg2["params"]["pyramid_max"] == 2 and cfg2["params"]["sl_hold_strong"] is True)
+    for k in ("pyramid_enabled", "pyramid_max", "pyramid_pct", "pyramid_gap_h", "signal_gap_h", "sl_hold_strong"):
+        cfg2["params"].pop(k)
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg2))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    sec = pg.get_by_role("button", name="Пирамидинг и паузы")
+    if "▸" in sec.inner_text():
+        sec.click()
+    check("старый конфиг без новых полей: пирамидинг и SL-режим выключены, пауза 0", not field(pg, "пирамидинг (доборы в позицию)").locator("input").is_checked()
+          and not field(pg, "не ставить SL").locator("input").is_checked() and num(pg, "Пауза между сигналами").input_value() == "0" and pg.locator(".tag-add").count() == 0)
 
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля

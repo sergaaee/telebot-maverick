@@ -14,10 +14,11 @@ import json
 import os
 import shutil
 import time
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
 
 from .entries import attach_liq, entries, load_signals
+from .signal_parser import should_long, should_short
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 CACHE_DIR = os.getenv("CACHE_DIR") or os.path.join(REPO_ROOT, "data")  # не зависит от папки запуска
@@ -259,7 +260,7 @@ def normalize_tps(tps):
     return [(p, s / 100) for p, s in levels]
 
 
-def _scan(candles, i, d, entry, tps, sl, slip, be):
+def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None):
     """Ход позиции, открытой на open свечи i. tps: [(цена, доля)]. Возвращает события [(idx, цена, доля, метка)],
     метки: TP1..TP3, SL, BE (стоп в безубытке), OPEN (данные кончились).
 
@@ -267,12 +268,16 @@ def _scan(candles, i, d, entry, tps, sl, slip, be):
       1. сначала проверяется действующий стоп (SL, а после первого тейка при be — вход): если задет, остаток закрыт по нему;
       2. затем по порядку исполняются тейки, до которых дошла цена (при гэпе — по цене открытия);
       3. если в этой свече исполнился первый тейк и стоп перенесён в безубыток, а цена также коснулась входа,
-         считаем, что возврат к входу был после тейка: остаток закрыт в безубытке."""
+         считаем, что возврат к входу был после тейка: остаток закрыт в безубытке.
+
+    hold(ts_свечи_мс) -> bool (необязательно): пока истинно (метрики всё ещё удовлетворяют условию входа), СТОП-ЛОСС не действует; как только
+    стало ложно, он действует с этой свечи (если цена уже за стопом — выход по её open). Стоп в безубытке после TP1 это не касается."""
     stop, stop_label = sl, "SL"
     remaining, k_tp, events = 1.0, 0, []
     for k in range(i, len(candles)):
         _, o, h, l, _ = candles[k]
-        if (l <= stop) if d == 1 else (h >= stop):
+        stop_on = not (hold is not None and stop_label == "SL" and hold(candles[k][0]))
+        if stop_on and ((l <= stop) if d == 1 else (h >= stop)):
             px = min(stop, o) * (1 - slip) if d == 1 else max(stop, o) * (1 + slip)
             events.append((k, px, remaining, stop_label))
             return events
@@ -330,42 +335,97 @@ def apply_only(local_min, scalp_min, short, only):
     return local_min, scalp_min, short
 
 
-def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None):
-    """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам: одна позиция одновременно, сигнал в ту же сторону
-    игнорируется, в противоположную — разворот. levels — результат normalize_tps. notional (USD) задаёт размер позиции в долларах
-    вместо size (в единицах актива)."""
+def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None,
+               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None):
+    """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам. levels — результат normalize_tps. notional (USD) задаёт размер
+    позиции в долларах вместо size (в единицах актива).
+
+    Позиция — группа «ног» (legs): первая нога открывается по сигналу, остальные — доборы (пирамидинг). У каждой ноги свои вход, тейки и стоп
+    от её собственной цены входа; ноги закрываются независимо. Без пирамидинга нога всегда одна (одна позиция одновременно).
+      сигнал в ту же сторону, пока позиция открыта: игнорируется, а при pyramid={"max": N, "gap_h": H} — добор (не больше N доборов за позицию
+        и не чаще, чем раз в H часов после открытия последней ноги);
+      сигнал в противоположную сторону: разворот — все открытые ноги закрываются по open свечи входа (исполненные тейки остаются);
+      cooldown_h — пауза после стопа; signal_gap_h — минимум часов между открытиями позиций (включая развороты);
+      hold(d, ts_мс) -> bool — «стоп-лосс не ставить, пока метрики сильны» (см. _scan);
+      skipped — список, в который дописываются (ts, сторона, причина) пропущенных сигналов."""
     ts = [c[0] for c in candles]
     n = len(candles)
-    trades, cur = [], None
+    trades, open_legs = [], []
+    group, last_group, last_open_ts, last_leg_ts, adds = 0, [], None, None, 0
+    levels_shares = [s for _, s in levels]
+    be = bool(be_after_tp1 and len(levels) > 1)
+
+    def skip(sts, side, reason):
+        if skipped is not None:
+            skipped.append((sts, side, reason))
+
+    def open_leg(sts, d, side, i, leg_no):
+        entry = candles[i][1] * (1 + d * slip)
+        prices = [entry * (1 + d * p / 100) for p, _ in levels]
+        sl = entry * (1 - d * sl_pct / 100)
+        leg = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": prices[-1], "tps": prices,
+               "tp_shares": levels_shares, "sl": sl, "be": be, "leg": leg_no, "group": group, "pyramid": leg_no > 1}
+        hold_d = (lambda t: hold(d, t)) if hold else None
+        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d), candles, fee, size, notional)
+        trades.append(leg)
+        open_legs.append(leg)
+        return leg
+
     for sts, d in events:
         side = "long" if d == 1 else "short"
         i = bisect_left(ts, sts)
         if i >= n:
-            break
-        if cur is not None and cur["_j"] < i:
-            if cooldown_h and cur["reason"] == "SL" and sts < cur["exit_ts"] + cooldown_h * 3.6e6:
-                continue  # пауза после стопа
-            cur = None  # закрылась сама по SL/TP
-        if cur is not None:
-            if cur["side"] == side:
-                continue  # такая позиция уже открыта
-            # разворот на open свечи входа: уже исполненные тейки остаются, остаток закрывается по рынку
+            skip(sts, side, "нет свечи входа")
+            continue
+        still = [leg for leg in open_legs if leg["_j"] >= i]
+        if len(still) != len(open_legs):
+            open_legs[:] = still
+        if not open_legs:
+            # позиции нет (закрылась сама по SL/TP): паузы перед новым открытием
+            last = max(last_group, key=lambda t: t["exit_ts"]) if last_group else None
+            if cooldown_h and last and last["reason"] == "SL" and sts < last["exit_ts"] + cooldown_h * 3.6e6:
+                skip(sts, side, "пауза после стопа")
+                continue
+            if signal_gap_h and last_open_ts is not None and sts < last_open_ts + signal_gap_h * 3.6e6:
+                skip(sts, side, "пауза между сигналами")
+                continue
+        elif open_legs[0]["side"] == side:
+            if not pyramid:
+                skip(sts, side, "позиция уже открыта")
+                continue
+            if adds >= pyramid["max"]:
+                skip(sts, side, "достигнут максимум доборов")
+                continue
+            if pyramid.get("gap_h") and sts < last_leg_ts + pyramid["gap_h"] * 3.6e6:
+                skip(sts, side, "пауза между доборами")
+                continue
+            adds += 1
+            open_leg(sts, d, side, i, adds + 1)
+            last_leg_ts = candles[i][0]
+            last_group.append(trades[-1])
+            continue
+        else:
+            if signal_gap_h and last_open_ts is not None and sts < last_open_ts + signal_gap_h * 3.6e6:
+                skip(sts, side, "пауза между сигналами")
+                continue
+            # разворот на open свечи входа: исполненные тейки остаются, остаток каждой ноги закрывается по рынку
             o = candles[i][1]
-            kept = [e for e in cur["_events"] if e[0] < i]
-            rest = 1.0 - sum(e[2] for e in kept)
-            _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size, notional)
-        entry = candles[i][1] * (1 + d * slip)
-        prices = [entry * (1 + d * p / 100) for p, _ in levels]
-        sl = entry * (1 - d * sl_pct / 100)
-        cur = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": prices[-1], "tps": prices,
-               "tp_shares": [s for _, s in levels], "sl": sl, "be": bool(be_after_tp1 and len(levels) > 1)}
-        _finalize(cur, _scan(candles, i, d, entry, list(zip(prices, [s for _, s in levels])), sl, slip, cur["be"]), candles, fee, size, notional)
-        trades.append(cur)
+            for cur in open_legs:
+                kept = [e for e in cur["_events"] if e[0] < i]
+                rest = 1.0 - sum(e[2] for e in kept)
+                _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size, notional)
+            open_legs.clear()
+        group += 1
+        adds = 0
+        leg = open_leg(sts, d, side, i, 1)
+        last_group = [leg]
+        last_open_ts = last_leg_ts = leg["entry_ts"]
     return trades
 
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
-             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False, event_filter=None):
+             short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False, event_filter=None,
+             pyramid=None, signal_gap_h=0.0, sl_hold_strong=False, skipped=None):
     """short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
     tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
     be_after_tp1 — после первого тейка переносить стоп в цену входа.
@@ -376,7 +436,22 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
     events = entries(signals, local_min, scalp_min, confirm, short, liq, cool)
     if event_filter:
         events = [e for e in events if event_filter(*e)]
-    return run_events(events, candles, levels, sl_pct, fee, size, slip, cooldown_h, be_after_tp1)
+    hold = strong_checker(signals, local_min, scalp_min, short) if sl_hold_strong else None
+    return run_events(events, candles, levels, sl_pct, fee, size, slip, cooldown_h, be_after_tp1,
+                      pyramid=pyramid, signal_gap_h=signal_gap_h, hold=hold, skipped=skipped)
+
+
+def strong_checker(signals, local_min, scalp_min, short):
+    """hold(d, ts_мс) -> выполняется ли СЕЙЧАС условие входа по последнему отчёту не позже ts_мс (для лонга — пороги лонга, для шорта — шорта).
+    Пороги уже учитывают режим «только Local / только Scalp» (apply_only): лишняя метрика не участвует. Нет отчёта — не сильны."""
+    rep_ts = [s[0] for s in signals]
+    long_ok = [should_long({"local": s[1], "scalp": s[2]}, local_min, scalp_min) for s in signals]
+    short_ok = [should_short({"local": s[1], "scalp": s[2]}, *short) if short is not None else False for s in signals]
+
+    def hold(d, t):
+        k = bisect_right(rep_ts, t) - 1
+        return k >= 0 and (long_ok if d == 1 else short_ok)[k]
+    return hold
 
 
 def stats(trades):
@@ -386,7 +461,7 @@ def stats(trades):
     wins = [t["pnl_usd"] for t in trades if t["pnl_usd"] > 0]
     losses = [-t["pnl_usd"] for t in trades if t["pnl_usd"] <= 0]
     eq = peak = dd = 0.0
-    for t in trades:
+    for t in sorted(trades, key=lambda x: (x.get("exit_ts", 0), x.get("entry_ts", 0))):      # с доборами ноги перекрываются: капитал растёт по времени закрытия
         eq += t["pnl_usd"]
         peak = max(peak, eq)
         dd = max(dd, peak - eq)
