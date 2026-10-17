@@ -285,6 +285,10 @@ class Database:
         want = name.strip().casefold()
         return next((r for r in c.execute("SELECT * FROM configs WHERE user_id=?", (user_id,)) if r["name"].casefold() == want), None)
 
+    def get_config(self, cfg_id):
+        with self.conn() as c:
+            return self._cfg(c.execute("SELECT * FROM configs WHERE id=?", (cfg_id,)).fetchone())
+
     def find_config(self, user_id, ref):
         """Конфиг пользователя по номеру (#3, 3) или имени. Чужие конфиги недоступны."""
         ref = (ref or "").strip().lstrip("#")
