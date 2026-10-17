@@ -1,0 +1,15 @@
+# Режим HTTP (сертификата ещё нет или доступ по IP). После получения сертификата перезапустите web — включится HTTPS.
+server_tokens off;
+limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=api:10m rate=30r/s;
+
+server {
+    listen 80 default_server;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    include /etc/nginx/snippets/app-locations.conf;
+}

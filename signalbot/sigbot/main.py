@@ -1,12 +1,15 @@
 import asyncio
 import logging
 import os
+import time
 
 from app.config import ROOT, load_settings
 from app.data import DataStore
 from app.db import Database
 from app.history_sync import HistorySync
 from app.markets import MarketsCache, ccxt_swap_symbols
+
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 
 from .bot import SignalService
 from .config import load_bot_settings
@@ -41,12 +44,23 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.chdir(ROOT)
     b = load_bot_settings()
+    interactive = os.isatty(0)                       # в контейнере (сервер) вместо выхода ждём настройки, чтобы не уходить в цикл перезапусков
     if not b.token:
-        raise SystemExit("Не задан SIGNALBOT_TOKEN (токен бота от @BotFather) в signalbot/.env")
+        msg = "Не задан SIGNALBOT_TOKEN (токен бота от @BotFather) в signalbot/.env"
+        if interactive:
+            raise SystemExit(msg)
+        log.error("%s — бот ждёт; задайте токен и перезапустите контейнер", msg)
+        while True:
+            time.sleep(3600)
     s = load_settings()
     db = Database(s.db_file)
     if db.user_count() == 0:
-        raise SystemExit("В базе нет пользователей. Создайте первого: python backend/cli.py user add ЛОГИН (данные прежней версии перенесутся автоматически)")
+        msg = "В базе нет пользователей. Создайте первого: python backend/cli.py user add ЛОГИН (данные прежней версии перенесутся автоматически)"
+        if interactive:
+            raise SystemExit(msg)
+        log.warning("%s — жду появления пользователя", msg)
+        while db.user_count() == 0:
+            time.sleep(30)
     store = DataStore(s)
     markets = MarketsCache(lambda: ccxt_swap_symbols(s.exchange))
     engine = Engine(s, store, markets, make_price_fn(s.exchange) if b.live_price else None)
@@ -56,10 +70,18 @@ def main():
         sync.start()
         log.info("подгрузка сообщений ботов каждые %g мин", b.sync_min)
     service = SignalService(s, None, db, engine, b, sync)
-    bot = make_bot(b.token)
-    dp = build_dispatcher(service)
     log.info("запущен; пользователей: %d, привязано к Telegram: %d", db.user_count(), sum(1 for u in db.list_users() if u["telegram_id"]))
-    try:
-        asyncio.run(run(service, bot, dp, b.poll_sec))
-    except KeyboardInterrupt:
-        service.stop()
+    while True:
+        bot = make_bot(b.token)
+        dp = build_dispatcher(service)
+        try:
+            asyncio.run(run(service, bot, dp, b.poll_sec))
+            return
+        except KeyboardInterrupt:
+            service.stop()
+            return
+        except TelegramUnauthorizedError:
+            raise SystemExit("Telegram не принял SIGNALBOT_TOKEN — проверьте токен у @BotFather")
+        except TelegramNetworkError as e:              # нет связи с api.telegram.org: пробуем снова, а не падаем
+            log.error("Telegram недоступен (%s) — повтор через 15 с", str(e)[:150])
+            time.sleep(15)

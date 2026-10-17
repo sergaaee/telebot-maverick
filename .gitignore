@@ -15,3 +15,5 @@ frontend/.env
 frontend/.env.local
 .venv/
 signalbot/.env
+backups/
+.env.server

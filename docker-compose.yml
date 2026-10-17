@@ -1,0 +1,84 @@
+# Развёртывание на VPS:  cp .env.server.example .env  &&  docker compose up -d --build
+# Сервисы: backend (FastAPI), signalbot (Telegram-бот сигналов), web (nginx + собранный фронтенд), certbot (по профилю tls).
+# Данные (свечи, история сообщений, база пользователей, сессия Telegram) — в томе data, общие для backend и бота.
+name: maverick
+
+x-app-env: &app-env
+  env_file: .env
+  environment:
+    TZ: UTC
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: maverick-app:latest
+    restart: unless-stopped
+    <<: *app-env
+    volumes:
+      - data:/app/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: &logging
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
+
+  signalbot:
+    image: maverick-app:latest
+    restart: unless-stopped
+    <<: *app-env
+    working_dir: /app/signalbot
+    command: ["python", "run.py"]
+    volumes:
+      - data:/app/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging: *logging
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-_}
+      FORCE_HTTP: ${FORCE_HTTP:-0}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - certs:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  # Выпуск и продление сертификата Let's Encrypt (см. deploy/get-cert.sh); запускается только с профилем tls
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["tls"]
+    restart: unless-stopped
+    volumes:
+      - certs:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+    logging: *logging
+
+volumes:
+  data:
+  certs:
+  certbot-www:
