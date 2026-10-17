@@ -314,6 +314,8 @@ export interface SyncStatus {
   interval_min: number;
   next_run: number | null;
   sources: SyncSource[];
+  /** подгрузка свечей по расписанию */
+  candles?: { enabled: boolean; reason: string | null; interval_min: number; next_run: number | null; symbols: { symbol: string; status: string; last_ok: number | null; error: string | null }[] };
 }
 
 export interface AddAssetResult {

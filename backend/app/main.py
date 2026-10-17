@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from .config import Settings, load_settings
 from .core import backtest
 from .data import DataStore
+from .candle_sync import CandleSync
 from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
@@ -21,7 +22,7 @@ class AssetIn(BaseModel):
     symbol: str = Field(min_length=1, max_length=40, description="актив: ETH, ETHUSDT, ETH/USDT или ETH/USDT:USDT")
 
 
-def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None" = None, runner=None, top_runner=None, sync: "HistorySync | None" = None) -> FastAPI:
+def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None" = None, runner=None, top_runner=None, sync: "HistorySync | None" = None, candle_sync: "CandleSync | None" = None) -> FastAPI:
     """markets, runner и top_runner подменяются в тестах (без обращения к бирже)."""
     s = settings or load_settings()
     store = DataStore(s)
@@ -65,11 +66,24 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         sync = HistorySync(list(s.sources.values()), s.sync_min, enabled=s.sync_enabled,
                            disabled_reason=None if s.sync_enabled else "выключено: нет TG_API_ID/TG_API_HASH в .env (или HISTORY_SYNC=false)")
 
+    if candle_sync is None:
+        def sync_symbols():
+            return [x for x in (s.candles_sync_symbols or s.symbols) if x in store.symbols()]
+
+        def fetch_tail(symbol):
+            backtest.fetch_candles(s.exchange, symbol, s.candle_tf, store.first_signal_ts(), str(s.cache_dir))
+
+        candle_sync = CandleSync(sync_symbols, fetch_tail, s.candles_sync_min, enabled=s.candles_sync,
+                                 skip_fn=lambda sym: bool(jobs.active(sym, kind="candles")), on_updated=store.reload_candles,
+                                 disabled_reason="выключено (CANDLES_SYNC=false)")
+
     @asynccontextmanager
     async def lifespan(_app):
+        candle_sync.start()                # свечи: при запуске и затем каждые CANDLES_SYNC_MIN минут
         sync.start()                       # подгрузка при запуске сервера и затем каждые HISTORY_SYNC_MIN минут
         yield
         sync.stop()
+        candle_sync.stop()
 
     app = FastAPI(title="telebot-maverick backtest viewer", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["*"], allow_headers=["*"])
@@ -106,7 +120,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @app.get("/api/sync")
     def sync_status():
-        return sync.snapshot()
+        return {**sync.snapshot(), "candles": candle_sync.snapshot()}
 
     @app.post("/api/sync/run")
     def sync_run():

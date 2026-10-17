@@ -103,6 +103,9 @@ class Settings:
     cors_origins: list = field(default_factory=list)
     sync_enabled: bool = False       # подгрузка сообщений Telegram на сервере (нужны TG_API_ID/TG_API_HASH)
     sync_min: float = 32.0           # период подгрузки, минут
+    candles_sync: bool = True        # подгрузка свечей при запуске и по расписанию
+    candles_sync_min: float = 5.0
+    candles_sync_symbols: list = field(default_factory=list)   # какие активы (пусто — все из SYMBOLS)
     defaults: dict = field(default_factory=dict)
 
 
@@ -155,6 +158,8 @@ def load_settings() -> Settings:
         host=_opt("HOST") or "127.0.0.1",
         port=_num("PORT", 8000, int),
         sync_enabled=_bool("HISTORY_SYNC", bool(_opt("TG_API_ID") and _opt("TG_API_HASH"))), sync_min=_num("HISTORY_SYNC_MIN", 32.0),
+        candles_sync=_bool("CANDLES_SYNC", True), candles_sync_min=_num("CANDLES_SYNC_MIN", 5.0),
+        candles_sync_symbols=[x.strip() for x in (_opt("CANDLES_SYNC_SYMBOLS") or "").split(",") if x.strip()],
         cors_origins=[o.strip() for o in (_opt("CORS_ORIGINS") or "").split(",") if o.strip()],
         defaults=defaults,
     )

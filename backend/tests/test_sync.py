@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import load_settings
+from app.candle_sync import CandleSync
 from app.history_sync import HistorySync
 from app.main import create_app
 from test_api import H, T0, _write_history
@@ -87,7 +88,7 @@ def test_api_latest_metrics(app_env):
 def test_api_sync_status_and_run(app_env):
     got = []
     sync = HistorySync([Src("default", "chat1", app_env / "history.csv")], 32, exporter=lambda p, c: got.append(c) or 2)
-    app = create_app(load_settings(), sync=sync)
+    app = create_app(load_settings(), sync=sync, candle_sync=CandleSync(lambda: [], lambda s: None, enabled=False, disabled_reason="тест"))
     with TestClient(app) as c:                                                  # lifespan: подгрузка стартует вместе с сервером
         end = time.time() + 5
         while not got and time.time() < end:
@@ -185,3 +186,51 @@ def test_export_incremental_and_atomic(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="не авторизована"):
         asyncio.run(export_history.main(out, "3217240841", interactive=False))
     assert len(list(csv.DictReader(open(out, encoding="utf-8-sig")))) == 3                               # файл не тронут
+
+
+# ---------------- подгрузка свечей ----------------
+def test_candle_sync_runs_at_start_and_by_schedule_and_survives_errors():
+    calls, updated = [], []
+
+    def fetch(sym):
+        calls.append(sym)
+        if sym == "BAD":
+            raise SystemExit("биржа не отвечает")
+
+    cs = CandleSync(lambda: ["BTC", "BAD", "ETH"], fetch, 0.02, skip_fn=lambda s: s == "ETH", on_updated=updated.append)      # 0.02 мин ≈ 1,2 с
+    cs.start()
+    end = time.time() + 6
+    while calls.count("BTC") < 2 and time.time() < end:
+        time.sleep(0.05)
+    cs.stop()
+    assert calls.count("BTC") >= 2                                     # сразу при запуске и затем по расписанию
+    snap = {x["symbol"]: x for x in cs.snapshot()["symbols"]}
+    assert snap["BTC"]["status"] == "ok" and snap["BAD"]["status"] == "error" and "не отвечает" in snap["BAD"]["error"]
+    assert "ETH" not in calls and updated.count("BTC") >= 2             # актив с ручной загрузкой пропущен, ошибка не остановила цикл
+    off = CandleSync(lambda: ["BTC"], fetch, enabled=False, disabled_reason="выкл")
+    off.start()
+    assert not off.trigger() and off.snapshot()["reason"] == "выкл"
+
+
+def test_api_candle_sync_default_symbols_and_status(app_env, monkeypatch):
+    fetched = []
+    monkeypatch.setattr("app.main.backtest.fetch_candles", lambda ex, sym, tf, since, cache_dir, progress=None: fetched.append(sym))
+    monkeypatch.setenv("SYMBOLS", "BTC/USDT:USDT,ETH/USDT:USDT")
+    monkeypatch.setenv("CANDLES_SYNC_SYMBOLS", "BTC/USDT:USDT")
+    off = HistorySync([], 32, enabled=False)
+    with TestClient(create_app(load_settings(), sync=off)) as c:
+        end = time.time() + 5
+        while not fetched and time.time() < end:
+            time.sleep(0.02)
+        assert fetched == ["BTC/USDT:USDT"]                                # только выбранный актив, при запуске сервера
+        j = c.get("/api/sync").json()["candles"]
+        assert j["enabled"] and j["interval_min"] == 5 and j["symbols"][0]["symbol"] == "BTC/USDT:USDT"
+
+
+def test_config_candle_sync_defaults(monkeypatch):
+    for k in ("CANDLES_SYNC", "CANDLES_SYNC_MIN", "CANDLES_SYNC_SYMBOLS"):
+        monkeypatch.setenv(k, "")
+    s = load_settings()
+    assert s.candles_sync and s.candles_sync_min == 5 and s.candles_sync_symbols == []
+    monkeypatch.setenv("CANDLES_SYNC", "false")
+    assert not load_settings().candles_sync

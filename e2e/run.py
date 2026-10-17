@@ -518,7 +518,7 @@ def main():
                    LOCAL_MIN="1.85", SCALP_MIN="1.25", CONFIRM="4", TP_PCT="6", SL_PCT="2", SIDE="both", ONLY="", COOL_DROP="",
                    COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0", FEE="0.0005", SLIPPAGE="0", ORDER_SIZE="0.1",
                    TOP_ENABLED="false", TOP_SIDES="long", TOP_TP_LEVELS="", TOP_TP_PCT="5", TOP_SL_PCT="3", TOP_SIZE_USD="100", TOP_FEE="0.0005",
-                   HISTORY_SYNC="false", TOP_SLIPPAGE="0", TOP_DAYS="3", TOP_MIN_VALUE="0", TOP_BE_AFTER_TP1="",
+                   HISTORY_SYNC="false", CANDLES_SYNC="false", TOP_SLIPPAGE="0", TOP_DAYS="3", TOP_MIN_VALUE="0", TOP_BE_AFTER_TP1="",
                    VITE_PROXY_TARGET=f"http://127.0.0.1:{bp}", VITE_PORT=str(fp))
         procs.append(subprocess.Popen([sys.executable, "-m", "uvicorn", "server:app", "--app-dir", str(ROOT / "e2e"), "--port", str(bp),
                                        "--log-level", "warning"], cwd=ROOT / "backend", env=env, start_new_session=True))

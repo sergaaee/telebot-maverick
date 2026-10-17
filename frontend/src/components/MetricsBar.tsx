@@ -49,6 +49,11 @@ export default function MetricsBar({ latest, sync, params, onSync }: Props) {
           </span>
         );
       })}
+      {sync?.candles?.enabled && sync.candles.symbols.length > 0 && (
+        <span className="muted" title={sync.candles.symbols.map((x) => `${x.symbol}: ${x.status}${x.error ? ' — ' + x.error : ''}`).join('\n')}>
+          свечи {sync.candles.symbols.some((x) => x.status === 'error') ? '⚠ ' : ''}обновлены {clock(Math.max(0, ...sync.candles.symbols.map((x) => x.last_ok ?? 0)))} UTC (каждые {Math.round(sync.candles.interval_min)} мин)
+        </span>
+      )}
       <span className="mb-sync">
         {sync?.enabled ? (
           <>
