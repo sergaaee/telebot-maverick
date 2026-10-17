@@ -76,7 +76,10 @@ def apply_sizing(trades, deposit, trade_pct, leverage, compound=True, pyramid_pc
         while pending and pending[0][0] <= t["entry_ts"]:
             bal += heapq.heappop(pending)[1]
         base = bal if compound else deposit            # простой процент: каждый раз доля от НАЧАЛЬНОГО депозита
-        pct = pyramid_pct if (t.get("leg", 1) > 1 and pyramid_pct) else trade_pct
+        if t.get("avg"):                                 # усреднённая позиция: одна сделка на вход + все доборы
+            pct = trade_pct + t.get("adds_n", 0) * (pyramid_pct or 0)
+        else:
+            pct = pyramid_pct if (t.get("leg", 1) > 1 and pyramid_pct) else trade_pct
         notional = (max(base, 0.0) if bal > 0 else 0.0) * pct / 100 * leverage
         t["margin"] = notional / leverage
         t["notional"] = notional
@@ -142,7 +145,7 @@ def _extra_stats(trades, span_ms, deposit=None):
         # сколько сделок дошли до первого / второго / третьего тейка
         "tp_reach": [sum(t["tp_hits"] >= k for t in trades) for k in (1, 2, 3)],
         "positions": len({t.get("group", i) for i, t in enumerate(trades)}),
-        "adds": sum(1 for t in trades if t.get("leg", 1) > 1),
+        "adds": sum(1 for t in trades if t.get("leg", 1) > 1) + sum(t.get("adds_n", 0) for t in trades),
     }
 
 
@@ -157,7 +160,7 @@ def _trade_out(n, t, rep):
         "local": r[1] if r else None, "scalp": r[2] if r else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
-    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid"):
+    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total"):
         if k in t:
             out[k] = t[k]
     return out
@@ -291,7 +294,8 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             raise ParamError(f"Пирамидинг: первая нога {eff['trade_pct']:g}% депозита, на добор ({eff['pyramid_pct']:g}%) места не остаётся")
         if room < eff["pyramid_max"]:
             warnings.append(f"Пирамидинг: {eff['trade_pct']:g}% + {eff['pyramid_max']} × {eff['pyramid_pct']:g}% больше депозита — доборов не больше {room}")
-        pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0}, eff["pyramid_pct"]
+        pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "avg": bool(eff.get("pyramid_avg")),
+                            "w0": eff["trade_pct"], "w": eff["pyramid_pct"]}, eff["pyramid_pct"]
     skipped = []
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, pyramid=pyramid,
                                signal_gap_h=eff.get("signal_gap_h") or 0.0, sl_hold_strong=bool(eff.get("sl_hold_strong")), skipped=skipped,
@@ -311,7 +315,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         blocked_ts = {e[0] for e in confirmed} - {e[0] for e in passed}
     else:
         blocked_ts = set()
-    taken = {t["signal_ts"] for t in trades}
+    taken = {t["signal_ts"] for t in trades} | {s_ for t in trades for s_ in t.get("add_signals", [])}
     limit = 5000
     why = {ts: reason for ts, _side, reason in skipped}
     for ts in blocked_ts:

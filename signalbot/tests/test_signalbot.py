@@ -522,3 +522,25 @@ def test_old_stored_config_stays_off_even_if_env_defaults_enable_new_features(en
     cfg, _ = env.db.add_config(env.alice["id"], "Старый", old)
     env.cycle()
     assert "принят" in env.tg.texts(CHAT)[-1] and "пирамидинг" not in env.tg.texts(CHAT)[-1].lower()
+
+
+def test_avg_pyramid_alerts_show_new_average_levels(env):
+    env.handle_update(msg(json.dumps(_pyr_config({"pyramid_avg": True}))))
+    env.cycle()
+    env.tg.sent.clear()
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 5), 11)
+    env.now["t"] = (start + 5 * H // 2) / 1000
+    env.cycle()
+    got = _signals_text(env)
+    assert len(got) == 3 and "ДОБОР" not in got[0] and "ДОБОР #1" in got[1] and "ДОБОР #2" in got[2]
+    assert "Усреднение" in got[1] and "Усреднение" in got[2]
+    assert "новая средняя" in got[2]                                            # у последнего добора известна итоговая средняя и уровни от неё
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    assert cfg["params"]["pyramid_avg"] is True and cfg["alerts"] == 3
+
+
+def test_avg_flag_missing_in_old_config_means_off(env):
+    old = {k: v for k, v in validate(_pyr_config()["params"], env.s.defaults)[0].items() if k != "pyramid_avg"}
+    env.s.defaults["pyramid_avg"] = True
+    assert env.engine.evaluate(old)["params"]["pyramid_avg"] is False

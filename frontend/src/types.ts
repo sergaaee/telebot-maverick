@@ -56,6 +56,8 @@ export interface Params {
   /** размер добора, % депозита */
   pyramid_pct: number;
   pyramid_gap_h: number;
+  /** доборы усредняют одну позицию: тейки и стоп считаются от новой средней цены входа */
+  pyramid_avg: boolean;
   /** минимум часов между открытиями позиций */
   signal_gap_h: number;
   /** стоп-лосс не действует, пока метрики удовлетворяют условию входа */
@@ -157,6 +159,11 @@ export interface Trade {
   leg?: number;
   group?: number;
   pyramid?: boolean;
+  /** усреднённая позиция: число доборов, первый вход (entry — средняя цена) и сами доборы */
+  avg?: boolean;
+  adds_n?: number;
+  entry_first?: number;
+  adds?: { ts: number; price: number; weight: number; signal_ts: number | null }[];
   /** только для сделок по топ-коинам */
   symbol?: string;
   coin?: string;

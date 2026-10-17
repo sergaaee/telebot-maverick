@@ -27,7 +27,7 @@ export default function TradesTable({ trades, selected, onSelect, top = false }:
               <td>{fmtPrice(t.entry)}</td>
               <td>{fmtTs(t.exit_ts)}</td>
               <td>{fmtPrice(t.exit)}</td>
-              <td><span className={`tag tag-${t.reason}`}>{t.reason}</span>{t.pyramid && <span className="tag tag-add" title="Добор в открытую позицию"> +{(t.leg ?? 2) - 1}</span>}</td>
+              <td><span className={`tag tag-${t.reason}`}>{t.reason}</span>{t.pyramid && <span className="tag tag-add" title="Добор в открытую позицию"> +{(t.leg ?? 2) - 1}</span>}{!!t.adds_n && <span className="tag tag-add" title={`Усреднение: доборов ${t.adds_n}, средняя цена входа ${fmtPrice(t.entry)} (первый вход ${fmtPrice(t.entry_first ?? t.entry)})`}> ×{t.adds_n + 1}</span>}</td>
               <td title={t.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}>
                 {t.tps.length > 1 ? `${t.tp_hits}/${t.tps.length}` : t.tp_hits ? '1/1' : '–'}
               </td>

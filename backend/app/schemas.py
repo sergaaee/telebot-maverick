@@ -45,6 +45,7 @@ class BacktestParams(BaseModel):
     pyramid_enabled: Optional[bool] = None
     pyramid_max: Optional[int] = Field(None, ge=1, le=20, description="максимум доборов за позицию")
     pyramid_pct: Optional[float] = Field(None, gt=0, le=100, description="размер каждого добора, % депозита")
+    pyramid_avg: Optional[bool] = Field(None, description="доборы усредняют одну позицию: тейки и стоп — от новой средней цены входа")
     pyramid_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между доборами")
     signal_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между открытиями позиций")
     sl_hold_strong: Optional[bool] = None

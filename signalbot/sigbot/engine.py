@@ -10,7 +10,7 @@ from app.service import ParamError
 
 # Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
 # чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
-LEGACY_OFF = {"pyramid_enabled": False, "signal_gap_h": 0.0, "sl_hold_strong": False}
+LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False}
 
 
 class EvalError(RuntimeError):
@@ -112,13 +112,18 @@ class Engine:
         candles_last = result["range"]["candles_last_ts"]
         trades = result["trades"]
         by_signal = {t["signal_ts"]: t for t in trades}
+        for t in trades:                                             # доборы усреднённой позиции: сигнал добора -> номер ноги и новая средняя
+            for k, a in enumerate(t.get("adds", [])[1:], 2):
+                sig_ts = a.get("signal_ts")
+                last_add = k - 1 == t.get("adds_n")
+                by_signal[sig_ts] = {"leg": k, "pyramid": True, **({"avg_entry": t["entry"], "avg_tps": t["tps"], "avg_sl": t["sl"]} if last_add else {})}
         max_adds = Engine.pyramid_limit(p)
         gap_sig = (p.get("signal_gap_h") or 0) * 3.6e6
         gap_pyr = (p.get("pyramid_gap_h") or 0) * 3.6e6
         # состояние на конец свечей: какая позиция ещё открыта (ноги с причиной OPEN), сколько в ней доборов и когда открывалась
         open_side = next((t["side"] for t in trades if t["reason"] == "OPEN"), None)
         group = [t for t in trades if t.get("group") == trades[-1].get("group")] if trades else []
-        adds = max((t.get("leg", 1) for t in group), default=1) - 1
+        adds = max((t.get("leg", 1) for t in group), default=1) - 1 + sum(t.get("adds_n", 0) for t in group)
         last_open_ts = min((t["entry_ts"] for t in group), default=None)
         last_leg_ts = max((t["entry_ts"] for t in group), default=None)
         cooldown_until = 0
@@ -133,7 +138,8 @@ class Engine:
             if s["ts"] <= candles_last:
                 if s["taken"]:
                     t = by_signal.get(s["ts"], {})
-                    out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid"))})
+                    out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid")),
+                                **{k: t[k] for k in ("avg_entry", "avg_tps", "avg_sl") if k in t}})
                 continue
             if open_side == s["side"]:                               # позиция открыта в ту же сторону: добор или пропуск
                 if adds >= max_adds or (gap_pyr and last_leg_ts is not None and s["ts"] < last_leg_ts + gap_pyr):

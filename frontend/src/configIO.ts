@@ -15,7 +15,7 @@ export function configFileName(p: Params): string {
 const NULLABLE = new Set(['only', 'liq_source', 'cool_drop', 'cool_declines', 'liq_hours', 'date_from', 'date_to']);
 
 /** Возможности, появившиеся позже: в старом конфиге их нет, и они ДОЛЖНЫ быть выключены (а не браться из умолчаний .env), чтобы результат не менялся. */
-export const LEGACY_OFF = { pyramid_enabled: false, signal_gap_h: 0, sl_hold_strong: false } as const;
+export const LEGACY_OFF = { pyramid_enabled: false, pyramid_avg: false, signal_gap_h: 0, sl_hold_strong: false } as const;
 
 const kind = (v: unknown) => (Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v);
 
