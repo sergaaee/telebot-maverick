@@ -15,11 +15,13 @@ class BacktestParams(BaseModel):
     source: Optional[str] = Field(None, max_length=40)
     liq_source: Optional[str] = Field(None, max_length=40)
     side: Optional[Literal["both", "long", "short"]] = None
-    only: Optional[Literal["local", "scalp"]] = None
+    only: Optional[Literal["local", "scalp", "global"]] = None
     local_min: Optional[float] = Field(None, ge=-10, le=10)
     scalp_min: Optional[float] = Field(None, ge=-10, le=10)
     short_local_max: Optional[float] = Field(None, ge=-10, le=10)
     short_scalp_max: Optional[float] = Field(None, ge=-10, le=10)
+    global_min: Optional[float] = Field(None, ge=-10, le=10, description="порог Deep Global для лонга (null — не учитывается)")
+    short_global_max: Optional[float] = Field(None, ge=-10, le=10, description="порог Deep Global для шорта (null — не учитывается)")
     confirm: Optional[int] = Field(None, ge=1, le=100)
     tps: Optional[list[TpLevel]] = Field(None, min_length=1, max_length=3, description="тейки частями (1–3), доли в сумме 100%")
     be_after_tp1: Optional[bool] = None
@@ -33,7 +35,7 @@ class BacktestParams(BaseModel):
     fee: Optional[float] = Field(None, ge=0, le=0.05)
     slip: Optional[float] = Field(None, ge=0, le=0.05)
     cooldown_h: Optional[float] = Field(None, ge=0, le=24 * 365)
-    cool_metric: Optional[Literal["scalp", "local"]] = None
+    cool_metric: Optional[Literal["scalp", "local", "global"]] = None
     cool_drop: Optional[float] = Field(None, gt=0, le=10)
     cool_declines: Optional[int] = Field(None, ge=1, le=50)
     liq_hours: Optional[float] = Field(None, gt=0, le=24 * 365)

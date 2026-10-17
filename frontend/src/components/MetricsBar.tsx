@@ -22,8 +22,16 @@ interface Props {
 
 /** Текущие DG / DL / DS каждого бота и состояние автоподгрузки сообщений. */
 export default function MetricsBar({ latest, sync, params, onSync }: Props) {
-  const cls = (dl: number, ds: number) =>
-    dl >= params.local_min && ds >= params.scalp_min ? 'pos' : dl <= params.short_local_max && ds <= params.short_scalp_max ? 'neg' : '';
+  // подсветка по текущим порогам: зелёный — условие лонга выполнено, красный — шорта (Global учитывается, только если его порог задан; режим «только …» — одна метрика)
+  const cls = (dg: number | null, dl: number, ds: number) => {
+    const useL = params.only !== 'scalp' && params.only !== 'global';
+    const useS = params.only !== 'local' && params.only !== 'global';
+    const useG = params.only === 'global' || (params.only == null);
+    const gOk = (lim: number | null, up: boolean) => !useG || lim == null || (dg != null && (up ? dg >= lim : dg <= lim));
+    const long = (!useL || dl >= params.local_min) && (!useS || ds >= params.scalp_min) && gOk(params.global_min, true) && (useL || useS || params.global_min != null);
+    const short = (!useL || dl <= params.short_local_max) && (!useS || ds <= params.short_scalp_max) && gOk(params.short_global_max, false) && (useL || useS || params.short_global_max != null);
+    return long ? 'pos' : short ? 'neg' : '';
+  };
   const syncBy = new Map((sync?.sources ?? []).map((s) => [s.id, s]));
   return (
     <div className="metrics-bar" data-testid="metrics-bar">
@@ -36,9 +44,9 @@ export default function MetricsBar({ latest, sync, params, onSync }: Props) {
             <b>{s.label}</b>
             {r ? (
               <>
-                <span className="mb-val">DG <b>{r.dg?.toFixed(2) ?? '–'}</b></span>
-                <span className="mb-val">DL <b className={cls(r.dl, r.ds)}>{r.dl.toFixed(2)}</b></span>
-                <span className="mb-val">DS <b className={cls(r.dl, r.ds)}>{r.ds.toFixed(2)}</b></span>
+                <span className="mb-val">DG <b className={params.global_min != null || params.short_global_max != null ? cls(r.dg, r.dl, r.ds) : ''}>{r.dg?.toFixed(2) ?? '–'}</b></span>
+                <span className="mb-val">DL <b className={cls(r.dg, r.dl, r.ds)}>{r.dl.toFixed(2)}</b></span>
+                <span className="mb-val">DS <b className={cls(r.dg, r.dl, r.ds)}>{r.ds.toFixed(2)}</b></span>
                 {r.top_coin && <span className="mb-val" title="Топ-коин последнего отчёта">⭐ {r.top_coin} {r.top_value?.toFixed(2)}</span>}
                 <span className="muted" title={fmtTs(r.ts) + ' UTC'}>{ago(r.ts)}</span>
               </>

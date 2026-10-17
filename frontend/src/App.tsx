@@ -582,7 +582,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
               {' · '}<span className="fills">{selTrade.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}</span>
               {selTrade.notional != null && <span className="muted"> · объём {fmtUsd(selTrade.notional).replace(/^\+/, '')}</span>}
               {' · '}<b className={signClass(selTrade.pnl_usd)}>{fmtUsd(selTrade.pnl_usd)}</b>
-              {selTrade.local != null && <span className="muted"> · Local {selTrade.local.toFixed(2)} / Scalp {selTrade.scalp?.toFixed(2)}</span>}
+              {selTrade.local != null && <span className="muted"> · Local {selTrade.local.toFixed(2)} / Scalp {selTrade.scalp?.toFixed(2)}{selTrade.global != null && ` / Global ${selTrade.global.toFixed(2)}`}</span>}
               {selTrade.coin && <span className="muted"> · в отчёте {selTrade.coin} {selTrade.top_value?.toFixed(2)}</span>}
               {selTrade.partial && <span className="warn-text"> · окно ещё не закончилось</span>}
             </div>

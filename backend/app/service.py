@@ -157,7 +157,7 @@ def _trade_out(n, t, rep):
         "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
         "fills": t["fills"], "reason": t["reason"],
         "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "notional": t.get("notional"), "margin": t.get("margin"), "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
-        "local": r[1] if r else None, "scalp": r[2] if r else None,
+        "local": r[1] if r else None, "scalp": r[2] if r else None, "global": r[7] if r and len(r) > 7 else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
     for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total"):
@@ -270,16 +270,26 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
 
     side = eff["side"]
     long_min, scalp_min = eff["local_min"], eff["scalp_min"]
+    glob_min, short_glob = eff.get("global_min"), eff.get("short_global_max")
     short = None if side == "long" else (eff["short_local_max"], eff["short_scalp_max"])
     if side == "short":
         long_min = scalp_min = INF          # лонг никогда не срабатывает
+        glob_min = INF
+    if eff["only"] == "global":
+        need_long = side != "short" and glob_min is None
+        need_short = side != "long" and short_glob is None
+        if need_long or need_short:
+            raise ParamError("Режим «только Deep Global»: задайте порог Global для " + ("лонга" if need_long else "шорта"))
+    if (glob_min is not None and glob_min != INF) or short_glob is not None or eff["only"] == "global" or eff.get("cool_metric") == "global":
+        if not any(len(s) > 7 and s[7] is not None for s in sigs):
+            raise ParamError("В отчётах выбранного источника нет Deep Global — уберите условия по Global")
     try:
         tps = [(l["pct"], l["share"]) for l in eff["tps"]]
         backtest.normalize_tps(tps)
     except ValueError as e:
         raise ParamError(str(e))
     common = dict(tp_pct=tps[0][0], tps=tps, be_after_tp1=bool(eff.get("be_after_tp1")), sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"],
-                  confirm=eff["confirm"], only=eff["only"])
+                  confirm=eff["confirm"], only=eff["only"], global_min=glob_min, short_global_max=short_glob)
 
     allow = None
     if eff.get("trend_enabled"):
@@ -306,8 +316,8 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         warnings.append(f"Плечо {eff['leverage']:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа, бэктест этого не моделирует")
 
     # все подтверждённые сигналы (в том числе пропущенные: позиция открыта, пауза после стопа)
-    lm, sm, sh = backtest.apply_only(long_min, scalp_min, short, eff["only"])
-    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool)
+    lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
+    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm)
     trend_blocked = 0
     if allow:
         passed = [e for e in confirmed if allow(*e)]

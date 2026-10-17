@@ -6,7 +6,7 @@ from telethon import TelegramClient, events
 from telethon.tl.types import PeerChannel
 
 from app.config import ROOT, load_settings
-from app.core.backtest import apply_only
+from app.core.backtest import resolve_entry
 from app.core.signal_parser import Confirmer, parse_signal, should_long, should_short
 from tools.trader import Trader
 
@@ -18,7 +18,8 @@ log = logging.getLogger("bot")
 S = load_settings()
 D = S.defaults
 CONFIRM = D["confirm"]
-LOCAL_MIN, SCALP_MIN, SHORT = apply_only(D["local_min"], D["scalp_min"], (D["short_local_max"], D["short_scalp_max"]), D["only"])
+LOCAL_MIN, SCALP_MIN, GLOBAL_MIN, SHORT, SHORT_GLOBAL = resolve_entry(
+    D["local_min"], D["scalp_min"], D.get("global_min"), (D["short_local_max"], D["short_scalp_max"]), D.get("short_global_max"), D["only"])
 LONG_ON, SHORT_ON = D["side"] in ("both", "long"), D["side"] in ("both", "short")
 
 
@@ -40,8 +41,8 @@ async def main():
     )
     client = TelegramClient(os.path.join(ROOT, os.getenv("TG_SESSION", "maverick")), int(os.environ["TG_API_ID"]), os.environ["TG_API_HASH"])
     lock = asyncio.Lock()  # чтобы два быстрых сообщения не открыли две позы
-    conf_long = Confirmer(lambda s: LONG_ON and should_long(s, LOCAL_MIN, SCALP_MIN), CONFIRM)
-    conf_short = Confirmer(lambda s: SHORT_ON and should_short(s, *SHORT), CONFIRM)
+    conf_long = Confirmer(lambda s: LONG_ON and should_long(s, LOCAL_MIN, SCALP_MIN, GLOBAL_MIN), CONFIRM)
+    conf_short = Confirmer(lambda s: SHORT_ON and should_short(s, *SHORT, SHORT_GLOBAL), CONFIRM)
     channel = PeerChannel(int(os.getenv("TG_CHANNEL_ID", "3217240841")))
 
     @client.on(events.NewMessage(chats=channel))

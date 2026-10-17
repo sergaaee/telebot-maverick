@@ -19,7 +19,7 @@ from bisect import bisect_right, insort
 from collections import deque
 from datetime import datetime
 
-from .signal_parser import parse_liquidation, parse_top_coin, should_long, should_short
+from .signal_parser import parse_liquidation, parse_signal, parse_top_coin, should_long, should_short
 
 
 def _ts(s):
@@ -27,7 +27,7 @@ def _ts(s):
 
 
 def load_signals(path):
-    """[(ts, local, scalp, liq_long_k, liq_short_k, top_coin, top_value)] — ликвидации из колонок liq_*_k или из текста, иначе None;
+    """[(ts, local, scalp, liq_long_k, liq_short_k, top_coin, top_value, global)] — global (Deep Global) может быть None, если его нет в отчёте; ликвидации из колонок liq_*_k или из текста, иначе None;
     топ-коин (тикер как в отчёте и его значение) берётся из текста отчёта, если он там есть."""
     out = []
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -42,8 +42,13 @@ def load_signals(path):
                 if liq:
                     ll, ls = liq["long"], liq["short"]
             top = parse_top_coin(r.get("text") or "")
+            dg = None
+            if r.get("deep_global") not in (None, ""):
+                dg = float(r["deep_global"])
+            else:
+                dg = (parse_signal(r.get("text") or "") or {}).get("global")
             out.append((_ts(r["date_utc"]), float(r["deep_local"]), float(r["deep_scalp"]), ll, ls,
-                        top["coin"] if top else None, top["value"] if top else None))
+                        top["coin"] if top else None, top["value"] if top else None, dg))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -63,10 +68,11 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     return out, hit
 
 
-def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None):
-    sides = [(1, lambda s: should_long(s, local_min, scalp_min))]
+def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None):
+    """global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует."""
+    sides = [(1, lambda s: should_long(s, local_min, scalp_min, global_min))]
     if short is not None:
-        sides.append((-1, lambda s: should_short(s, *short)))
+        sides.append((-1, lambda s: should_short(s, *short, short_global_max)))
     st = {d: {"streak": 0, "ext": None, "prev": None, "dec": 0} for d, _ in sides}
     window = {1: deque(), -1: deque()}   # монотонная очередь для скользящего максимума
     past = {1: [], -1: []}               # отсортированные прошлые значения ликвидаций
@@ -75,7 +81,7 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
     for row in signals:
         sts, loc, scalp = row[:3]
         liqv = {1: row[3] if len(row) > 3 else None, -1: row[4] if len(row) > 4 else None}
-        sig = {"local": loc, "scalp": scalp}
+        sig = {"local": loc, "scalp": scalp, "global": row[7] if len(row) > 7 else None}
         m = sig[metric]
         thr, mx = {}, {}
         if liq:
@@ -95,7 +101,7 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
         chosen = 0
         for d, pred in sides:
             s = st[d]
-            if pred(sig):
+            if pred(sig) and m is not None:          # нет значения метрики остывания (например, Deep Global) — отчёт серию не продолжает
                 s["streak"] += 1
                 s["ext"] = m if s["ext"] is None else (max(s["ext"], m) if d == 1 else min(s["ext"], m))
                 cooling = s["prev"] is not None and ((m < s["prev"]) if d == 1 else (m > s["prev"]))

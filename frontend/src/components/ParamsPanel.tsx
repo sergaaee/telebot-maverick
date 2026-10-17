@@ -44,14 +44,14 @@ function Label({ text, help }: { text: string; help?: HelpKey }) {
   );
 }
 
-function Num({ label, help, value, onChange, step = 0.05, suffix }: {
-  label: string; help: HelpKey; value: number | null; onChange: (v: number | null) => void; step?: number; suffix?: string;
+function Num({ label, help, value, onChange, step = 0.05, suffix, placeholder }: {
+  label: string; help: HelpKey; value: number | null; onChange: (v: number | null) => void; step?: number; suffix?: string; placeholder?: string;
 }) {
   return (
     <label className="field">
       <Label text={label} help={help} />
       <span className="input-wrap">
-        <input type="number" step={step} value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))} />
+        <input type="number" step={step} placeholder={placeholder} value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))} />
         {suffix && <em>{suffix}</em>}
       </span>
     </label>
@@ -304,9 +304,10 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         <label className="field">
           <Label text="Метрика" help="only" />
           <select value={p.only ?? ''} onChange={(e) => set('only', (e.target.value || null) as Only)}>
-            <option value="">Local и Scalp</option>
+            <option value="">Local и Scalp (+ Global, если задан)</option>
             <option value="local">только Local</option>
             <option value="scalp">только Scalp</option>
+            <option value="global">только Global</option>
           </select>
         </label>
         <Num label="Подтверждение, отчётов" help="confirm" value={p.confirm} step={1} onChange={(v) => set('confirm', Math.max(1, Math.round(v ?? 1)))} />
@@ -315,11 +316,13 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       <Section title="Лонг: Deep ≥" help="groupLong">
         <Num label="Local ≥" help="local_min" value={p.local_min} onChange={num('local_min')} />
         <Num label="Scalp ≥" help="scalp_min" value={p.scalp_min} onChange={num('scalp_min')} />
+        <Num label="Global ≥" help="global_min" value={p.global_min} placeholder="выкл" onChange={num('global_min')} />
       </Section>
 
       <Section title="Шорт: Deep ≤" help="groupShort">
         <Num label="Local ≤" help="short_local_max" value={p.short_local_max} onChange={num('short_local_max')} />
         <Num label="Scalp ≤" help="short_scalp_max" value={p.short_scalp_max} onChange={num('short_scalp_max')} />
+        <Num label="Global ≤" help="short_global_max" value={p.short_global_max} placeholder="выкл" onChange={num('short_global_max')} />
       </Section>
 
       <Section title="Выход и издержки" help="groupExit">
@@ -433,9 +436,10 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
           <>
             <label className="field">
               <Label text="Метрика" help="cool_metric" />
-              <select value={p.cool_metric} onChange={(e) => set('cool_metric', e.target.value as 'scalp' | 'local')}>
+              <select value={p.cool_metric} onChange={(e) => set('cool_metric', e.target.value as Params['cool_metric'])}>
                 <option value="scalp">Deep Scalp</option>
                 <option value="local">Deep Local</option>
+                <option value="global">Deep Global</option>
               </select>
             </label>
             {coolMode === 'drop' ? (

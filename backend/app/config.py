@@ -133,6 +133,7 @@ def load_settings() -> Settings:
         side=side, only=only,
         local_min=_num("LOCAL_MIN", 1.85), scalp_min=_num("SCALP_MIN", 1.25),
         short_local_max=_num("SHORT_LOCAL_MAX", 0.7), short_scalp_max=_num("SHORT_SCALP_MAX", 1.2),
+        global_min=_num("GLOBAL_MIN", None), short_global_max=_num("SHORT_GLOBAL_MAX", None),
         confirm=_num("CONFIRM", 4, int), tps=_tps(), be_after_tp1=_bool("BE_AFTER_TP1"), sl_pct=_num("SL_PCT", 2.0),
         size=_num("ORDER_SIZE", 0.1),
         deposit=_num("DEPOSIT", 10000.0), trade_pct=_num("TRADE_PCT", 10.0), leverage=_num("LEVERAGE", 1.0), compound=_bool("COMPOUND", True), fee=_num("FEE", 0.0005), slip=_num("SLIPPAGE", 0.0),

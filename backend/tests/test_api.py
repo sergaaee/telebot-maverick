@@ -43,7 +43,7 @@ def client(tmp_path, monkeypatch):
     env = dict(HISTORY_FILE=str(tmp_path / "history.csv"), LIQ_FILE="", CACHE_DIR=str(cache),
                LOCAL_MIN="1.65", SCALP_MIN="2.0", SHORT_LOCAL_MAX="1.05", SHORT_SCALP_MAX="0.65",
                CONFIRM="2", TP_PCT="3", SL_PCT="1", ORDER_SIZE="0.1", FEE="0", SLIPPAGE="0",
-               SIDE="both", ONLY="", COOL_DROP="", COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0",
+               SIDE="both", ONLY="", GLOBAL_MIN="", SHORT_GLOBAL_MAX="", COOL_DROP="", COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0",
                CORS_ORIGINS="http://localhost:5173",
                SOURCES="", SOURCE_DEFAULT="", LIQ_SOURCE="", SYMBOLS="", SYMBOL="", SYMBOL_DEFAULT="",
                TP_LEVELS="", BE_AFTER_TP1="", STATE_FILE=str(tmp_path / "state.json"))      # пустые значения не дают реальному backend/.env подмешаться в тесты
@@ -151,7 +151,7 @@ def two_sources(tmp_path, monkeypatch):
                SOURCE_BINANCE_LABEL="Binance Maverick", SOURCE_BINANCE_FILE=str(tmp_path / "b.csv"),
                LIQ_SOURCE="", CACHE_DIR=str(cache), HISTORY_FILE="", LIQ_FILE="",
                LOCAL_MIN="1.65", SCALP_MIN="2.0", SHORT_LOCAL_MAX="1.05", SHORT_SCALP_MAX="0.65",
-               CONFIRM="2", TP_PCT="3", SL_PCT="1", FEE="0", SLIPPAGE="0", SIDE="both", ONLY="",
+               CONFIRM="2", TP_PCT="3", SL_PCT="1", FEE="0", SLIPPAGE="0", SIDE="both", ONLY="", GLOBAL_MIN="", SHORT_GLOBAL_MAX="",
                COOL_DROP="", COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0")
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -266,3 +266,29 @@ def test_tp_levels_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TP_LEVELS", "3:50,6:40")
     with pytest.raises(SystemExit, match="100%"):
         load_settings()
+
+
+def test_deep_global_in_api(client):
+    base = client.post("/api/backtest", json={}).json()
+    assert base["stats"]["total"]["trades"] > 0 and base["params"]["global_min"] is None
+    same = client.post("/api/backtest", json={"global_min": 0.5, "short_global_max": 1.5}).json()          # во всех отчётах DG = 1.0
+    assert same["stats"]["total"]["trades"] == base["stats"]["total"]["trades"]
+    assert all(t["global"] == 1.0 for t in same["trades"])
+    strict = client.post("/api/backtest", json={"global_min": 1.5, "short_global_max": 0.5}).json()
+    assert strict["stats"]["total"]["trades"] == 0
+    only_g = client.post("/api/backtest", json={"only": "global", "global_min": 0.5, "short_global_max": 1.5}).json()
+    assert only_g["stats"]["total"]["trades"] > 0
+    cool_g = client.post("/api/backtest", json={"cool_drop": 0.1, "cool_metric": "global"})
+    assert cool_g.status_code == 200
+    assert client.post("/api/backtest", json={"only": "global"}).status_code == 422            # режим «только Global» без порогов
+    assert client.post("/api/backtest", json={"only": "global", "side": "long", "global_min": 0.5}).status_code == 200
+    assert client.post("/api/backtest", json={"global_min": 99}).status_code == 422
+
+
+def test_deep_global_env_default_and_explicit_off(tmp_path, monkeypatch, client):
+    monkeypatch.setenv("GLOBAL_MIN", "1.5")
+    c2 = TestClient(create_app(load_settings()))
+    assert c2.get("/api/config").json()["defaults"]["global_min"] == 1.5
+    assert c2.post("/api/backtest", json={"side": "long"}).json()["stats"]["total"]["trades"] == 0     # умолчание из env применено
+    off = c2.post("/api/backtest", json={"global_min": None, "side": "long"}).json()                                # явный null (старый конфиг) — выключено
+    assert off["stats"]["total"]["trades"] == client.post("/api/backtest", json={"side": "long"}).json()["stats"]["total"]["trades"] > 0
