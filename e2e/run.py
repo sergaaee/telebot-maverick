@@ -479,6 +479,23 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Пересчитать").first.click(); pg.wait_for_timeout(3000)
     check("после «Пересчитать» бэктест на месте", pg.locator("table.trades tbody tr").count() > 0)
 
+    # --- индикация расчёта: запрос удерживаем, чтобы увидеть состояние «идёт расчёт»
+    held = []
+    pg.route("**/api/backtest", lambda r: held.append(r))
+    pg.get_by_role("button", name="Запустить").click()
+    pg.wait_for_timeout(1700)
+    btn_txt = pg.locator("button.run").inner_text()
+    check("во время расчёта: полоса сверху, плашка и спиннер на кнопке", pg.locator(".progress-bar.on").count() == 1 and pg.locator(".calc-badge").is_visible()
+          and "Считаю" in btn_txt and pg.locator("button.run").is_disabled() and pg.locator(".app").get_attribute("aria-busy") == "true", btn_txt)
+    check("видно, сколько секунд идёт расчёт", " с" in pg.locator(".calc-badge").inner_text(), pg.locator(".calc-badge").inner_text())
+    check("результат приглушён, но на месте", pg.locator("table.trades tbody tr").count() > 0 and pg.evaluate("getComputedStyle(document.querySelector('main .center')).opacity") != "1")
+    held[0].continue_()
+    pg.wait_for_function("() => !document.querySelector('.calc-badge')", timeout=15000)
+    pg.wait_for_timeout(500)
+    check("после расчёта анимация исчезла, кнопка снова активна", pg.locator(".progress-bar.on").count() == 0 and not pg.locator("button.run").is_disabled()
+          and pg.locator(".app").get_attribute("aria-busy") == "false" and pg.locator("button.run").inner_text() == "Запустить")
+    pg.unroute("**/api/backtest")
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):
