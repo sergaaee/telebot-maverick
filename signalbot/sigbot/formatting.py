@@ -88,7 +88,7 @@ def config_summary(cfg, result=None):
     if p.get("top_enabled"):
         bits.append("топ-коины")
     if p.get("pyramid_enabled"):
-        bits.append(f"пирамидинг до {p.get('pyramid_max')}×{p.get('pyramid_pct'):g}%")
+        bits.append(f"пирамидинг до {p.get('pyramid_max')}×{p.get('pyramid_pct'):g}%" + (" с усреднением" if p.get("pyramid_avg") else ""))
     if p.get("signal_gap_h"):
         bits.append(f"пауза между сигналами {p['signal_gap_h']:g} ч")
     if p.get("sl_hold_strong"):
@@ -125,6 +125,11 @@ def signal_message(cfg, result, sig, report, plan, entry_price, top, source_labe
         trade.append(f"{tp} · SL {pct(-p['sl_pct'] if sig['side'] == 'long' else p['sl_pct'], 1)}"
                      + ("  ·  БУ после TP1" if p.get("be_after_tp1") and len(p["tps"]) > 1 else ""))
         trade.append("<i>Цена биржи недоступна — уровни в процентах от цены входа.</i>")
+    if add and sig.get("avg_entry"):
+        trade.append(f"🔁 Усреднение: новая средняя ≈ <code>{price(sig['avg_entry'])}</code> · TP "
+                     + " / ".join(f"<code>{price(x)}</code>" for x in sig["avg_tps"]) + f" · SL <code>{price(sig['avg_sl'])}</code> (от средней цены)")
+    elif add and p.get("pyramid_avg"):
+        trade.append("🔁 Усреднение: тейки и стоп пересчитываются от новой средней цены входа")
     trade.append(sizing_line(result, add))
     blocks = ["\n".join(head), *m, "\n".join(trade)]
     if top:

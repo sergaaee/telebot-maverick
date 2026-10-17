@@ -513,6 +513,23 @@ def scenario(pg, base, state_url):
     check("в статистике появились позиции/доборы и причины пропусков", pg.locator(".card-label", has_text="Позиций / доборов").count() == 1
           and pg.locator("[data-testid=skipped-reasons] li").count() >= 1, pg.locator("[data-testid=skipped-reasons]").inner_text()[:120] if pg.locator("[data-testid=skipped-reasons]").count() else "нет блока")
     check("в таблице сделок доборы помечены", pg.locator(".tag-add").count() > 0)
+    n_legs = pg.locator("table.trades tbody tr").count()
+    check("«пирамидинг усредняет позу» выключена по умолчанию и имеет «?»", not field(pg, "пирамидинг усредняет позу").locator("input").is_checked()
+          and field(pg, "пирамидинг усредняет позу").locator(".help").count() == 1)
+    field(pg, "пирамидинг усредняет позу").locator("input").check()
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    n_pos = pg.locator("table.trades tbody tr").count()
+    tags = pg.locator(".tag-add").all_inner_texts()
+    check("с усреднением доборы живут внутри одной сделки: строк меньше, в таблице метки ×N", n_pos < n_legs and tags and all("×" in t for t in tags), f"ног {n_legs} -> позиций {n_pos}, метки {tags[:3]}")
+    pg.locator("table.trades tbody tr", has=pg.locator(".tag-add")).first.click(); pg.wait_for_timeout(1500)
+    check("в сводке усреднённой сделки видна средняя цена входа", "средняя из" in pg.locator(".sel-info").inner_text(), pg.locator(".sel-info").inner_text()[:140])
+    api_avg = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({pyramid_enabled: true, pyramid_avg: true, pyramid_max: 2, pyramid_pct: 5, trade_pct: 10, compound: false, deposit: 10000, leverage: 1})}).then(r => r.json())""")
+    ta = next(t for t in api_avg["trades"] if t["adds_n"] > 0)
+    check("API: у усреднённой сделки одна запись, средняя между входами, размер = вход + доборы", ta["avg"] and len(ta["adds"]) == ta["adds_n"] + 1
+          and min(a["price"] for a in ta["adds"]) <= ta["entry"] <= max(a["price"] for a in ta["adds"]) and abs(ta["notional"] - 10000 * (10 + 5 * ta["adds_n"]) / 100) < 1e-6)
+    field(pg, "пирамидинг усредняет позу").locator("input").uncheck()
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    check("выключили усреднение — снова отдельные ноги", pg.locator("table.trades tbody tr").count() == n_legs)
     api_p = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({pyramid_enabled: true, pyramid_max: 2, pyramid_pct: 5, trade_pct: 10, compound: false, deposit: 10000, leverage: 1})}).then(r => r.json())""")
     legs = api_p["trades"]
     first_leg = next(t for t in legs if t["leg"] == 1)
@@ -526,7 +543,7 @@ def scenario(pg, base, state_url):
         pg.get_by_role("button", name="Скачать конфиг").click()
     cfg2 = _json.loads(Path(dl2.value.path()).read_text(encoding="utf-8"))
     check("в скачанном конфиге есть новые поля", cfg2["params"]["pyramid_enabled"] is True and cfg2["params"]["pyramid_max"] == 2 and cfg2["params"]["sl_hold_strong"] is True)
-    for k in ("pyramid_enabled", "pyramid_max", "pyramid_pct", "pyramid_gap_h", "signal_gap_h", "sl_hold_strong"):
+    for k in ("pyramid_enabled", "pyramid_avg", "pyramid_max", "pyramid_pct", "pyramid_gap_h", "signal_gap_h", "sl_hold_strong"):
         cfg2["params"].pop(k)
     pg.get_by_role("button", name="Загрузить…").click()
     pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg2))

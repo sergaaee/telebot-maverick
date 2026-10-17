@@ -94,6 +94,12 @@ export default function PriceChart(props: Props) {
           text: labels ? (tr.pyramid ? `+${(tr.leg ?? 2) - 1}` : `${long ? 'L' : 'S'}${tr.n}`) : '',
           size: 1.4,
         });
+      // доборы усреднённой позиции
+      (tr.adds ?? []).slice(1).forEach((a, k) => {
+        const at = snap(a.ts / 1000);
+        if (!inWin(at)) return;
+        markers.push({ time: at as UTCTimestamp, position: long ? 'belowBar' : 'aboveBar', shape: long ? 'arrowUp' : 'arrowDown', color: '#e0b050', text: labels ? `+${k + 1}` : '', size: 0.9 });
+      });
       // каждое исполнение (частичные тейки и финальное закрытие) — свой маркер
       tr.fills.forEach((f, k) => {
         const ft = snap(f.ts / 1000);

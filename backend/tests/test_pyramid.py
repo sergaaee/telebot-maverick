@@ -233,3 +233,147 @@ def test_sl_hold_strong_via_api(client):  # noqa: F811
     assert none["trades"] == []
     _, only_local = post(client, **{**strict, "only": "local", "sl_hold_strong": True})
     assert only_local["trades"] and not any(t["reason"] == "SL" for t in only_local["trades"])
+
+
+# ---------------- усреднение позиции (pyramid_avg) ----------------
+AVG = {"max": 3, "gap_h": 0, "avg": True, "w0": 10.0, "w": 10.0}
+
+
+def run_avg(events, candles, levels=LEVELS, sl=2.0, fee=0.0, slip=0.0, **kw):
+    skipped = []
+    pyr = kw.pop("pyramid", AVG)
+    trades = run_events(events, candles, levels, sl, fee=fee, slip=slip, skipped=skipped, pyramid=pyr, **kw)
+    return trades, skipped
+
+
+def test_avg_without_adds_equals_plain_trade():
+    import random
+    random.seed(7)
+    price, c = 100.0, []
+    for i in range(1500):
+        price *= 1 + random.gauss(0, 0.0015)
+        o = price
+        c.append((T0 + i * M, o, o * 1.001, o * 0.999, o * (1 + random.gauss(0, 0.0005))))
+    for levels in (normalize_tps([(1, 100)]), normalize_tps([(0.5, 40), (1, 30), (2, 30)])):
+        for be in (False, True):
+            for slip in (0.0, 0.0003):
+                for hold in (None, hold_until(400)):
+                    ev_ = [(T0 + m * M, 1) for m in (10, 700)]
+                    plain = run_events(ev_, c, levels, 0.7, fee=0.0005, slip=slip, be_after_tp1=be, hold=hold)
+                    avg = run_events(ev_, c, levels, 0.7, fee=0.0005, slip=slip, be_after_tp1=be, hold=hold, pyramid={"max": 3, "avg": True, "w0": 10, "w": 5})
+                    assert len(plain) == len(avg)
+                    for a, b in zip(plain, avg):
+                        assert a["reason"] == b["reason"] and a["exit_ts"] == b["exit_ts"] and a["tp_hits"] == b["tp_hits"]
+                        assert a["pnl_pct"] == pytest.approx(b["pnl_pct"], abs=1e-9) and a["entry"] == pytest.approx(b["entry"])
+                        assert [(f["label"], round(f["price"], 9), round(f["share"], 9)) for f in a["fills"]] == [(f["label"], round(f["price"], 9), round(f["share"], 9)) for f in b["fills"]]
+
+
+def test_avg_add_moves_average_levels_and_exit_is_computed_from_new_average():
+    c = flat()
+    move(c, 20, 30, 97)                                  # цена просела на 3% (добор по 97)
+    move(c, 30, 600, 102)                                # потом отскок до 102
+    trades, skipped = run_avg(ev(10, 20), c)
+    assert len(trades) == 1 and skipped == []                                           # добор — часть той же позиции, а не новая сделка
+    t = trades[0]
+    q = 10 / 100 + 10 / 97
+    A = 20 / q                                                                          # средняя цена по количеству
+    assert t["adds_n"] == 1 and t["entry"] == pytest.approx(A) and t["entry_first"] == 100 and t["w_total"] == 20
+    assert t["tps"][0] == pytest.approx(A * 1.03) and t["sl"] == pytest.approx(A * 0.98)
+    assert t["reason"] == "TP" and t["exit"] == pytest.approx(102.0) and t["exit_ts"] == T0 + 30 * M          # тейк от средней (≈101.4) исполнен
+    assert t["pnl_pct"] == pytest.approx(100 * q * (102 - A) / 20)
+    # без усреднения те же сигналы дали бы две ноги: первая (вход 100, тейк 103) до тейка не дошла бы
+    legs, _ = run(ev(10, 20), c, pyramid={"max": 3, "gap_h": 0})
+    assert len(legs) == 2 and legs[0]["reason"] != "TP" and legs[1]["reason"] == "TP"
+    assert [a["signal_ts"] for a in t["adds"]] == [None, T0 + 20 * M] and t["add_signals"] == [T0 + 20 * M]
+    assert abs(sum(f["share"] for f in t["fills"]) - 1.0) < 1e-9
+
+
+def test_avg_stop_follows_new_average():
+    c = flat()
+    move(c, 20, 40, 96.5)                                # старый стоп первого входа (98) пробит, но добор по 96.5 сдвигает среднюю и стоп
+    move(c, 40, 600, 96.0)
+    only_first, _ = run_avg(ev(10), c)
+    assert only_first[0]["reason"] == "SL" and only_first[0]["exit_ts"] == T0 + 20 * M            # без добора — стоп на 20-й минуте
+    t, _ = run_avg(ev(10, 20), c)
+    A = 20 / (10 / 100 + 10 / 96.5)                                                                 # ≈ 98.2 -> стоп ≈ 96.24
+    assert t[0]["sl"] == pytest.approx(A * 0.98) and t[0]["sl"] < 96.5
+    assert t[0]["reason"] == "SL" and t[0]["exit_ts"] == T0 + 40 * M and t[0]["exit"] == pytest.approx(96.0)      # держалась до пробоя нового стопа (гэп — по open)
+    c2 = flat()
+    move(c2, 20, 600, 96.5)
+    alive, _ = run_avg(ev(10, 20), c2)
+    assert alive[0]["reason"] == "OPEN"                                                             # позиция пережила то, что убило бы отдельную ногу
+
+
+def test_avg_breakeven_follows_average_and_partial_fills_keep_proportions():
+    levels = normalize_tps([(3, 50), (6, 50)])
+    c = flat()
+    move(c, 20, 40, 103.5)                               # TP1 (103)
+    move(c, 40, 600, 102)                                # потом цена опускается ниже новой средней
+    t, _ = run_avg([(T0 + 10 * M, 1), (T0 + 25 * M, 1)], c, levels=levels, be_after_tp1=True)    # добор по 103.5 после TP1
+    t = t[0]
+    q_rem = 0.05                                          # после TP1 осталась половина 0.1
+    A = (q_rem * 100 + 10) / (q_rem + 10 / 103.5)
+    assert t["adds_n"] == 1 and t["entry"] == pytest.approx(A)
+    assert t["reason"] == "BE" and t["exit_ts"] == T0 + 40 * M and t["exit"] == pytest.approx(102.0)        # БУ сдвинулся на новую среднюю (≈102.3)
+    assert [f["label"] for f in t["fills"]] == ["TP1", "BE"] and t["tp_hits"] == 1
+    assert t["fills"][0]["share"] == pytest.approx(0.05 * 100 / 20) and abs(sum(f["share"] for f in t["fills"]) - 1.0) < 1e-9
+    realized = 0.05 * (103.5 - 100) + (q_rem + 10 / 103.5) * (102 - A)
+    assert t["pnl_pct"] == pytest.approx(100 * realized / 20)
+    assert t["tps"][1] == pytest.approx(A * 1.06)                                                   # оставшийся тейк пересчитан от новой средней
+
+
+def test_avg_reversal_closes_the_whole_position_and_limits_apply():
+    c = move(flat(), 35, 600, 101)
+    events = ev(10, 20) + [(T0 + 35 * M, -1)]
+    trades, _ = run_avg(events, c)
+    assert [t["side"] for t in trades] == ["long", "short"] and trades[0]["reason"] == "REV" and trades[0]["exit_ts"] == T0 + 35 * M
+    assert trades[0]["adds_n"] == 1 and trades[1]["adds_n"] == 0
+    trades, skipped = run_avg(ev(10, 20, 30, 40, 50), flat(), pyramid={**AVG, "max": 2})
+    assert trades[0]["adds_n"] == 2 and [r for _, _, r in skipped] == ["достигнут максимум доборов"] * 2
+    trades, skipped = run_avg(ev(10, 20, 30), flat(), pyramid={**AVG, "gap_h": 0.25})
+    assert trades[0]["adds_n"] == 1 and [r for _, _, r in skipped] == ["пауза между доборами"]
+
+
+def test_avg_new_position_after_close_and_data_end():
+    c = move(flat(), 15, 600, 104)                       # тейк на 15-й минуте
+    trades, _ = run_avg(ev(10, 200), c)
+    assert [(t["group"], t["adds_n"], t["reason"]) for t in trades] == [(1, 0, "TP"), (2, 0, "OPEN")]
+
+
+def test_avg_short_side_mirror():
+    c = flat()
+    move(c, 20, 30, 103)
+    move(c, 30, 600, 97)
+    t, _ = run_avg([(T0 + 10 * M, -1), (T0 + 20 * M, -1)], c)
+    q = 10 / 100 + 10 / 103
+    A = 20 / q
+    assert t[0]["entry"] == pytest.approx(A) and t[0]["reason"] == "TP" and t[0]["tps"][0] == pytest.approx(A * 0.97) and t[0]["sl"] == pytest.approx(A * 1.02)
+    assert t[0]["pnl_pct"] == pytest.approx(100 * (-1) * q * (t[0]["exit"] - A) / 20) and t[0]["pnl_pct"] > 0
+
+
+def test_avg_via_api_sizing_signals_and_stats(client):  # noqa: F811
+    base = dict(deposit=10000, trade_pct=10, leverage=2, compound=False, pyramid_enabled=True, pyramid_max=2, pyramid_pct=5)
+    _, legs = post(client, **base)
+    st, avg = post(client, **base, pyramid_avg=True)
+    assert st == 200
+    trades = avg["trades"]
+    assert all(t["avg"] and t["leg"] == 1 for t in trades) and sum(t["adds_n"] for t in trades) > 0
+    for t in trades:
+        assert t["notional"] == pytest.approx(10000 * (10 + 5 * t["adds_n"]) / 100 * 2) and t["pnl_usd"] == pytest.approx(t["notional"] * t["pnl_pct"] / 100)
+        assert len(t["adds"]) == t["adds_n"] + 1 and t["adds"][0]["signal_ts"] is None and all(a["signal_ts"] for a in t["adds"][1:])
+        assert t["entry"] > 0 and abs(sum(f["share"] for f in t["fills"]) - 1) < 1e-9
+    tot = avg["stats"]["total"]
+    assert tot["positions"] == len(trades) and tot["adds"] == sum(t["adds_n"] for t in trades)
+    assert tot["total_usd"] == pytest.approx(sum(t["pnl_usd"] for t in trades))
+    # сигналы доборов считаются открытыми, а не пропущенными
+    taken = [x for x in avg["signals"] if x["taken"]]
+    assert len(taken) == len(trades) + tot["adds"]
+    # без усреднения (по умолчанию) — отдельные ноги, как раньше; флаг отсутствует в старых запросах
+    _, off = post(client, **base, pyramid_avg=False)
+    for key in ("trades", "stats", "signals"):
+        assert json.dumps(legs[key], sort_keys=True) == json.dumps(off[key], sort_keys=True), key
+    assert all(not t.get("avg") for t in legs["trades"])
+    # без доборов усреднение ничего не меняет
+    _, plain = post(client, pyramid_enabled=False, pyramid_avg=True)
+    _, noavg = post(client)
+    assert json.dumps(plain["trades"], sort_keys=True) == json.dumps(noavg["trades"], sort_keys=True)

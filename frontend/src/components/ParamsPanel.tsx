@@ -352,6 +352,10 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
           <>
             <Num label="Максимум доборов" help="pyramid_max" value={p.pyramid_max} step={1} onChange={(v) => set('pyramid_max', Math.max(1, Math.round(v ?? 1)))} />
             <Num label="Размер добора" help="pyramid_pct" value={p.pyramid_pct} step={1} suffix="% деп." onChange={num('pyramid_pct')} />
+            <label className="field check">
+              <input type="checkbox" checked={p.pyramid_avg} onChange={(e) => set('pyramid_avg', e.target.checked)} />
+              <Label text="пирамидинг усредняет позу" help="pyramid_avg" />
+            </label>
             <Num label="Пауза между доборами" help="pyramid_gap_h" value={p.pyramid_gap_h} step={1} suffix="ч" onChange={(v) => set('pyramid_gap_h', Math.max(0, v ?? 0))} />
           </>
         )}

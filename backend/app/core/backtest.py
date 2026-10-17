@@ -335,6 +335,112 @@ def apply_only(local_min, scalp_min, short, only):
     return local_min, scalp_min, short
 
 
+class AvgPosition:
+    """Позиция с усреднением (пирамидинг «усредняет позу»): доборы входят в ОДНУ позицию, и после каждого добора тейки, стоп и безубыток
+    считаются от новой средней цены входа. Позиция идёт по свечам постепенно (advance), потому что добор приходит в середине её жизни.
+
+    Размеры задаются весами w (в % депозита): первый вход w0, добор — w1. Количество = вес / цена; средняя цена A = стоимость / количество.
+    Тейк k закрывает долю share_k / (сумма долей ещё не исполненных тейков) от ОСТАТКА позиции, поэтому без доборов результат совпадает
+    с обычной одиночной сделкой, а после добора остаток делится между оставшимися тейками в прежних пропорциях.
+    Порядок внутри свечи и правила исполнения — те же, что в _scan (стоп → тейки → возврат в безубыток в той же свече, гэпы по open, hold)."""
+
+    def __init__(self, candles, d, i0, price0, w0, levels, sl_pct, slip, be, hold=None):
+        self.c, self.d, self.n = candles, d, len(candles)
+        self.k = i0                      # следующая необработанная свеча
+        self.A, self.q, self.W = price0, w0 / price0, w0
+        self.levels, self.sl_pct, self.slip, self.be, self.hold = levels, sl_pct, slip, be, hold
+        self.shares = [s for _, s in levels]
+        self.k_tp, self.label = 0, "SL"
+        self.fills = []                  # (индекс свечи, цена, количество, средняя цена на момент исполнения, метка)
+        self.adds = [(i0, price0, w0)]
+        self.done = False
+        self.q0 = self.q
+
+    def add(self, i, price, w):
+        """Добор по open свечи i (все предыдущие свечи уже обработаны): новая средняя цена, количество и вес."""
+        q_new = w / price
+        self.A = (self.q * self.A + w) / (self.q + q_new)
+        self.q += q_new
+        self.W += w
+        self.q0 += q_new
+        self.adds.append((i, price, w))
+
+    def prices(self):
+        return [self.A * (1 + self.d * p / 100) for p, _ in self.levels]
+
+    def sl(self):
+        return self.A * (1 - self.d * self.sl_pct / 100)
+
+    def _close(self, k, px, qty, label):
+        self.fills.append((k, px, qty, self.A, label))
+        self.q -= qty
+
+    def advance(self, until):
+        """Обрабатывает свечи [self.k, until). Возвращает True, если позиция закрыта."""
+        d, slip = self.d, self.slip
+        while not self.done and self.k < min(until, self.n):
+            k = self.k
+            _, o, h, l, _c = self.c[k]
+            stop = self.A if self.label == "BE" else self.sl()
+            stop_on = not (self.hold is not None and self.label == "SL" and self.hold(self.c[k][0]))
+            if stop_on and ((l <= stop) if d == 1 else (h >= stop)):
+                px = min(stop, o) * (1 - slip) if d == 1 else max(stop, o) * (1 + slip)
+                self._close(k, px, self.q, self.label)
+                self.done = True
+                break
+            be_now = False
+            while self.k_tp < len(self.levels):
+                lvl = self.A * (1 + d * self.levels[self.k_tp][0] / 100)
+                if not ((h >= lvl) if d == 1 else (l <= lvl)):
+                    break
+                px = max(lvl, o) if d == 1 else min(lvl, o)
+                tail = sum(self.shares[self.k_tp:])
+                qty = self.q if self.k_tp == len(self.levels) - 1 else self.q * self.shares[self.k_tp] / tail
+                self._close(k, px, qty, f"TP{self.k_tp + 1}")
+                self.k_tp += 1
+                if self.k_tp == 1 and self.be and len(self.levels) > 1:
+                    self.label, be_now = "BE", True
+            if self.q <= 1e-12 * self.q0:
+                self.done = True
+                break
+            if be_now and ((l <= self.A) if d == 1 else (h >= self.A)):
+                self._close(k, self.A * (1 - slip) if d == 1 else self.A * (1 + slip), self.q, "BE")
+                self.done = True
+                break
+            self.k += 1
+        return self.done
+
+    def close_market(self, k, price, label="REV"):
+        """Закрыть весь остаток по цене (разворот): price уже со сдвигом на проскальзывание."""
+        self._close(k, price, self.q, label)
+        self.done = True
+
+    def finalize(self, trade, fee, size, notional=None):
+        """Записывает итог в словарь сделки; если данные кончились раньше, остаток закрывается по close последней свечи (метка OPEN)."""
+        if not self.done:
+            self._close(self.n - 1, self.c[-1][4], self.q, "OPEN")
+            self.done = True
+        d = self.d
+        realized = sum(d * qty * (px - a) for _, px, qty, a, _ in self.fills)
+        pnl = realized / self.W - 2 * fee
+        last = self.fills[-1]
+        qty_sum = sum(f[2] for f in self.fills)
+        tp1 = next((f for f in self.fills if f[4] == "TP1"), None)
+        label = last[4]
+        trade.update(
+            entry=self.A, tp=self.prices()[-1], tps=self.prices(), sl=self.sl(),
+            exit=last[1], exit_avg=sum(f[1] * f[2] for f in self.fills) / qty_sum, exit_ts=self.c[last[0]][0],
+            reason="TP" if label.startswith("TP") else label,
+            tp_hits=sum(f[4].startswith("TP") for f in self.fills),
+            be_ts=self.c[tp1[0]][0] if (tp1 and trade["be"]) else None,
+            fills=[{"ts": self.c[k][0], "price": px, "share": qty * a / self.W, "label": lab} for k, px, qty, a, lab in self.fills],
+            adds=[{"ts": self.c[k][0], "price": px, "weight": w, "signal_ts": None} for k, px, w in self.adds],
+            adds_n=len(self.adds) - 1, w_total=self.W, avg=True,
+            _events=[], _j=last[0],
+            pnl_pct=pnl * 100, pnl_usd=pnl * (notional if notional else self.A * size),
+        )
+
+
 def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None,
                pyramid=None, signal_gap_h=0.0, hold=None, skipped=None):
     """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам. levels — результат normalize_tps. notional (USD) задаёт размер
@@ -343,7 +449,8 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
     Позиция — группа «ног» (legs): первая нога открывается по сигналу, остальные — доборы (пирамидинг). У каждой ноги свои вход, тейки и стоп
     от её собственной цены входа; ноги закрываются независимо. Без пирамидинга нога всегда одна (одна позиция одновременно).
       сигнал в ту же сторону, пока позиция открыта: игнорируется, а при pyramid={"max": N, "gap_h": H} — добор (не больше N доборов за позицию
-        и не чаще, чем раз в H часов после открытия последней ноги);
+        и не чаще, чем раз в H часов после открытия последней ноги); при "avg": True (с весами "w0" и "w", % депозита) доборы усредняют одну
+        позицию (AvgPosition): тейки и стоп пересчитываются от новой средней цены;
       сигнал в противоположную сторону: разворот — все открытые ноги закрываются по open свечи входа (исполненные тейки остаются);
       cooldown_h — пауза после стопа; signal_gap_h — минимум часов между открытиями позиций (включая развороты);
       hold(d, ts_мс) -> bool — «стоп-лосс не ставить, пока метрики сильны» (см. _scan);
@@ -352,12 +459,19 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
     n = len(candles)
     trades, open_legs = [], []
     group, last_group, last_open_ts, last_leg_ts, adds = 0, [], None, None, 0
+    avg = bool(pyramid and pyramid.get("avg"))             # доборы усредняют одну позицию (AvgPosition), а не живут отдельными ногами
+    avg_pos = avg_trade = None
     levels_shares = [s for _, s in levels]
     be = bool(be_after_tp1 and len(levels) > 1)
 
     def skip(sts, side, reason):
         if skipped is not None:
             skipped.append((sts, side, reason))
+
+    def fin_avg():
+        avg_pos.finalize(avg_trade, fee, size, notional)
+        for a, sig_ts in zip(avg_trade["adds"][1:], avg_trade["add_signals"]):
+            a["signal_ts"] = sig_ts
 
     def open_leg(sts, d, side, i, leg_no):
         entry = candles[i][1] * (1 + d * slip)
@@ -377,9 +491,14 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         if i >= n:
             skip(sts, side, "нет свечи входа")
             continue
-        still = [leg for leg in open_legs if leg["_j"] >= i]
-        if len(still) != len(open_legs):
-            open_legs[:] = still
+        if avg_pos is not None and open_legs:
+            if avg_pos.advance(i):                          # позиция закрылась сама до этого сигнала
+                fin_avg()
+                open_legs.clear()
+        else:
+            still = [leg for leg in open_legs if leg["_j"] >= i]
+            if len(still) != len(open_legs):
+                open_legs[:] = still
         if not open_legs:
             # позиции нет (закрылась сама по SL/TP): паузы перед новым открытием
             last = max(last_group, key=lambda t: t["exit_ts"]) if last_group else None
@@ -400,9 +519,13 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
                 skip(sts, side, "пауза между доборами")
                 continue
             adds += 1
-            open_leg(sts, d, side, i, adds + 1)
+            if avg:
+                avg_pos.add(i, candles[i][1] * (1 + d * slip), pyramid["w"])
+                avg_trade["add_signals"].append(sts)
+            else:
+                open_leg(sts, d, side, i, adds + 1)
+                last_group.append(trades[-1])
             last_leg_ts = candles[i][0]
-            last_group.append(trades[-1])
             continue
         else:
             if signal_gap_h and last_open_ts is not None and sts < last_open_ts + signal_gap_h * 3.6e6:
@@ -410,16 +533,33 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
                 continue
             # разворот на open свечи входа: исполненные тейки остаются, остаток каждой ноги закрывается по рынку
             o = candles[i][1]
-            for cur in open_legs:
-                kept = [e for e in cur["_events"] if e[0] < i]
-                rest = 1.0 - sum(e[2] for e in kept)
-                _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size, notional)
+            if avg_pos is not None:
+                avg_pos.close_market(i, o * (1 - slip) if avg_trade["side"] == "long" else o * (1 + slip))
+                fin_avg()
+            else:
+                for cur in open_legs:
+                    kept = [e for e in cur["_events"] if e[0] < i]
+                    rest = 1.0 - sum(e[2] for e in kept)
+                    _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size, notional)
             open_legs.clear()
         group += 1
         adds = 0
-        leg = open_leg(sts, d, side, i, 1)
+        if avg:
+            entry = candles[i][1] * (1 + d * slip)
+            hold_d = (lambda t, d=d: hold(d, t)) if hold else None
+            avg_pos = AvgPosition(candles, d, i, entry, pyramid["w0"], levels, sl_pct, slip, be, hold_d)
+            avg_trade = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry_first": entry, "be": be, "leg": 1, "group": group,
+                         "pyramid": False, "add_signals": [], "tp_shares": levels_shares, "_j": n, "_events": []}
+            trades.append(avg_trade)
+            open_legs.append(avg_trade)
+            leg = avg_trade
+        else:
+            leg = open_leg(sts, d, side, i, 1)
         last_group = [leg]
-        last_open_ts = last_leg_ts = leg["entry_ts"]
+        last_open_ts = last_leg_ts = candles[i][0]
+    if avg_pos is not None and "exit_ts" not in avg_trade:  # данные кончились, пока позиция открыта
+        avg_pos.advance(n)
+        fin_avg()
     return trades
 
 
