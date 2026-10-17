@@ -8,6 +8,7 @@ from .core import backtest
 from .core.entries import attach_liq, load_signals
 
 from .config import Settings
+from .result_cache import ResultCache
 
 # интервалы для автоматического выбора таймфрейма графика, секунды
 UI_TIMEFRAMES = [60, 300, 900, 1800, 3600, 14400, 86400]   # что предлагает переключатель в интерфейсе
@@ -27,6 +28,7 @@ class DataStore:
         self._lock = threading.Lock()
         self._raw = {}                  # id источника -> (mtime, [отчёты])
         self._sig = {}                  # (источник, источник ликвидаций) -> (ключ, данные)
+        self.results = ResultCache(s.cache_dir / "results", s.result_cache_mem, s.result_cache_files) if s.result_cache else None
         self._latest = {}               # id источника -> (mtime, последний отчёт)
         self._candles = {}              # символ -> (mtime, свечи, времена)
         self._extra = self._load_extra()  # активы, добавленные из интерфейса
