@@ -1,5 +1,6 @@
 """Запуск бэктеста и подготовка данных для интерфейса (сделки, сигналы, статистика)."""
 import math
+import os
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
 
@@ -207,7 +208,51 @@ def _max_dd_pct(pn, deposit):
     return 100 * dd
 
 
-def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None) -> dict:
+def _stat(path):
+    try:
+        st = os.stat(path)
+        return [st.st_mtime_ns, st.st_size]
+    except OSError:
+        return None
+
+
+def data_fingerprint(store: DataStore, eff: dict, now_ms=None, available_token=None) -> dict:
+    """Всё, от чего зависит результат помимо параметров: файлы истории и свечей (время изменения и размер) и, для топ-коинов, свечи всех монет,
+    список рынков биржи и текущая минута (от неё зависит, закончилось ли окно сделки)."""
+    s = store.s
+    source_id = eff.get("source") or s.default_source
+    liq_id = eff.get("liq_source")
+    symbol = eff.get("symbol") or s.symbol
+    fp = {"src": _stat(store.source(source_id).file), "liq": _stat(store.source(liq_id).file) if liq_id and liq_id != source_id else None,
+          "candles": _stat(store.candle_path(symbol)), "env": [s.exchange, s.candle_tf, s.liq_max_age_h]}
+    if eff.get("top_enabled"):
+        tf = f"_{s.candle_tf}.csv"
+        try:
+            names = sorted(n for n in os.listdir(s.cache_dir) if n.endswith(tf) or n.endswith(tf + ".windows.json"))
+        except OSError:
+            names = []
+        fp["top_files"] = [[n, *(_stat(os.path.join(s.cache_dir, n)) or [])] for n in names]
+        fp["bucket"] = (now_ms if now_ms is not None else int(time.time() * 1000)) // backtest.tf_to_ms(s.candle_tf)
+        fp["markets"] = available_token
+    return fp
+
+
+def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None, available_token=None) -> dict:
+    """Бэктест с кешем результатов (store.results): тот же конфиг на тех же данных возвращается сразу; новые отчёты или свечи меняют
+    отпечаток данных, и конфиг считается заново на свежих. available_token — «версия» списка рынков (меняется при его обновлении)."""
+    cache = getattr(store, "results", None)
+    if cache is None:
+        return _compute(store, defaults, params, available_fn, now_ms)
+    try:
+        eff = effective_params(defaults, params)
+        key = cache.key("bt", eff, data_fingerprint(store, eff, now_ms, available_token))
+    except Exception:                                    # неизвестный источник/актив и т. п.: пусть ошибку выдаст сам расчёт
+        return _compute(store, defaults, params, available_fn, now_ms)
+    value, _src = cache.get_or_compute(key, lambda: _compute(store, defaults, params, available_fn, now_ms))
+    return value
+
+
+def _compute(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None) -> dict:
     eff = effective_params(defaults, params)
     source_id = eff.get("source") or store.s.default_source
     liq_id = eff.get("liq_source")

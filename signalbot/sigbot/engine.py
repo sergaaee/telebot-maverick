@@ -66,7 +66,8 @@ class Engine:
     # ---------- расчёт ----------
     def evaluate(self, params):
         try:
-            return service.run_backtest(self.store, self.s.defaults, BacktestParams(**params), available_fn=(self.markets.symbols if self.markets else None))
+            return service.run_backtest(self.store, self.s.defaults, BacktestParams(**params), available_fn=(self.markets.symbols if self.markets else None),
+                                        available_token=(self.markets.version if self.markets else None))
         except (ParamError, FileNotFoundError) as e:
             raise EvalError(str(e)) from None
 
