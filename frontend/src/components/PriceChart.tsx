@@ -218,6 +218,9 @@ export default function PriceChart(props: Props) {
         setTimeout(() => (programmatic.current = Math.max(0, programmatic.current - 1)), 250);
       }
       propsRef.current.onLoadError(null);
+      // верхняя цена шкалы — для автотеста (и отладки): видно, подобрала ли шкала диапазон под актив
+      const top = candle.current.coordinateToPrice(1);
+      if (host.current && top != null) host.current.dataset.priceTop = String(Math.round(top));
     } catch (e) {
       propsRef.current.onLoadError(e instanceof Error ? e.message : String(e));
     }
@@ -337,6 +340,8 @@ export default function PriceChart(props: Props) {
       firstSymbol.current = false;
       return;
     }
+    // ручное масштабирование по вертикали отключает автошкалу цены; у другого актива цена в другом диапазоне — возвращаем автоподбор
+    chart.current?.priceScale('right').applyOptions({ autoScale: true });
     if (candle.current) void initialLoad();
   }, [props.symbol]);
 
