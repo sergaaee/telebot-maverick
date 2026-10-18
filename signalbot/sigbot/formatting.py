@@ -145,6 +145,36 @@ def signal_message(cfg, result, sig, report, plan, entry_price, top, source_labe
     return "\n\n".join(blocks)
 
 
+FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>"}
+
+
+def fill_message(cfg, result, ev, source_label):
+    """Уведомление об исполнении тейка / стопа / безубытка / разворота по ноге или позиции конфига."""
+    p = result["params"]
+    title = FILL_TITLES["TP" if ev["label"].startswith("TP") else ev["label"]].format(label=ev["label"])
+    what = "усреднённая позиция" if ev["avg"] else (f"добор #{ev['leg'] - 1}" if ev["pyramid"] else "позиция")
+    lines = [
+        f"{title}  ·  {side_line(ev['side'])}  ·  <b>{esc(str(p['symbol']))}</b>",
+        f"📋 Конфиг: <b>{esc(cfg['name'])}</b>  <i>({esc(source_label)})</i>",
+        f"🕒 {ts_str(ev['ts'])}  ·  {what}, вход <code>{price(ev['entry'])}</code>" + (f" (средняя из {ev['adds_n'] + 1} входов)" if ev["avg"] and ev["adds_n"] else ""),
+        f"Цена исполнения ≈ <code>{price(ev['price'])}</code> · закрыто <b>{ev['share'] * 100:.0f}%</b> позиции",
+    ]
+    if ev.get("tp1_be"):
+        lines.append(f"Стоп перенесён в безубыток (<code>{price(ev['entry'])}</code>)")
+    m = ev.get("metrics")
+    if m:
+        dg = "–" if m.get("dg") is None else f"{m['dg']:.2f}"
+        lines.append(f"📊 Метрики в этот момент: DG <b>{dg}</b> · DL <b>{m['dl']:.2f}</b> · DS <b>{m['ds']:.2f}</b>")
+    if ev["closed"]:
+        hold = ev["hold_h"]
+        held = f"{hold:.1f} ч" if hold < 48 else f"{hold / 24:.1f} сут"
+        lines.append(f"🏁 {'Позиция' if not ev['pyramid'] else 'Нога'} закрыта · итог <b>{usd(ev['pnl_usd'])}</b> ({pct(ev['pnl_pct'])} на объём) · держалась {held}")
+    else:
+        lines.append("Остаток позиции продолжает идти.")
+    lines.append("<i>Расчёт по свечам: исполнение — начало минуты, в которой цена достигла уровня.</i>")
+    return "\n".join(lines)
+
+
 def top_block(top, sig, p, result):
     if "skip" in top:
         return f"🪙 <b>Топ-коин</b>: пропущен — {esc(top['skip'])}"
@@ -171,7 +201,7 @@ def accepted_message(cfg, result):
         esc(config_summary(cfg)),
         stats_block(result["stats"]["total"], cfg["params"], result["range"]),
         sizing_line(result),
-        "Буду присылать каждый новый сигнал по этому конфигу. Старые сигналы не присылаются.",
+        "Буду присылать каждый новый сигнал по этому конфигу, а затем — каждое исполнение: TP1–TP3, стоп-лосс, безубыток, разворот. Старые сигналы и исполнения не присылаются.",
     ])
 
 
@@ -198,7 +228,7 @@ NOT_LINKED = "🔒 Этот Telegram не привязан к аккаунту. 
 
 HELP = """🤖 <b>Бот сигналов Maverick</b>
 
-Присылаю каждый новый сигнал по вашим конфигам вместе со статистикой конфига (winrate, PF, доходность, просадка, Sharpe). Конфиги у каждого пользователя свои.
+Присылаю каждый новый сигнал по вашим конфигам вместе со статистикой конфига (winrate, PF, доходность, просадка, Sharpe), а также каждое исполнение: тейки, стоп-лосс, безубыток, разворот, добор. Конфиги у каждого пользователя свои.
 
 <b>Как добавить конфиг</b>
 • Файлом: в интерфейсе «⬇ Скачать конфиг» → отправьте файл .json сюда (подпись к файлу = имя конфига)

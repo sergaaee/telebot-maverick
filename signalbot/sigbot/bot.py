@@ -17,6 +17,7 @@ from .engine import Cancelled, EvalError, fingerprint
 from .transport import TelegramError
 
 log = logging.getLogger("signalbot")
+FILL_CHECK_SEC = 300
 
 LINK_TRIES, LINK_WINDOW = 5, 600.0
 
@@ -318,7 +319,7 @@ class SignalService:
 
     def _process(self, cfg, user, force, memo):
         p, chat = cfg["params"], user["telegram_id"]
-        fp = fingerprint(self.s, p)
+        fp = (fingerprint(self.s, p), int(self.clock() // FILL_CHECK_SEC))     # исполнения зависят от свечей, которые обновляются независимо от истории отчётов — пересчёт раз в 5 минут
         if not force and cfg["baseline"] and self._fp.get(cfg["id"]) == fp:
             return
         res, warn = self._evaluate(p, memo, user)
@@ -326,7 +327,8 @@ class SignalService:
         upd = {"error": None}
         if not cfg["baseline"]:
             # первый расчёт: фиксируем текущее состояние, чтобы не засыпать старыми сигналами, и присылаем карточку конфига
-            upd.update(last_ts=max([s["ts"] for s in res["last_signals"] if not s["trend_blocked"]], default=0), baseline=True)
+            upd.update(last_ts=max([s["ts"] for s in res["last_signals"] if not s["trend_blocked"]], default=0), baseline=True,
+                       fill_ts=max([e["ts"] for e in self.engine.fill_events(res)], default=0))
             self.send(chat, fm.accepted_message(cfg, res))
         else:
             fresh = self.engine.new_signals(res, cfg["last_ts"], self.engine.price_fn(p["symbol"]) if self.b.live_price else None)
@@ -347,6 +349,7 @@ class SignalService:
                 sent += 1
             if sent:
                 upd["alerts"] = cfg["alerts"] + sent
+            self._send_fills(cfg, res, chat, label, upd)             # исполнения в счётчик «сигналов» (alerts) не входят
         self.db.update_config(cfg["id"], **upd)
         self._fp[cfg["id"]] = fp
         # окна свечей топ-коинов для статистики докачиваются в конце цикла, с ограничением по времени (карточка и сигналы от них не зависят)
@@ -354,6 +357,25 @@ class SignalService:
             wins, _ = self.engine.pending_windows(res, self.b.top_windows)
             for w in wins:
                 memo["top"].setdefault(w, set()).add(cfg["id"])
+
+    def _send_fills(self, cfg, res, chat, label, upd):
+        """Уведомления об исполнениях (TP / SL / БУ / разворот) после отметки fill_ts. У конфига без отметки (создан до этой функции) прошлое не присылаем:
+        фиксируем текущее состояние. Слишком старые (дольше SIGNALBOT_MAX_AGE_MIN) пропускаются, как и сигналы."""
+        events = self.engine.fill_events(res)
+        newest = max([e["ts"] for e in events], default=0)
+        mark = cfg.get("fill_ts")
+        if mark is None:
+            upd["fill_ts"] = newest
+            return 0
+        sent = 0
+        for ev in (e for e in events if e["ts"] > mark):
+            if (self.clock() * 1000 - ev["ts"]) / 60000 > self.b.max_age_min:
+                log.info("исполнение %s %s по %s устарело — пропущено", ev["label"], ev["ts"], cfg["name"])
+                continue
+            self.send(chat, fm.fill_message(cfg, res, ev, label))
+            sent += 1
+        upd["fill_ts"] = max(mark, newest)
+        return sent
 
     def _download_top(self, memo, users):
         """Докачивает окна по одному, пока не вышел бюджет времени цикла (SIGNALBOT_TOP_BUDGET_SEC) или не нажата /cancel."""
