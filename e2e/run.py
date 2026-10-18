@@ -214,6 +214,16 @@ def scenario(pg, base, state_url):
     pg.wait_for_timeout(3500)
     eth_price = float(rows.nth(0).locator("td").nth(3).inner_text().replace("\xa0", "").replace(" ", "").replace(",", "."))
     check("смена актива пересчитала сделки на ценах актива", btc_price > 20000 > eth_price > 100, f"BTC {btc_price} -> ETH {eth_price}")
+    check("после смены актива шкала цены подобрана под ETH", 0 < float(pg.locator(".price .chart-host").get_attribute("data-price-top")) < 20000, pg.locator(".price .chart-host").get_attribute("data-price-top"))
+    asset.locator("select").select_option("BTC/USDT:USDT")
+    pg.wait_for_timeout(3500)
+    # ручное масштабирование по цене (перетаскивание шкалы справа) отключает автошкалу — после смены актива она должна вернуться
+    box = pg.locator(".price .chart-host").bounding_box()
+    pg.mouse.move(box["x"] + box["width"] - 25, box["y"] + box["height"] / 2); pg.mouse.down()
+    pg.mouse.move(box["x"] + box["width"] - 25, box["y"] + box["height"] / 2 - 120, steps=8); pg.mouse.up()
+    asset.locator("select").select_option("ETH/USDT:USDT")
+    pg.wait_for_timeout(3500)
+    check("шкала цены, сдвинутая вручную, после смены актива снова подобрана автоматически", 0 < float(pg.locator(".price .chart-host").get_attribute("data-price-top")) < 20000, pg.locator(".price .chart-host").get_attribute("data-price-top"))
     asset.locator("select").select_option("BTC/USDT:USDT")
     pg.wait_for_timeout(3500)
 
