@@ -149,14 +149,18 @@ def _extra_stats(trades, span_ms, deposit=None):
     }
 
 
-def _metrics_at(report_ts, reports):
-    """Метрики последнего отчёта не позже ts (то, что показывал бот в момент события): lookup(ts) -> {dg, dl, ds} или None."""
-    def at(ts):
+def _metrics_at(report_ts, reports, hold=None):
+    """Метрики последнего отчёта не позже ts (то, что показывал бот в момент события): lookup(ts, side) -> {dg, dl, ds[, strong]} или None.
+    strong (только если включено «не ставить SL, пока метрики сильны») — выполнялось ли в этот момент условие входа, т.е. был ли снят стоп."""
+    def at(ts, d=None):
         k = bisect_right(report_ts, ts) - 1
         if k < 0:
             return None
         r = reports[k]
-        return {"dg": r[7] if len(r) > 7 else None, "dl": r[1], "ds": r[2]}
+        m = {"dg": r[7] if len(r) > 7 else None, "dl": r[1], "ds": r[2]}
+        if hold is not None and d is not None:
+            m["strong"] = bool(hold(d, ts))
+        return m
     return at
 
 
@@ -166,7 +170,7 @@ def _trade_out(n, t, rep, at=None):
         "n": n, "side": t["side"], "signal_ts": t["signal_ts"], "entry_ts": t["entry_ts"], "exit_ts": t["exit_ts"],
         "entry": t["entry"], "exit": t["exit"], "exit_avg": t["exit_avg"], "tp": t["tp"], "tps": t["tps"],
         "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
-        "fills": [{**f, "metrics": at(f["ts"])} for f in t["fills"]] if at else t["fills"], "reason": t["reason"],
+        "fills": [{**f, "metrics": at(f["ts"], 1 if t["side"] == "long" else -1)} for f in t["fills"]] if at else t["fills"], "reason": t["reason"],
         "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "notional": t.get("notional"), "margin": t.get("margin"), "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
         "local": r[1] if r else None, "scalp": r[2] if r else None, "global": r[7] if r and len(r) > 7 else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
@@ -355,7 +359,8 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
 
     rep = {s[0]: s for s in sigs}
-    at = _metrics_at([s[0] for s in sigs_all], sigs_all)
+    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm) if eff.get("sl_hold_strong") else None
+    at = _metrics_at([s[0] for s in sigs_all], sigs_all, hold_chk)
     out_trades = [_trade_out(i, t, rep, at) for i, t in enumerate(trades, 1)]
 
     span_ms = (candles[-1][0] - trades[0]["entry_ts"]) if trades else 0

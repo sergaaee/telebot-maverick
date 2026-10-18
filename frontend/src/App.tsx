@@ -581,7 +581,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
               {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)}{selTrade.adds_n ? ` · вход ${fmtPrice(selTrade.entry)} (средняя из ${selTrade.adds_n + 1} входов, первый ${fmtPrice(selTrade.entry_first ?? selTrade.entry)})` : ''}
               {selTrade.local != null && <span className="muted"> · <b>вход</b> {metricsStr({ dg: selTrade.global ?? null, dl: selTrade.local, ds: selTrade.scalp ?? 0 })}</span>}
               {selTrade.fills.map((f, i) => (
-                <span className="fills" key={i}> · <b>{f.label}</b> {Math.round(f.share * 100)}% @ {fmtPrice(f.price)}{f.metrics ? ` — ${metricsStr(f.metrics)}` : ''}</span>
+                <span className="fills" key={i}> · <b>{f.label}</b> {Math.round(f.share * 100)}% @ {fmtPrice(f.price)}{f.metrics ? ` — ${metricsStr(f.metrics)}` : ''}{f.label === 'SL' && f.metrics?.strong != null ? (f.metrics.strong ? ' (метрики в зоне входа — стоп должен быть снят)' : ' (метрики вне зоны входа — стоп действовал)') : ''}</span>
               ))}
               {selTrade.notional != null && <span className="muted"> · объём {fmtUsd(selTrade.notional).replace(/^\+/, '')}</span>}
               {' · '}<b className={signClass(selTrade.pnl_usd)}>{fmtUsd(selTrade.pnl_usd)}</b>

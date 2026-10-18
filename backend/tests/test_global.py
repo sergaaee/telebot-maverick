@@ -71,3 +71,12 @@ def test_fills_carry_metrics_at_fill_time():
     assert at(T0 + H + 5) == {"dg": 1.9, "dl": 2.0, "ds": 2.1}
     assert at(T0 + 10 * H)["dl"] == 3.0
     assert _metrics_at([T0], [(T0, 1, 2, None, None, None, None)])(T0) == {"dg": None, "dl": 1, "ds": 2}      # старый формат без DG
+
+
+def test_fill_metrics_report_strong_flag_for_sl_hold():
+    from app.service import _metrics_at
+    s = sigs((2.0, 2.4, None), (1.7, 2.4, None))                       # DS проходит порог, но DL упал ниже — стоп должен действовать
+    hold = strong_checker(s, 1.9, 2.0, None)
+    at = _metrics_at([x[0] for x in s], s, hold)
+    assert at(T0 + 5, 1)["strong"] is True and at(T0 + H + 5, 1)["strong"] is False
+    assert "strong" not in _metrics_at([x[0] for x in s], s)(T0 + 5, 1)

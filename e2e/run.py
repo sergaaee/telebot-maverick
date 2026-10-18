@@ -548,6 +548,9 @@ def scenario(pg, base, state_url):
           and max(t["leg"] for t in legs) <= 3 and api_p["stats"]["total"]["adds"] > 0)
     gap = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({signal_gap_h: 24, pyramid_gap_h: 24, pyramid_enabled: true})}).then(r => r.json())""")
     check("API: паузы дают причины пропуска", "пауза между сигналами" in gap["skipped_reasons"] or "пауза между доборами" in gap["skipped_reasons"], str(gap["skipped_reasons"]))
+    hold_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({sl_hold_strong: true})}).then(r => r.json())""")
+    sl_fills = [f for t in hold_api["trades"] for f in t["fills"] if f["label"] == "SL"]
+    check("API: при «не ставить SL…» исполнения по SL происходят только вне зоны входа (флаг strong = false)", sl_fills and all(f["metrics"]["strong"] is False for f in sl_fills), f"SL {len(sl_fills)}, strong: {sum(1 for f in sl_fills if f['metrics']['strong'])}")
     # конфиг: новые поля уходят в файл; старый файл без них ВЫКЛЮЧАЕТ возможности
     with pg.expect_download() as dl2:
         pg.get_by_role("button", name="Скачать конфиг").click()
