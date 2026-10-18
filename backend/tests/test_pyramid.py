@@ -377,3 +377,45 @@ def test_avg_via_api_sizing_signals_and_stats(client):  # noqa: F811
     _, plain = post(client, pyramid_enabled=False, pyramid_avg=True)
     _, noavg = post(client)
     assert json.dumps(plain["trades"], sort_keys=True) == json.dumps(noavg["trades"], sort_keys=True)
+
+
+# ---------------- движение цены от последнего входа ----------------
+def stairs():
+    c = flat()
+    move(c, 20, 600, 101)          # +1% после 20-й минуты
+    move(c, 40, 600, 102)          # ещё +1% после 40-й
+    return c
+
+
+def test_pyramid_move_requires_price_distance_from_last_entry():
+    c = stairs()
+    trades, skipped = run(ev(10, 30, 50), c, pyramid={"max": 5, "gap_h": 0, "move_pct": 0.9, "move_dir": "favor"})
+    assert [t["entry_ts"] // M - T0 // M for t in trades] == [10, 30, 50]
+    trades, skipped = run(ev(10, 15, 30), c, pyramid={"max": 5, "gap_h": 0, "move_pct": 0.9, "move_dir": "favor"})          # 15-я минута: цена не сдвинулась
+    assert [t["entry_ts"] // M - T0 // M for t in trades] == [10, 30]
+    assert [r for _, _, r in skipped] == ["мало движения от последнего входа"]
+
+
+def test_pyramid_move_direction_modes():
+    c = stairs()
+    kw = dict(max=5, gap_h=0, move_pct=0.9)
+    assert len(run(ev(10, 30), c, pyramid={**kw, "move_dir": "favor"})[0]) == 2          # цена выросла — лонг в плюсе
+    assert len(run(ev(10, 30), c, pyramid={**kw, "move_dir": "against"})[0]) == 1        # против позиции движения не было
+    assert len(run(ev(10, 30), c, pyramid={**kw, "move_dir": "any"})[0]) == 2
+    assert len(run(ev(10, 30, d=-1), c, pyramid={**kw, "move_dir": "against"})[0]) == 2  # шорт: рост цены — против него
+    assert len(run(ev(10, 30, d=-1), c, pyramid={**kw, "move_dir": "favor"})[0]) == 1
+
+
+def test_pyramid_move_off_by_default_and_measured_from_last_add():
+    c = stairs()
+    assert len(run(ev(10, 15, 30), c, pyramid={"max": 5, "gap_h": 0})[0]) == 3
+    assert len(run(ev(10, 15, 30), c, pyramid={"max": 5, "gap_h": 0, "move_pct": 0})[0]) == 3
+    # от ПОСЛЕДНЕГО входа: 10-я (100) → 30-я (101, +1%) → 50-я (102, ещё +0.99%); от первого входа было бы +2%, но 30-я уже сбросила точку отсчёта
+    t, sk = run(ev(10, 30, 35, 50), c, pyramid={"max": 5, "gap_h": 0, "move_pct": 0.95, "move_dir": "favor"})
+    assert [x["entry_ts"] // M - T0 // M for x in t] == [10, 30, 50] and len(sk) == 1
+
+
+def test_pyramid_move_with_averaging():
+    c = stairs()
+    t, sk = run(ev(10, 15, 30), c, pyramid={"max": 5, "gap_h": 0, "move_pct": 0.9, "move_dir": "favor", "avg": True, "w0": 10, "w": 5})
+    assert t[0]["adds_n"] == 1 and [r for _, _, r in sk] == ["мало движения от последнего входа"]

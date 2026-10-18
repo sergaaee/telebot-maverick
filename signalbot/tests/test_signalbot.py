@@ -554,3 +554,26 @@ def test_old_stored_config_ignores_env_deep_global_defaults(env):
     assert res["stats"]["total"]["trades"] == env.engine.evaluate({**old, "global_min": None})["stats"]["total"]["trades"]
     new, _ = validate(UI_CONFIG["params"], env.s.defaults)                                                                                # новый импорт фиксирует значения явно
     assert new["global_min"] == 99.0
+
+
+def test_old_stored_config_ignores_env_pyramid_move_defaults(env):
+    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items() if k not in ("pyramid_move_pct", "pyramid_move_dir")}
+    env.s.defaults.update(pyramid_move_pct=5.0, pyramid_move_dir="favor")
+    res = env.engine.evaluate(old)
+    assert res["params"]["pyramid_move_pct"] == 0 and res["params"]["pyramid_move_dir"] == "any"
+    new, _ = validate(UI_CONFIG["params"], env.s.defaults)
+    assert new["pyramid_move_pct"] == 5.0
+
+
+def test_new_signals_move_filter_for_fresh_add_signals():
+    base = {"candles_last_ts": 1000}
+    trade = {"side": "long", "reason": "OPEN", "group": 1, "leg": 1, "entry_ts": 500, "entry": 100.0, "signal_ts": 500}
+    sig = {"ts": 2000, "side": "long", "taken": False, "trend_blocked": False}
+    def run(price, **kw):
+        res = {"params": {"pyramid_enabled": True, "trade_pct": 10, "pyramid_pct": 5, "pyramid_max": 3, **kw}, "range": base, "trades": [trade], "last_signals": [sig]}
+        return Engine.new_signals(res, 0, price)
+    assert len(run(100.2)) == 1                                                    # фильтра нет — добор
+    assert run(100.2, pyramid_move_pct=1.0, pyramid_move_dir="favor") == []        # цена почти не сдвинулась
+    assert len(run(101.5, pyramid_move_pct=1.0, pyramid_move_dir="favor")) == 1
+    assert run(101.5, pyramid_move_pct=1.0, pyramid_move_dir="against") == []
+    assert len(run(None, pyramid_move_pct=1.0, pyramid_move_dir="favor")) == 1     # цены нет — условие не проверяется

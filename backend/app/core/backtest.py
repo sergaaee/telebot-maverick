@@ -463,7 +463,8 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
     Позиция — группа «ног» (legs): первая нога открывается по сигналу, остальные — доборы (пирамидинг). У каждой ноги свои вход, тейки и стоп
     от её собственной цены входа; ноги закрываются независимо. Без пирамидинга нога всегда одна (одна позиция одновременно).
       сигнал в ту же сторону, пока позиция открыта: игнорируется, а при pyramid={"max": N, "gap_h": H} — добор (не больше N доборов за позицию
-        и не чаще, чем раз в H часов после открытия последней ноги); при "avg": True (с весами "w0" и "w", % депозита) доборы усредняют одну
+        и не чаще, чем раз в H часов после открытия последней ноги; необязательно "move_pct": X, "move_dir": "any"|"favor"|"against" — цена
+        должна уйти от цены последнего входа не меньше чем на X% (в любую сторону / в сторону позиции / против неё)); при "avg": True (с весами "w0" и "w", % депозита) доборы усредняют одну
         позицию (AvgPosition): тейки и стоп пересчитываются от новой средней цены;
       сигнал в противоположную сторону: разворот — все открытые ноги закрываются по open свечи входа (исполненные тейки остаются);
       cooldown_h — пауза после стопа; signal_gap_h — минимум часов между открытиями позиций (включая развороты);
@@ -472,7 +473,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, open_legs = [], []
-    group, last_group, last_open_ts, last_leg_ts, adds = 0, [], None, None, 0
+    group, last_group, last_open_ts, last_leg_ts, last_leg_px, adds = 0, [], None, None, None, 0
     avg = bool(pyramid and pyramid.get("avg"))             # доборы усредняют одну позицию (AvgPosition), а не живут отдельными ногами
     avg_pos = avg_trade = None
     levels_shares = [s for _, s in levels]
@@ -532,6 +533,12 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             if pyramid.get("gap_h") and sts < last_leg_ts + pyramid["gap_h"] * 3.6e6:
                 skip(sts, side, "пауза между доборами")
                 continue
+            if pyramid.get("move_pct") and last_leg_px:
+                mv = d * (candles[i][1] / last_leg_px - 1) * 100       # движение цены от последнего входа: + в сторону позиции, − против
+                mode = pyramid.get("move_dir", "any")
+                if not ((mv >= pyramid["move_pct"]) if mode == "favor" else (-mv >= pyramid["move_pct"]) if mode == "against" else (abs(mv) >= pyramid["move_pct"])):
+                    skip(sts, side, "мало движения от последнего входа")
+                    continue
             adds += 1
             if avg:
                 avg_pos.add(i, candles[i][1] * (1 + d * slip), pyramid["w"])
@@ -539,7 +546,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             else:
                 open_leg(sts, d, side, i, adds + 1)
                 last_group.append(trades[-1])
-            last_leg_ts = candles[i][0]
+            last_leg_ts, last_leg_px = candles[i][0], candles[i][1]
             continue
         else:
             if signal_gap_h and last_open_ts is not None and sts < last_open_ts + signal_gap_h * 3.6e6:
@@ -571,6 +578,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             leg = open_leg(sts, d, side, i, 1)
         last_group = [leg]
         last_open_ts = last_leg_ts = candles[i][0]
+        last_leg_px = candles[i][1]
     if avg_pos is not None and "exit_ts" not in avg_trade:  # данные кончились, пока позиция открыта
         avg_pos.advance(n)
         fin_avg()

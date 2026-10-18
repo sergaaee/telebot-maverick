@@ -329,7 +329,7 @@ class SignalService:
             upd.update(last_ts=max([s["ts"] for s in res["last_signals"] if not s["trend_blocked"]], default=0), baseline=True)
             self.send(chat, fm.accepted_message(cfg, res))
         else:
-            fresh = self.engine.new_signals(res, cfg["last_ts"])
+            fresh = self.engine.new_signals(res, cfg["last_ts"], self.engine.price_fn(p["symbol"]) if self.b.live_price else None)
             seen = [s["ts"] for s in res["last_signals"] if not s["trend_blocked"]]
             if seen:
                 upd["last_ts"] = max(cfg["last_ts"], max(seen))         # повторные подтверждения серии тоже «просмотрены»
