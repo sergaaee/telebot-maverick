@@ -59,6 +59,9 @@ export interface Params {
   /** размер добора, % депозита */
   pyramid_pct: number;
   pyramid_gap_h: number;
+  /** добор только если цена ушла от последнего входа не меньше чем на столько % (0 — не проверять) и куда именно */
+  pyramid_move_pct: number;
+  pyramid_move_dir: 'any' | 'favor' | 'against';
   /** доборы усредняют одну позицию: тейки и стоп считаются от новой средней цены входа */
   pyramid_avg: boolean;
   /** минимум часов между открытиями позиций */

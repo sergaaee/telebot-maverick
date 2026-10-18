@@ -292,3 +292,13 @@ def test_deep_global_env_default_and_explicit_off(tmp_path, monkeypatch, client)
     assert c2.post("/api/backtest", json={"side": "long"}).json()["stats"]["total"]["trades"] == 0     # умолчание из env применено
     off = c2.post("/api/backtest", json={"global_min": None, "side": "long"}).json()                                # явный null (старый конфиг) — выключено
     assert off["stats"]["total"]["trades"] == client.post("/api/backtest", json={"side": "long"}).json()["stats"]["total"]["trades"] > 0
+
+
+def test_pyramid_move_pct_in_api(client):
+    kw = dict(pyramid_enabled=True, pyramid_max=3, pyramid_pct=5, trade_pct=10)
+    base = client.post("/api/backtest", json=kw).json()
+    assert base["params"]["pyramid_move_pct"] == 0 and base["stats"]["total"]["adds"] > 0
+    far = client.post("/api/backtest", json={**kw, "pyramid_move_pct": 50}).json()
+    assert far["stats"]["total"]["adds"] == 0 and far["skipped_reasons"].get("мало движения от последнего входа", 0) > 0
+    assert client.post("/api/backtest", json={**kw, "pyramid_move_dir": "up"}).status_code == 422
+    assert client.post("/api/backtest", json={**kw, "pyramid_move_pct": -1}).status_code == 422

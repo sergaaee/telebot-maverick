@@ -49,6 +49,8 @@ class BacktestParams(BaseModel):
     pyramid_pct: Optional[float] = Field(None, gt=0, le=100, description="размер каждого добора, % депозита")
     pyramid_avg: Optional[bool] = Field(None, description="доборы усредняют одну позицию: тейки и стоп — от новой средней цены входа")
     pyramid_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между доборами")
+    pyramid_move_pct: Optional[float] = Field(None, ge=0, le=100, description="добор только если цена ушла от последнего входа не меньше чем на столько %; 0 — не проверять")
+    pyramid_move_dir: Optional[Literal["any", "favor", "against"]] = Field(None, description="куда должна уйти цена: в любую сторону / в сторону позиции / против неё")
     signal_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между открытиями позиций")
     sl_hold_strong: Optional[bool] = None
     # торговля только по тренду (EMA на таймфрейме trend_tf)

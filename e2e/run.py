@@ -540,6 +540,15 @@ def scenario(pg, base, state_url):
     field(pg, "пирамидинг усредняет позу").locator("input").uncheck()
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
     check("выключили усреднение — снова отдельные ноги", pg.locator("table.trades tbody tr").count() == n_legs)
+    check("поле «Движение от последнего входа» есть, с «?», по умолчанию 0; выбор направления появляется при значении > 0", field(pg, "Движение от последнего входа").locator(".help").count() == 1
+          and num(pg, "Движение от последнего входа").input_value() == "0" and field(pg, "Куда должна уйти цена").count() == 0)
+    num(pg, "Движение от последнего входа").fill("50")
+    check("при ненулевом движении видно направление с «?»", field(pg, "Куда должна уйти цена").locator(".help").count() == 1)
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("недостижимое движение: доборов нет, причина пропуска названа", pg.locator(".tag-add").count() == 0 and "мало движения от последнего входа" in pg.locator("[data-testid=skipped-reasons]").inner_text())
+    num(pg, "Движение от последнего входа").fill("0")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("движение 0 — доборы снова есть", pg.locator("table.trades tbody tr").count() == n_legs)
     api_p = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({pyramid_enabled: true, pyramid_max: 2, pyramid_pct: 5, trade_pct: 10, compound: false, deposit: 10000, leverage: 1})}).then(r => r.json())""")
     legs = api_p["trades"]
     first_leg = next(t for t in legs if t["leg"] == 1)

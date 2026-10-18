@@ -10,7 +10,7 @@ from app.service import ParamError
 
 # Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
 # чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
-LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False,
+LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False, "pyramid_move_pct": 0.0, "pyramid_move_dir": "any",
               "global_min": None, "short_global_max": None}
 
 
@@ -103,11 +103,12 @@ class Engine:
         return max(0, min(p["pyramid_max"], room))
 
     @staticmethod
-    def new_signals(result, last_ts):
+    def new_signals(result, last_ts, price=None):
         """Сигналы после last_ts, по которым стратегия ОТКРЫЛА БЫ новую позицию или (при пирамидинге) сделала бы ДОБОР. Повторные подтверждения
         той же серии, пока позиция открыта и доборы не разрешены, сигналами не считаются. Внутри диапазона свечей это `taken` из бэктеста;
         свежие сигналы, для которых свечи входа ещё нет, определяются по состоянию позиции на конец данных и порядку самих сигналов
         (паузы, лимит и интервал доборов учитываются так же, как в расчёте). Отсечённые фильтром тренда пропускаются.
+        price — текущая цена актива: по ней проверяется «движение от последнего входа» для свежих сигналов добора (нет цены — это условие для них не проверяется).
         У возвращаемого сигнала есть `pyramid` (добор или нет) и `leg` (номер ноги)."""
         p = result["params"]
         candles_last = result["range"]["candles_last_ts"]
@@ -126,6 +127,10 @@ class Engine:
         group = [t for t in trades if t.get("group") == trades[-1].get("group")] if trades else []
         adds = max((t.get("leg", 1) for t in group), default=1) - 1 + sum(t.get("adds_n", 0) for t in group)
         last_open_ts = min((t["entry_ts"] for t in group), default=None)
+        last_px = None
+        if group:
+            last_px = (group[-1]["adds"][-1]["price"] if group[-1].get("adds") else max(group, key=lambda t: t["entry_ts"])["entry"])
+        move_pct, move_dir = p.get("pyramid_move_pct") or 0, p.get("pyramid_move_dir") or "any"
         last_leg_ts = max((t["entry_ts"] for t in group), default=None)
         cooldown_until = 0
         if group and p.get("cooldown_h"):
@@ -145,6 +150,12 @@ class Engine:
             if open_side == s["side"]:                               # позиция открыта в ту же сторону: добор или пропуск
                 if adds >= max_adds or (gap_pyr and last_leg_ts is not None and s["ts"] < last_leg_ts + gap_pyr):
                     continue
+                if move_pct and price and last_px:
+                    mv = (1 if s["side"] == "long" else -1) * (price / last_px - 1) * 100
+                    if not ((mv >= move_pct) if move_dir == "favor" else (-mv >= move_pct) if move_dir == "against" else (abs(mv) >= move_pct)):
+                        continue
+                if price:
+                    last_px = price
                 adds += 1
                 last_leg_ts = s["ts"]
                 out.append({**s, "leg": adds + 1, "pyramid": True})
@@ -153,7 +164,7 @@ class Engine:
                 continue
             if gap_sig and last_open_ts is not None and s["ts"] < last_open_ts + gap_sig:
                 continue
-            open_side, adds, last_open_ts, last_leg_ts = s["side"], 0, s["ts"], s["ts"]
+            open_side, adds, last_open_ts, last_leg_ts, last_px = s["side"], 0, s["ts"], s["ts"], price or last_px
             out.append({**s, "leg": 1, "pyramid": False})
         return out
 

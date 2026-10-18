@@ -360,6 +360,17 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
               <Label text="пирамидинг усредняет позу" help="pyramid_avg" />
             </label>
             <Num label="Пауза между доборами" help="pyramid_gap_h" value={p.pyramid_gap_h} step={1} suffix="ч" onChange={(v) => set('pyramid_gap_h', Math.max(0, v ?? 0))} />
+            <Num label="Движение от последнего входа" help="pyramid_move_pct" value={p.pyramid_move_pct} step={0.5} suffix="%" onChange={(v) => set('pyramid_move_pct', Math.max(0, v ?? 0))} />
+            {p.pyramid_move_pct > 0 && (
+              <label className="field">
+                <Label text="Куда должна уйти цена" help="pyramid_move_dir" />
+                <select value={p.pyramid_move_dir} onChange={(e) => set('pyramid_move_dir', e.target.value as Params['pyramid_move_dir'])}>
+                  <option value="any">в любую сторону</option>
+                  <option value="favor">в сторону позиции</option>
+                  <option value="against">против позиции</option>
+                </select>
+              </label>
+            )}
           </>
         )}
       </Section>

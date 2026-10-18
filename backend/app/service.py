@@ -319,7 +319,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             raise ParamError(f"Пирамидинг: первая нога {eff['trade_pct']:g}% депозита, на добор ({eff['pyramid_pct']:g}%) места не остаётся")
         if room < eff["pyramid_max"]:
             warnings.append(f"Пирамидинг: {eff['trade_pct']:g}% + {eff['pyramid_max']} × {eff['pyramid_pct']:g}% больше депозита — доборов не больше {room}")
-        pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "avg": bool(eff.get("pyramid_avg")),
+        pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "move_pct": eff.get("pyramid_move_pct") or 0.0, "move_dir": eff.get("pyramid_move_dir") or "any", "avg": bool(eff.get("pyramid_avg")),
                             "w0": eff["trade_pct"], "w": eff["pyramid_pct"]}, eff["pyramid_pct"]
     skipped = []
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, pyramid=pyramid,
