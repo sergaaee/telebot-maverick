@@ -129,7 +129,7 @@ export interface Fill {
   share: number;
   label: string;
   /** метрики последнего отчёта на момент исполнения */
-  metrics?: { dg: number | null; dl: number; ds: number } | null;
+  metrics?: { dg: number | null; dl: number; ds: number; strong?: boolean } | null;
 }
 
 export interface Trade {
