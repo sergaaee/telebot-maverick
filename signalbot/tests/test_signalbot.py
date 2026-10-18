@@ -37,10 +37,10 @@ LONG = lambda t0, n: [(t0 + i * H // 2, 1.2, 2.0, 2.5) for i in range(n)]
 
 class FakeTG:
     def __init__(self):
-        self.sent, self.docs, self.files = [], [], {}
+        self.sent, self.fills, self.docs, self.files = [], [], [], {}
 
     def send_message(self, chat, text, html=True):
-        self.sent.append((chat, text))
+        (self.fills if "Расчёт по свечам: исполнение" in text else self.sent).append((chat, text))       # уведомления об исполнениях — отдельно от остальных
 
     def send_document(self, chat, name, content, caption=None):
         self.docs.append((chat, name, content, caption))
@@ -577,3 +577,55 @@ def test_new_signals_move_filter_for_fresh_add_signals():
     assert len(run(101.5, pyramid_move_pct=1.0, pyramid_move_dir="favor")) == 1
     assert run(101.5, pyramid_move_pct=1.0, pyramid_move_dir="against") == []
     assert len(run(None, pyramid_move_pct=1.0, pyramid_move_dir="favor")) == 1     # цены нет — условие не проверяется
+
+
+# ---------------- уведомления об исполнениях (TP / SL / БУ / разворот) ----------------
+def _fills_scenario(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()                                                              # карточка конфига: прошлых исполнений не шлём
+    assert env.tg.fills == []
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.cycle()
+
+
+def test_fill_notifications_sent_once_after_entry(env):
+    _fills_scenario(env)
+    texts = env.tg.texts()
+    fills = [t for c, t in env.tg.fills if c == CHAT]
+    assert len(fills) >= 1 and all("default-BTC" in t and "Цена исполнения" in t for t in fills)
+    assert any(("TP1" in t) or ("Стоп-лосс" in t) for t in fills)
+    assert all(("DG" in t and "DL" in t and "DS" in t) for t in fills)                                   # метрики в момент исполнения
+    assert any("закрыта" in t and "итог" in t for t in fills)                                            # закрытие позиции с итогом
+    n = len(env.tg.fills)
+    env.now["t"] += 600                                                                                  # следующий цикл (прошло > 5 минут)
+    env.cycle()
+    assert len(env.tg.fills) == n                                                                        # повторно то же исполнение не приходит
+    assert env.db.list_configs(env.alice["id"])[0]["alerts"] == 1                                        # в счётчик сигналов исполнения не входят
+
+
+def test_config_without_fill_mark_does_not_flood_with_past_fills(env):
+    _fills_scenario(env)
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    assert cfg["fill_ts"] is not None and cfg["fill_ts"] > 0
+    env.db.update_config(cfg["id"], fill_ts=None)                                                        # как у конфига, созданного до этой функции
+    env.tg.fills.clear()
+    env.now["t"] += 600
+    env.cycle()
+    assert env.tg.fills == []
+    assert env.db.list_configs(env.alice["id"])[0]["fill_ts"] == cfg["fill_ts"]                          # отметка выставлена по текущему состоянию
+
+
+def test_fill_message_format():
+    from sigbot import formatting as fm
+    ev = {"ts": 1_700_000_000_000, "label": "TP1", "price": 100.5, "share": 0.5, "metrics": {"dg": 1.1, "dl": 2.0, "ds": 2.5}, "side": "long", "leg": 1,
+          "pyramid": False, "avg": False, "adds_n": 0, "entry": 98.0, "entry_ts": 1, "closed": False, "reason": None, "pnl_usd": None, "pnl_pct": None,
+          "hold_h": None, "be": True, "tp1_be": True}
+    cfg = {"name": "Мой <конфиг>"}
+    res = {"params": {"symbol": "BTC/USDT:USDT"}}
+    t = fm.fill_message(cfg, res, ev, "Coinbase")
+    assert "TP1 исполнен" in t and "ЛОНГ" in t and "безубыток" in t and "50%" in t and "продолжает" in t and "&lt;конфиг&gt;" in t and "DG <b>1.10</b>" in t
+    sl = fm.fill_message(cfg, res, {**ev, "label": "SL", "tp1_be": False, "closed": True, "reason": "SL", "pnl_usd": -120.0, "pnl_pct": -2.0, "hold_h": 5.0, "pyramid": True, "leg": 3}, "Coinbase")
+    assert "Стоп-лосс" in sl and "Нога закрыта" in sl and "−120" in sl and "добор #2" in sl
+    assert "Разворот" in fm.fill_message(cfg, res, {**ev, "label": "REV", "tp1_be": False}, "x") and "безубытке" in fm.fill_message(cfg, res, {**ev, "label": "BE", "tp1_be": False}, "x")

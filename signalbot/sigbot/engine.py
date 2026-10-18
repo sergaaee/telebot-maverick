@@ -168,6 +168,25 @@ class Engine:
             out.append({**s, "leg": 1, "pyramid": False})
         return out
 
+    # ---------- исполнения (TP / SL / БУ / разворот) ----------
+    @staticmethod
+    def fill_events(result):
+        """Все исполнения по сделкам расчёта (кроме «данные кончились»), по времени: [{ts, label, price, share, side, leg, ...}].
+        closed — исполнение последнее в ноге (позиция/нога закрыта); тогда есть итог сделки. Время — начало минутной свечи, в которой оно произошло."""
+        out = []
+        for t in result["trades"]:
+            for k, f in enumerate(t["fills"]):
+                if f["label"] == "OPEN":
+                    continue
+                closed = k == len(t["fills"]) - 1 and t["reason"] != "OPEN"
+                out.append({"ts": f["ts"], "label": f["label"], "price": f["price"], "share": f["share"], "metrics": f.get("metrics"), "side": t["side"],
+                            "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid")), "avg": bool(t.get("avg")), "adds_n": t.get("adds_n", 0),
+                            "entry": t["entry"], "entry_ts": t["entry_ts"], "closed": closed, "reason": t["reason"] if closed else None,
+                            "pnl_usd": t["pnl_usd"] if closed else None, "pnl_pct": t["pnl_pct"] if closed else None,
+                            "hold_h": t["hold_h"] if closed else None, "be": t["be"], "tp1_be": t["be"] and f["label"] == "TP1"})
+        out.sort(key=lambda e: e["ts"])
+        return out
+
     # ---------- план сделки ----------
     def plan(self, side, entry, tps, sl_pct):
         d = 1 if side == "long" else -1

@@ -202,3 +202,18 @@ def test_legacy_import_and_cli(tmp_path, monkeypatch, capsys):
         users.main(["add", "owner", "--password", "owner-pass-1"])
     users.main(["remove", "second", "--yes"])
     assert db.get_user("second") is None
+
+
+def test_old_database_gets_fill_ts_column_with_null(tmp_path):
+    import sqlite3
+    from app.db import Database
+    p = str(tmp_path / "old.db")
+    c = sqlite3.connect(p)
+    c.executescript("""CREATE TABLE configs(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, params TEXT, tf TEXT, paused INTEGER DEFAULT 0,
+        baseline INTEGER DEFAULT 0, last_ts INTEGER DEFAULT 0, alerts INTEGER DEFAULT 0, error TEXT, created REAL, updated REAL);
+        INSERT INTO configs(user_id, name, params, tf, created, updated) VALUES (1, 'a', '{}', 'auto', 0, 0);""")
+    c.commit()
+    c.close()
+    db = Database(p)                                       # миграция при открытии
+    assert db.list_configs()[0]["fill_ts"] is None         # NULL = «исполнения ещё не фиксировали» — прошлое не присылается
+    Database(p)                                            # повторное открытие не падает

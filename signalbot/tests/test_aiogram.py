@@ -102,6 +102,6 @@ def test_signal_notification_is_sent_to_owner_via_aiogram(env):  # noqa: F811
         await asyncio.to_thread(env.cycle)
 
     asyncio.run(go())
-    msgs = [c for c in session.calls if isinstance(c, SendMessage)]
+    msgs = [c for c in session.calls if isinstance(c, SendMessage) and "исполнение —" not in c.text]
     assert len(msgs) == 2 and all(m.chat_id == CHAT for m in msgs)
     assert "принят" in msgs[0].text and "ЛОНГ" in msgs[1].text and "Статистика конфига" in msgs[1].text
