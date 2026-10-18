@@ -61,3 +61,13 @@ def test_load_signals_reads_global_column_and_text(tmp_path):
         w.writerow([3, "2024-01-01T02:00:00+00:00", "", "1.5", "1.4", ""])
     rows = load_signals(p)
     assert [r[7] for r in rows] == [1.12, 0.77, None] and all(len(r) == 8 for r in rows)
+
+
+def test_fills_carry_metrics_at_fill_time():
+    from app.service import _metrics_at
+    s = sigs((1.0, 1.1, 0.9), (2.0, 2.1, 1.9), (3.0, 3.1, 2.9))
+    at = _metrics_at([x[0] for x in s], s)
+    assert at(T0 - 1) is None
+    assert at(T0 + H + 5) == {"dg": 1.9, "dl": 2.0, "ds": 2.1}
+    assert at(T0 + 10 * H)["dl"] == 3.0
+    assert _metrics_at([T0], [(T0, 1, 2, None, None, None, None)])(T0) == {"dg": None, "dl": 1, "ds": 2}      # старый формат без DG

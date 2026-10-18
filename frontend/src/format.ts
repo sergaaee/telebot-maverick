@@ -13,6 +13,10 @@ export function fmtUsd(v: number, digits = 0): string {
   return (v < 0 ? '−' : v > 0 ? '+' : '') + s + ' $';
 }
 
+/** «DG 1.12 · DL 1.90 · DS 1.30»: метрики отчёта; нет значения — прочерк */
+export const metricsStr = (m: { dg: number | null; dl: number; ds: number }) =>
+  `DG ${m.dg == null ? '–' : m.dg.toFixed(2)} · DL ${m.dl.toFixed(2)} · DS ${m.ds.toFixed(2)}`;
+
 export const fmtPct = (v: number, digits = 2) => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(digits) + '%';
 
 export const fmtPrice = (v: number) => v.toLocaleString('ru-RU', { maximumFractionDigits: 1 });

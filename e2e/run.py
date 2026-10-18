@@ -333,7 +333,7 @@ def scenario(pg, base, state_url):
     hit = next(i for i, c in enumerate(cells) if c in ("1/2", "2/2"))
     rows.nth(hit).scroll_into_view_if_needed(); rows.nth(hit).click(); pg.wait_for_timeout(2500)
     info = pg.locator(".sel-info").inner_text()
-    check("сводка сделки показывает исполнения частями и БУ", "TP1 70%" in info and "БУ после TP1" in info, info[-90:])
+    check("сводка сделки показывает исполнения частями с метриками DG/DL/DS на момент каждого", "TP1 70%" in info and info.count("DG ") >= 2 and info.count("DS ") >= 2 and "TP1 70% @" in info, info[-160:])
     bes = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'},
         body: JSON.stringify({tps:[{pct:3,share:70},{pct:6,share:30}], be_after_tp1:true})}).then(r => r.json())""")
     reasons = {t["reason"] for t in bes["trades"]}

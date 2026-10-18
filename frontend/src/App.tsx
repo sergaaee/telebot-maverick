@@ -12,7 +12,7 @@ import UserMenu from './components/UserMenu';
 import TopPanel from './components/TopPanel';
 import TradesTable from './components/TradesTable';
 import { LEGACY_OFF, parseConfig } from './configIO';
-import { fmtDate, fmtPrice, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
+import { fmtDate, fmtPrice, metricsStr, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
 import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
 import type { AppConfig, BacktestResult, Job, LatestSource, Params, Signal, SyncStatus, TfMode, Trade, UiState } from './types';
@@ -578,11 +578,13 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
           {selTrade && (
             <div className="sel-info">
               <b>#{selTrade.n}</b>{selTrade.symbol && <b> {selTrade.symbol.split('/')[0]}</b>} <span className={selTrade.side === 'long' ? 'pos' : 'neg'}>{selTrade.side === 'long' ? 'лонг' : 'шорт'}</span>
-              {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)} · вход {fmtPrice(selTrade.entry)}{selTrade.adds_n ? ` (средняя из ${selTrade.adds_n + 1} входов, первый ${fmtPrice(selTrade.entry_first ?? selTrade.entry)})` : ''} · TP {selTrade.tps.map(fmtPrice).join(' / ')} · SL {fmtPrice(selTrade.sl)}{selTrade.be ? ' (БУ после TP1)' : ''}
-              {' · '}<span className="fills">{selTrade.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}</span>
+              {' · '}{fmtTs(selTrade.entry_ts)} → {fmtTs(selTrade.exit_ts)}{selTrade.adds_n ? ` · вход ${fmtPrice(selTrade.entry)} (средняя из ${selTrade.adds_n + 1} входов, первый ${fmtPrice(selTrade.entry_first ?? selTrade.entry)})` : ''}
+              {selTrade.local != null && <span className="muted"> · <b>вход</b> {metricsStr({ dg: selTrade.global ?? null, dl: selTrade.local, ds: selTrade.scalp ?? 0 })}</span>}
+              {selTrade.fills.map((f, i) => (
+                <span className="fills" key={i}> · <b>{f.label}</b> {Math.round(f.share * 100)}% @ {fmtPrice(f.price)}{f.metrics ? ` — ${metricsStr(f.metrics)}` : ''}</span>
+              ))}
               {selTrade.notional != null && <span className="muted"> · объём {fmtUsd(selTrade.notional).replace(/^\+/, '')}</span>}
               {' · '}<b className={signClass(selTrade.pnl_usd)}>{fmtUsd(selTrade.pnl_usd)}</b>
-              {selTrade.local != null && <span className="muted"> · Local {selTrade.local.toFixed(2)} / Scalp {selTrade.scalp?.toFixed(2)}{selTrade.global != null && ` / Global ${selTrade.global.toFixed(2)}`}</span>}
               {selTrade.coin && <span className="muted"> · в отчёте {selTrade.coin} {selTrade.top_value?.toFixed(2)}</span>}
               {selTrade.partial && <span className="warn-text"> · окно ещё не закончилось</span>}
             </div>

@@ -128,6 +128,8 @@ export interface Fill {
   price: number;
   share: number;
   label: string;
+  /** метрики последнего отчёта на момент исполнения */
+  metrics?: { dg: number | null; dl: number; ds: number } | null;
 }
 
 export interface Trade {
