@@ -629,3 +629,32 @@ def test_fill_message_format():
     sl = fm.fill_message(cfg, res, {**ev, "label": "SL", "tp1_be": False, "closed": True, "reason": "SL", "pnl_usd": -120.0, "pnl_pct": -2.0, "hold_h": 5.0, "pyramid": True, "leg": 3}, "Coinbase")
     assert "Стоп-лосс" in sl and "Нога закрыта" in sl and "−120" in sl and "добор #2" in sl
     assert "Разворот" in fm.fill_message(cfg, res, {**ev, "label": "REV", "tp1_be": False}, "x") and "безубытке" in fm.fill_message(cfg, res, {**ev, "label": "BE", "tp1_be": False}, "x")
+
+
+# ---------------- /positions ----------------
+def test_positions_message_open_and_closed():
+    from sigbot import formatting as fm
+    cfg = {"id": 3, "name": "Мой <б>"}
+    leg = {"side": "long", "reason": "OPEN", "entry_ts": 1_700_000_000_000, "entry": 100.0, "tps": [103.0, 106.0], "tp_hits": 1, "sl": 98.0, "be": True,
+           "pnl_usd": 12.5, "pyramid": False, "avg": False, "leg": 1}
+    add = {**leg, "entry_ts": 1_700_003_600_000, "entry": 102.0, "tp_hits": 0, "sl": 99.96, "pyramid": True, "leg": 2, "pnl_usd": -3.0}
+    res = {"params": {"symbol": "BTC/USDT:USDT"}, "trades": [leg, add]}
+    t = fm.positions_message(cfg, res, 104.0, 1_700_004_000_000)
+    assert "&lt;б&gt;" in t and "ЛОНГ" in t and "ног: 2" in t and "добор #1" in t and "БУ" in t and "TP2" in t and "+10 $" in t and "до 2023" in t
+    closed = fm.positions_message(cfg, {"params": res["params"], "trades": [{**leg, "reason": "SL", "exit_ts": 1_700_001_000_000, "pnl_usd": -50.0}]}, 99.0, 1)
+    assert "Позиции сейчас нет" in closed and "SL" in closed
+    assert "пока не было" in fm.positions_message(cfg, {"params": res["params"], "trades": []}, None, 1)
+
+
+def test_positions_command_replies_for_configs(env):
+    env.handle_update(msg("/positions"))
+    assert "Нет посчитанных" in env.tg.texts()[-1]
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()
+    env.tg.sent.clear()
+    env.handle_update(msg("/positions"))
+    out = env.tg.texts(CHAT)
+    assert len(out) == 1 and "default-BTC" in out[0] and ("Позиции сейчас нет" in out[0] or "открыта" in out[0])
+    env.tg.sent.clear()
+    env.handle_update(msg("/pos nonexistent"))
+    assert "не найден" in env.tg.texts()[-1]

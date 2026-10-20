@@ -217,3 +217,32 @@ def test_old_database_gets_fill_ts_column_with_null(tmp_path):
     db = Database(p)                                       # миграция при открытии
     assert db.list_configs()[0]["fill_ts"] is None         # NULL = «исполнения ещё не фиксировали» — прошлое не присылается
     Database(p)                                            # повторное открытие не падает
+
+
+def test_saved_runs_are_per_user_with_unique_case_insensitive_names(auth_env):
+    app = create_app(load_settings())
+    a, b = client(app), client(app)
+    assert login(a, "alice", "alice-password").status_code == 200 and login(b, "bob", "bob-password-1").status_code == 200
+    assert client(app).get("/api/runs").status_code == 401
+    body = {"name": "База v1", "params": {"side": "long", "sl_pct": 2}, "tf": 60, "summary": {"trades": 10, "total_usd": 123.4}}
+    r = a.post("/api/runs", json=body, headers=H_)
+    assert r.status_code == 200 and r.json()["name"] == "База v1" and r.json()["summary"]["trades"] == 10 and r.json()["params"]["sl_pct"] == 2
+    again = a.post("/api/runs", json={**body, "name": "база V1", "summary": {"trades": 11}}, headers=H_).json()      # то же имя без учёта регистра (в т.ч. кириллица) — перезапись
+    runs = a.get("/api/runs").json()["runs"]
+    assert len(runs) == 1 and runs[0]["id"] == again["id"] and runs[0]["summary"]["trades"] == 11 and runs[0]["name"] == "база V1"
+    assert b.get("/api/runs").json()["runs"] == []                                                                  # у другого пользователя своих нет
+    assert b.delete(f"/api/runs/{runs[0]['id']}", headers=H_).status_code == 404                                    # чужой прогон не удалить
+    assert a.post("/api/runs", json={**body, "name": "  "}, headers=H_).status_code == 422
+    assert a.post("/api/runs", json={"name": "x", "params": [], "summary": {}}, headers=H_).status_code == 422
+    assert a.delete(f"/api/runs/{runs[0]['id']}", headers=H_).status_code == 200 and a.get("/api/runs").json()["runs"] == []
+
+
+def test_saved_runs_limit(tmp_path):
+    db = Database(tmp_path / "x.db")
+    u = db.add_user("alice", "12345678")
+    db.MAX_RUNS = 3
+    for i in range(3):
+        db.save_run(u["id"], f"r{i}", {}, "auto", {})
+    with pytest.raises(DbError, match="Не больше"):
+        db.save_run(u["id"], "r3", {}, "auto", {})
+    db.save_run(u["id"], "R0", {}, "auto", {"x": 1})                                                                 # перезапись существующего лимит не затрагивает

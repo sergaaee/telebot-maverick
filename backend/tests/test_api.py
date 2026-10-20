@@ -302,3 +302,15 @@ def test_pyramid_move_pct_in_api(client):
     assert far["stats"]["total"]["adds"] == 0 and far["skipped_reasons"].get("мало движения от последнего входа", 0) > 0
     assert client.post("/api/backtest", json={**kw, "pyramid_move_dir": "up"}).status_code == 422
     assert client.post("/api/backtest", json={**kw, "pyramid_move_pct": -1}).status_code == 422
+
+
+def test_montecarlo_endpoint(client):
+    r = client.post("/api/montecarlo", json={"runs": 200, "mode": "bootstrap", "seed": 3})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["runs"] == 200 and j["trades"] >= 2 and j["final_pct"]["5"] <= j["final_pct"]["95"] and len(j["fan"]) > 1
+    assert 0 <= j["prob_loss_pct"] <= 100 and set(j["prob_dd_pct"]) == {"10", "20", "30", "50"} and "final_pct" in j["actual"]
+    assert client.post("/api/montecarlo", json={"runs": 200, "mode": "bootstrap", "seed": 3}).json() == j                  # воспроизводимо
+    assert client.post("/api/montecarlo", json={"runs": 5}).status_code == 422                                              # слишком мало прогонов
+    assert client.post("/api/montecarlo", json={"mode": "x"}).status_code == 422
+    assert client.post("/api/montecarlo", json={"confirm": 100}).status_code == 422                                          # нет сделок: ошибка с пояснением

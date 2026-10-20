@@ -68,3 +68,10 @@ class BacktestParams(BaseModel):
     top_slip: Optional[float] = Field(None, ge=0, le=0.05)
     top_days: Optional[float] = Field(None, gt=0, le=30)
     top_min_value: Optional[float] = Field(None, ge=0, le=1000)
+
+
+class MonteCarloRequest(BacktestParams):
+    """Параметры бэктеста плюс настройки Монте-Карло."""
+    runs: int = Field(1000, ge=100, le=5000, description="число прогонов")
+    mode: Literal["shuffle", "bootstrap"] = Field("shuffle", description="shuffle — тот же набор сделок в случайном порядке; bootstrap — случайная выборка с возвращением")
+    seed: Optional[int] = Field(None, description="зерно генератора (для воспроизводимости)")

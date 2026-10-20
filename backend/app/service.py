@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import time
 
-from .core import backtest, topcoins, trend
+from .core import backtest, montecarlo, topcoins, trend
 from .core.entries import entries
 
 from .data import DataStore
@@ -172,6 +172,7 @@ def _trade_out(n, t, rep, at=None):
         "tp_shares": t["tp_shares"], "sl": t["sl"], "be": t["be"], "be_ts": t["be_ts"], "tp_hits": t["tp_hits"],
         "fills": [{**f, "metrics": at(f["ts"], 1 if t["side"] == "long" else -1)} for f in t["fills"]] if at else t["fills"], "reason": t["reason"],
         "pnl_pct": t["pnl_pct"], "pnl_usd": t["pnl_usd"], "notional": t.get("notional"), "margin": t.get("margin"), "hold_h": (t["exit_ts"] - t["entry_ts"]) / 3.6e6,
+        "bal_entry": (t["balance_after"] - t["pnl_usd"]) if "balance_after" in t else None,
         "local": r[1] if r else None, "scalp": r[2] if r else None, "global": r[7] if r and len(r) > 7 else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
@@ -410,3 +411,21 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "top": top,
         "trend": {"enabled": bool(allow), "blocked": trend_blocked, "confirmed": len(confirmed)},
     })
+
+
+def run_montecarlo(store: DataStore, defaults: dict, req, available_fn=None) -> dict:
+    """Монте-Карло по сделкам основной стратегии (топ-коины не входят). Сам бэктест считается как обычно, потом сделки превращаются в доходности
+    (доля баланса на входе при сложном проценте, доля начального депозита — при простом) и прогоняются в разном порядке."""
+    params = BacktestParams(**req.model_dump(exclude={"runs", "mode", "seed"}, exclude_unset=True))
+    res = run_backtest(store, defaults, params, available_fn=available_fn)
+    eff = res["params"]
+    compound = bool(eff.get("compound", True))
+    returns = []
+    for t in res["trades"]:
+        base = t.get("bal_entry") if compound else eff["deposit"]
+        if base and base > 0:
+            returns.append(t["pnl_usd"] / base)
+    out = montecarlo.run(returns, req.runs, req.mode, compound, req.seed)
+    if out is None:
+        raise ParamError("Для Монте-Карло нужно минимум 2 сделки")
+    return _clean({**out, "symbol": res["symbol"], "source": res["source"]})
