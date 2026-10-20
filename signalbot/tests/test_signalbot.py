@@ -658,3 +658,24 @@ def test_positions_command_replies_for_configs(env):
     env.tg.sent.clear()
     env.handle_update(msg("/pos nonexistent"))
     assert "не найден" in env.tg.texts()[-1]
+
+
+def test_old_stored_config_ignores_env_liquidation_defaults(env):
+    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items() if k not in ("liquidation_sim", "pyramid_leverage", "maint_margin_pct")}
+    env.s.defaults.update(liquidation_sim=True, pyramid_leverage=20.0)
+    res = env.engine.evaluate(old)
+    assert res["params"]["liquidation_sim"] is False and res["params"]["pyramid_leverage"] is None
+    new, _ = validate(UI_CONFIG["params"], env.s.defaults)
+    assert new["liquidation_sim"] is True and new["pyramid_leverage"] == 20.0
+
+
+def test_liquidation_fill_and_real_drawdown_in_messages():
+    from sigbot import formatting as fm
+    ev = {"ts": 1_700_000_000_000, "label": "LIQ", "price": 90.0, "share": 1.0, "metrics": None, "side": "long", "leg": 2, "pyramid": True, "avg": False, "adds_n": 0,
+          "entry": 100.0, "entry_ts": 1, "closed": True, "reason": "LIQ", "pnl_usd": -500.0, "pnl_pct": -10.0, "hold_h": 3.0, "be": False, "tp1_be": False}
+    t = fm.fill_message({"name": "x"}, {"params": {"symbol": "BTC/USDT:USDT"}}, ev, "Coinbase")
+    assert "ЛИКВИДАЦИЯ" in t and "−500" in t and "добор #1" in t
+    stats = {"trades": 5, "winrate": 40.0, "profit_factor": 1.2, "total_usd": 100.0, "return_pct": 1.0, "max_dd_pct": 3.0, "max_dd_real_pct": 7.5, "sharpe": 1.1, "avg_pct": 0.1,
+             "avg_win_usd": 50.0, "avg_loss_usd": -30.0, "max_loss_streak": 2, "tp": 2, "sl": 2, "be": 0, "liq": 1}
+    s = fm.stats_block(stats, {})
+    assert "с открытыми позициями" in s and "7.5%" in s and "ликвидаций 1" in s

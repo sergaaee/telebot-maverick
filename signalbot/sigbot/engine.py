@@ -11,6 +11,7 @@ from app.service import ParamError
 # Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
 # чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
 LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False, "pyramid_move_pct": 0.0, "pyramid_move_dir": "any",
+              "pyramid_leverage": None, "liquidation_sim": False,
               "global_min": None, "short_global_max": None}
 
 

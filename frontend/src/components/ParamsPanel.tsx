@@ -332,6 +332,11 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         <Num label="Доля депозита на сделку" help="trade_pct" value={p.trade_pct} step={1} suffix="%" onChange={num('trade_pct')} />
         <Num label="Плечо" help="leverage" value={p.leverage} step={1} suffix="×" onChange={num('leverage')} />
         <label className="field check">
+          <input type="checkbox" checked={p.liquidation_sim} onChange={(e) => set('liquidation_sim', e.target.checked)} />
+          <Label text="моделировать ликвидацию" help="liquidation_sim" />
+        </label>
+        {p.liquidation_sim && <Num label="Поддерживающая маржа" help="maint_margin_pct" value={p.maint_margin_pct} step={0.1} suffix="%" onChange={(v) => set('maint_margin_pct', Math.max(0, v ?? 0))} />}
+        <label className="field check">
           <input type="checkbox" checked={p.compound} onChange={(e) => set('compound', e.target.checked)} />
           <Label text="сложный процент (от текущего баланса)" help="compound" />
         </label>
@@ -355,6 +360,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
           <>
             <Num label="Максимум доборов" help="pyramid_max" value={p.pyramid_max} step={1} onChange={(v) => set('pyramid_max', Math.max(1, Math.round(v ?? 1)))} />
             <Num label="Размер добора" help="pyramid_pct" value={p.pyramid_pct} step={1} suffix="% деп." onChange={num('pyramid_pct')} />
+            <Num label="Плечо доборов" help="pyramid_leverage" value={p.pyramid_leverage} step={1} suffix="×" placeholder="как у входа" onChange={(v) => set('pyramid_leverage', v == null || v <= 0 ? null : v)} />
             <label className="field check">
               <input type="checkbox" checked={p.pyramid_avg} onChange={(e) => set('pyramid_avg', e.target.checked)} />
               <Label text="пирамидинг усредняет позу" help="pyramid_avg" />

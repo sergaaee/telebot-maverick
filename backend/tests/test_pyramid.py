@@ -419,3 +419,69 @@ def test_pyramid_move_with_averaging():
     c = stairs()
     t, sk = run(ev(10, 15, 30), c, pyramid={"max": 5, "gap_h": 0, "move_pct": 0.9, "move_dir": "favor", "avg": True, "w0": 10, "w": 5})
     assert t[0]["adds_n"] == 1 and [r for _, _, r in sk] == ["мало движения от последнего входа"]
+
+
+# ---------------- ликвидация и плечо доборов ----------------
+def drop(c, minute, low, price_after=None):
+    """Свеча падает в пределах одной минуты: open 100, low = low (без гэпа), дальше цена остаётся на уровне low."""
+    c[minute] = (T0 + minute * M, 100.0, 100.0, low, low)
+    for i in range(minute + 1, len(c)):
+        c[i] = (T0 + i * M, low, low, low, low)
+    return c
+
+
+def run_lev(events, candles, sl=2.0, **kw):
+    skipped = []
+    trades = run_events(events, candles, LEVELS, sl, fee=0.0, slip=0.0, skipped=skipped, **kw)
+    return trades
+
+
+def test_liquidation_when_stop_is_beyond_liquidation_price():
+    c = drop(flat(), 50, 90.0)
+    t = run_lev(ev(10), c, sl=20.0, leverage=10.0, mmr=0.005)[0]                 # ликвидация на 90.5, стоп на 80 — ликвидация раньше
+    assert t["reason"] == "LIQ" and abs(t["exit"] - 90.0) < 1e-9 and abs(t["pnl_pct"] + 10.0) < 1e-9        # теряется вся маржа: −100%/плечо от объёма
+    assert t["tp_hits"] == 0 and t["fills"][-1]["label"] == "LIQ"
+
+
+def test_stop_nearer_than_liquidation_fires_first_and_liquidation_off_by_default():
+    c = drop(flat(), 50, 90.0)
+    t = run_lev(ev(10), c, sl=2.0, leverage=10.0, mmr=0.005)[0]
+    assert t["reason"] == "SL" and abs(t["exit"] - 98.0) < 1e-9
+    t = run_lev(ev(10), c, sl=20.0, leverage=10.0)[0]                          # mmr не задан — ликвидации нет, сработает стоп на 80? цена не доходит: сделка открыта
+    assert t["reason"] == "OPEN"
+
+
+def test_liquidation_short_and_leverage_one_never_liquidates():
+    c = flat()
+    for i in range(50, 600):
+        c[i] = (T0 + i * M, 100.0, 111.0, 100.0, 111.0)
+    t = run_lev(ev(10, d=-1), c, sl=50.0, leverage=10.0, mmr=0.005)[0]            # шорт: ликвидация на 109.5
+    assert t["reason"] == "LIQ" and abs(t["exit"] - 110.0) < 1e-9 and abs(t["pnl_pct"] + 10.0) < 1e-9
+    c2 = drop(flat(), 50, 0.4)
+    assert run_lev(ev(10), c2, sl=100.0, leverage=1.0, mmr=0.005)[0]["reason"] == "LIQ"         # плечо 1× ликвидируется только при падении почти до нуля
+
+
+def test_liquidation_overrides_sl_hold():
+    c = drop(flat(), 50, 90.0)
+    hold = lambda d, t: True                                                          # метрики «сильны» всегда — стоп снят, но биржа ликвидирует
+    t = run_lev(ev(10), c, sl=2.0, hold=hold, leverage=10.0, mmr=0.005)[0]
+    assert t["reason"] == "LIQ"
+
+
+def test_add_leg_uses_its_own_leverage_for_liquidation():
+    c = drop(flat(), 50, 93.0)
+    # первая нога 2× не ликвидируется (liq ≈ 50.5), добор 20× ликвидируется на 100×(1−0.05+0.005)=95.5
+    trades = run_lev(ev(10, 20), c, sl=50.0, pyramid={"max": 1, "gap_h": 0}, leverage=2.0, add_leverage=20.0, mmr=0.005)
+    first, add = trades
+    assert first["reason"] == "OPEN" and add["reason"] == "LIQ" and add["pyramid"] and abs(add["pnl_pct"] + 5.0) < 1e-9
+
+
+def test_avg_position_liquidation_uses_effective_leverage():
+    c = drop(flat(), 50, 80.0)
+    # веса — объём (доля × плечо): первый вход 10% × 10× = 100, добор 5% × 2× = 10; маржа 10 + 5 = 15 → эффективное плечо 110/15 ≈ 7.33, ликвидация ≈ 100×(1−0.1364+0.005) ≈ 86.9
+    t = run_lev(ev(10, 20), c, sl=50.0, pyramid={"max": 1, "gap_h": 0, "avg": True, "w0": 100.0, "w": 10.0}, leverage=10.0, add_leverage=2.0, mmr=0.005)[0]
+    assert t["avg"] and t["adds_n"] == 1 and t["reason"] == "LIQ"
+    ratio = 15 / 110
+    assert abs(t["pnl_pct"] + ratio * 100) < 1e-6
+    t2 = run_lev(ev(10, 20), c, sl=50.0, pyramid={"max": 1, "gap_h": 0, "avg": True, "w0": 100.0, "w": 10.0}, leverage=3.0, add_leverage=3.0, mmr=0.005)[0]   # 3×: ликвидация далеко
+    assert t2["reason"] == "OPEN"

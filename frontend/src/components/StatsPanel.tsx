@@ -1,10 +1,12 @@
 import { fmtPct, fmtPf, fmtUsd, signClass } from '../format';
+import { HELP } from '../helpTexts';
 import type { BacktestResult, Stats } from '../types';
+import Help from './Help';
 
-export function Card({ label, value, cls = '', sub }: { label: string; value: string; cls?: string; sub?: string }) {
+export function Card({ label, value, cls = '', sub, help }: { label: string; value: string; cls?: string; sub?: string; help?: string }) {
   return (
     <div className="card">
-      <div className="card-label">{label}</div>
+      <div className="card-label">{label}{help && <Help text={help} />}</div>
       <div className={`card-value ${cls}`}>{value}</div>
       {sub && <div className="card-sub">{sub}</div>}
     </div>
@@ -26,11 +28,14 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
     <div className="stats">
       <div className="cards">
         <Card label="Итого" value={fmtUsd(t.total_usd)} cls={signClass(t.total_usd)} sub={t.return_pct != null ? `${fmtPct(t.return_pct, 1)} от депозита ${result.params.deposit.toLocaleString('ru-RU')} $` : undefined} />
-        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev} · откр. ${t.open}`} />
+        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev}${t.liq ? ` · ликвид. ${t.liq}` : ''} · откр. ${t.open}`} />
         <Card label="Коэф. Шарпа" value={t.sharpe == null ? '–' : t.sharpe.toFixed(2)} cls={t.sharpe == null ? '' : signClass(t.sharpe)} sub="годовой, по дням" />
         <Card label="Winrate" value={`${t.winrate.toFixed(1)}%`} />
         <Card label="Profit factor" value={fmtPf(t.profit_factor)} />
-        <Card label="Макс. просадка" value={fmtUsd(-t.max_dd_usd)} cls="neg" sub={t.max_dd_pct != null ? `${t.max_dd_pct.toFixed(1)}% от пика` : undefined} />
+        <Card label="Макс. просадка" value={fmtUsd(-t.max_dd_usd)} cls="neg" sub={t.max_dd_pct != null ? `${t.max_dd_pct.toFixed(1)}% от пика · по закрытым` : 'по закрытым сделкам'} />
+        {t.max_dd_real_usd != null && (
+          <Card label="Реальная просадка" help={HELP.real_dd} value={fmtUsd(-t.max_dd_real_usd)} cls="neg" sub={`${(t.max_dd_real_pct ?? 0).toFixed(1)}% · с открытыми позициями, плечом и доборами`} />
+        )}
         <Card label="Средняя сделка" value={fmtPct(t.avg_pct, 3)} cls={signClass(t.avg_pct)} sub={fmtUsd(t.expectancy_usd, 1)} />
         <Card label="Ср. плюс / минус" value={`${fmtUsd(t.avg_win_usd)} / ${fmtUsd(t.avg_loss_usd)}`} />
         <Card label="Лучшая / худшая" value={`${fmtUsd(t.best_usd)} / ${fmtUsd(t.worst_usd)}`} />

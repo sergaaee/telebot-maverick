@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import time
 
 from .core import backtest, montecarlo, topcoins, trend
+from .core import equity as equity_mod
 from .core.entries import entries
 
 from .data import DataStore
@@ -65,7 +66,7 @@ def _filters(eff):
 DAY_MS = 86_400_000
 
 
-def apply_sizing(trades, deposit, trade_pct, leverage, compound=True, pyramid_pct=None):
+def apply_sizing(trades, deposit, trade_pct, leverage, compound=True, pyramid_pct=None, pyramid_leverage=None):
     """Размер каждой сделки = база × доля% × плечо (база: при compound — текущий баланс, иначе начальный депозит; баланс = депозит + УЖЕ закрытые
     результаты, т.е. сложный процент). Первая нога позиции берёт trade_pct, доборы (leg > 1) — pyramid_pct.
     pnl_pct у сделки — доходность на объём, поэтому pnl_usd пересчитывается по порядку открытия; результат ноги попадает в баланс с момента её
@@ -76,12 +77,18 @@ def apply_sizing(trades, deposit, trade_pct, leverage, compound=True, pyramid_pc
         while pending and pending[0][0] <= t["entry_ts"]:
             bal += heapq.heappop(pending)[1]
         base = bal if compound else deposit            # простой процент: каждый раз доля от НАЧАЛЬНОГО депозита
+        lev_add = pyramid_leverage or leverage            # плечо доборов; не задано — как у первой ноги
+        live = max(base, 0.0) if bal > 0 else 0.0
         if t.get("avg"):                                 # усреднённая позиция: одна сделка на вход + все доборы
-            pct = trade_pct + t.get("adds_n", 0) * (pyramid_pct or 0)
+            adds_pct = t.get("adds_n", 0) * (pyramid_pct or 0)
+            margin = live * (trade_pct + adds_pct) / 100
+            notional = live * (trade_pct * leverage + adds_pct * lev_add) / 100
         else:
-            pct = pyramid_pct if (t.get("leg", 1) > 1 and pyramid_pct) else trade_pct
-        notional = (max(base, 0.0) if bal > 0 else 0.0) * pct / 100 * leverage
-        t["margin"] = notional / leverage
+            add_leg = t.get("leg", 1) > 1 and pyramid_pct
+            lev = lev_add if add_leg else leverage
+            notional = live * (pyramid_pct if add_leg else trade_pct) / 100 * lev
+            margin = notional / lev
+        t["margin"] = margin
         t["notional"] = notional
         t["pnl_usd"] = notional * t["pnl_pct"] / 100
         heapq.heappush(pending, (t["exit_ts"], t["pnl_usd"]))
@@ -313,6 +320,9 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         if not emas:
             raise ParamError("Фильтр тренда: выберите хотя бы одну EMA")
         allow = trend.build_trend(candles_all, eff["trend_tf"], emas)       # EMA считается по всей истории свечей (прогрев), а не только по периоду
+    lev = eff["leverage"]
+    lev_add = eff.get("pyramid_leverage") or lev                  # плечо доборов; не задано — как у первой ноги
+    mmr = eff["maint_margin_pct"] / 100 if eff.get("liquidation_sim") else None
     pyramid, pyr_pct = None, None
     if eff.get("pyramid_enabled"):
         room = int((100 - eff["trade_pct"]) // eff["pyramid_pct"])          # сколько доборов помещается в 100% депозита вместе с первой ногой
@@ -321,15 +331,18 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         if room < eff["pyramid_max"]:
             warnings.append(f"Пирамидинг: {eff['trade_pct']:g}% + {eff['pyramid_max']} × {eff['pyramid_pct']:g}% больше депозита — доборов не больше {room}")
         pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "move_pct": eff.get("pyramid_move_pct") or 0.0, "move_dir": eff.get("pyramid_move_dir") or "any", "avg": bool(eff.get("pyramid_avg")),
-                            "w0": eff["trade_pct"], "w": eff["pyramid_pct"]}, eff["pyramid_pct"]
+                            "w0": eff["trade_pct"] * lev, "w": eff["pyramid_pct"] * lev_add}, eff["pyramid_pct"]      # веса усреднения — объём (доля × плечо)
     skipped = []
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, pyramid=pyramid,
                                signal_gap_h=eff.get("signal_gap_h") or 0.0, sl_hold_strong=bool(eff.get("sl_hold_strong")), skipped=skipped,
+                               leverage=lev, add_leverage=lev_add, mmr=mmr,
                                **common, **extra)
 
-    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True), pyr_pct)
-    if eff["sl_pct"] * eff["leverage"] >= 100:
-        warnings.append(f"Плечо {eff['leverage']:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа, бэктест этого не моделирует")
+    apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True), pyr_pct, eff.get("pyramid_leverage"))
+    if not mmr:
+        for who, lv in (("", eff["leverage"]), (" доборов", lev_add if pyramid else None)):
+            if lv and eff["sl_pct"] * lv >= 100:
+                warnings.append(f"Плечо{who} {lv:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа; включите «моделировать ликвидацию», чтобы учесть это в расчёте")
 
     # все подтверждённые сигналы (в том числе пропущенные: позиция открыта, пауза после стопа)
     lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
@@ -395,7 +408,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "warnings": warnings,
         "range": {"first_ts": sigs[0][0], "last_ts": sigs[-1][0], "split_ts": split_ts, "candles_last_ts": candles[-1][0]},
         "stats": {
-            "total": block(trades),
+            "total": {**block(trades), **equity_mod.mtm_drawdown(trades, candles, eff["deposit"])},
             "long": block([t for t in trades if t["side"] == "long"]),
             "short": block([t for t in trades if t["side"] == "short"]),
             "first_half": block(first_half),
