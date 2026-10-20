@@ -598,6 +598,50 @@ def scenario(pg, base, state_url):
     api_dg = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({only: 'global'})}).then(r => r.status)""")
     check("API: режим «только Global» без порогов — ошибка валидации", api_dg == 422, str(api_dg))
 
+    # --- экспорт сделок в CSV
+    n_rows = pg.locator("table.trades tbody tr").count()
+    check("у экспорта CSV есть «?»", pg.locator(".table-bar .help").count() == 1)
+    with pg.expect_download() as dl_csv:
+        pg.get_by_test_id("export-csv").click()
+    csv_dl = dl_csv.value
+    raw = Path(csv_dl.path()).read_bytes().decode("utf-8")
+    lines = [l for l in raw.split("\r\n") if l]
+    check("CSV: UTF-8 с BOM, шапка и строка на каждую сделку таблицы", raw.startswith("\ufeff") and lines[0].lstrip("\ufeff").startswith("n,side,leg,group,signal_utc") and len(lines) - 1 == n_rows and csv_dl.suggested_filename.endswith(".csv"), f"{len(lines) - 1} строк, таблица {n_rows}")
+    cols = next(csv.reader([lines[1]]))
+    check("CSV: сторона, цена, причина и метрики заполнены", cols[1] in ("long", "short") and float(cols[7]) > 0 and cols[9] in ("TP", "SL", "BE", "REV", "OPEN") and cols[16] != "" and cols[17] != "" and "@" in cols[19], lines[1][:140])
+
+    # --- Монте-Карло
+    while pg.locator(".toast-close").count():           # уведомления перекрывают правую колонку — закрываем, как это сделал бы пользователь
+        pg.locator(".toast-close").first.click(); pg.wait_for_timeout(150)
+    mcp = pg.get_by_test_id("mc-panel")
+    check("Монте-Карло: у раздела и параметров есть «?»", mcp.locator(".help").count() == 3 and mcp.get_by_test_id("mc-table").count() == 0)
+    mcp.get_by_role("button", name="Рассчитать").click(); mcp.get_by_test_id("mc-table").wait_for(timeout=30000)
+    check("Монте-Карло: веер, таблица итога/просадки и вероятности", mcp.get_by_test_id("mc-fan").count() == 1 and mcp.locator("tbody tr").count() == 3 and "Вероятность убытка" in mcp.inner_text() and "Это не прогноз" in mcp.inner_text(), mcp.inner_text()[:200])
+    mcp.locator("select").nth(1).select_option("bootstrap")
+    mcp.get_by_role("button", name="Рассчитать").click(); pg.wait_for_timeout(2500)
+    check("Монте-Карло: режим «выборка с возвращением»", "выборка с возвращением" in mcp.get_by_test_id("mc-panel").inner_text() if False else "выборка с возвращением" in mcp.inner_text().split("Вероятность убытка")[-1])
+    pg.get_by_role("button", name="Запустить").first.click(); pg.wait_for_timeout(3000)
+    check("после пересчёта бэктеста результат Монте-Карло сброшен", pg.get_by_test_id("mc-panel").get_by_test_id("mc-table").count() == 0)
+
+    # --- сохранённые прогоны
+    rp = pg.get_by_test_id("runs-panel")
+    check("прогоны: пусто, у раздела есть «?»", "Пока ничего не сохранено" in rp.inner_text() and rp.locator(".help").count() == 1 and rp.get_by_role("button", name="Сохранить").is_disabled())
+    sl_saved = num(pg, "Стоп-лосс").first.input_value()
+    rp.get_by_label("Название прогона").fill("Тест Ж"); rp.get_by_role("button", name="Сохранить").click()
+    rp.locator("li[data-run='Тест Ж']").wait_for(timeout=10000)
+    check("прогон сохранён: имя, сделки, Шарп, просадка", all(w in rp.locator("li").first.inner_text() for w in ("Тест Ж", "сделок", "Шарп", "просадка")), rp.locator("li").first.inner_text())
+    num(pg, "Стоп-лосс").first.fill("9")
+    pg.get_by_role("button", name="Запустить").first.click(); pg.wait_for_timeout(3000)
+    rp.get_by_role("button", name="Загрузить").click(); pg.wait_for_timeout(3500)
+    check("загрузка прогона вернула параметры и пересчитала результат", num(pg, "Стоп-лосс").first.input_value() == sl_saved and pg.locator("table.trades tbody tr").count() == n_rows, f"SL {sl_saved}")
+    rp = pg.get_by_test_id("runs-panel")
+    rp.get_by_label("Название прогона").fill("тест ж"); rp.get_by_role("button", name="Сохранить").click(); pg.wait_for_timeout(1500)
+    check("то же имя без учёта регистра перезаписывает прогон", pg.get_by_test_id("runs-panel").locator("li").count() == 1 and pg.get_by_test_id("runs-panel").locator("li b").inner_text() == "тест ж")
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("runs-panel").get_by_role("button", name="Удалить тест ж").click(); pg.wait_for_timeout(1500)
+    check("прогон удалён", "Пока ничего не сохранено" in pg.get_by_test_id("runs-panel").inner_text())
+    rp.get_by_label("Название прогона").fill("Для второго пользователя"); rp.get_by_role("button", name="Сохранить").click(); pg.wait_for_timeout(1500)
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):
@@ -648,6 +692,7 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Войти").click()
     pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(1200)
     check("второй пользователь: свои настройки (стоп по умолчанию 2), те же общие данные", num(pg, "Стоп-лосс").first.input_value() == "2" and pg.locator("table.trades tbody tr").count() > 0)
+    check("второй пользователь не видит чужих сохранённых прогонов", "Пока ничего не сохранено" in pg.get_by_test_id("runs-panel").inner_text())
     pg.get_by_test_id("user-button").click(); pg.get_by_test_id("logout").click()
     pg.wait_for_selector("form.login-card", timeout=10000)
     pg.get_by_label("Логин").fill("tester"); pg.get_by_label("Пароль").fill(USER_PASS)

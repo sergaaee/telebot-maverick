@@ -231,6 +231,35 @@ class SignalService:
                          + (f"\n<i>Окон свечей без данных: {top['pending']['windows']}</i>" if top["pending"]["windows"] else ""))
         self.send(chat, "\n\n".join(parts))
 
+    def cmd_positions(self, chat, user, arg):
+        """Открытые позиции по конфигам (без номера — по всем непаузным) и их результат на текущий момент по расчёту бэктеста."""
+        if arg.strip():
+            c = self._cfg(chat, user, arg.strip())
+            cfgs = [c] if c else []
+        else:
+            cfgs = [c for c in self.db.list_configs(user["id"]) if not c["paused"] and c["baseline"]]
+            if not cfgs:
+                self.send(chat, "Нет посчитанных конфигов. /list — список.")
+                return
+        for c in cfgs:
+            try:
+                res = self.engine.evaluate(c["params"])
+            except EvalError as e:
+                self.send(chat, f"⚠️ <b>#{c['id']} {esc(c['name'])}</b>: {esc(str(e))}")
+                continue
+            sym = c["params"]["symbol"]
+            last_ts = res["range"]["candles_last_ts"]
+            price_now = None
+            try:
+                price_now = self.engine.price_fn(sym) if self.b.live_price else None
+                if not price_now:
+                    price_now = self.engine.store.candles(sym)[-1][4]
+            except (KeyError, IndexError, FileNotFoundError):
+                pass
+            self.send(chat, fm.positions_message(c, res, price_now, last_ts))
+
+    cmd_pos = cmd_positions
+
     def cmd_check(self, chat, user, arg):
         self._force.add(user["id"])
         self._wake.set()

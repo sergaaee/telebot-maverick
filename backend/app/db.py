@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS configs (
     updated REAL NOT NULL,
     UNIQUE (user_id, name)
 );
+CREATE TABLE IF NOT EXISTS saved_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    params TEXT NOT NULL,
+    tf TEXT NOT NULL DEFAULT 'auto',
+    summary TEXT NOT NULL,
+    created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
@@ -225,6 +235,43 @@ class Database:
         with self.conn() as c:
             c.execute("INSERT INTO ui_state(user_id, data, updated) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated=excluded.updated",
                       (user_id, json.dumps(state, ensure_ascii=False), time.time()))
+
+    # ---------------- сохранённые прогоны (у каждого пользователя свои) ----------------
+    MAX_RUNS = 200
+
+    @staticmethod
+    def _run(row):
+        d = dict(row)
+        d["params"], d["summary"] = json.loads(d["params"]), json.loads(d["summary"])
+        return d
+
+    def list_runs(self, user_id):
+        with self.conn() as c:
+            rows = c.execute("SELECT * FROM saved_runs WHERE user_id=? ORDER BY created DESC, id DESC", (user_id,)).fetchall()
+        return [self._run(r) for r in rows]
+
+    def save_run(self, user_id, name, params, tf, summary):
+        """Новый прогон; имя уникально у пользователя без учёта регистра (в Python: SQLite NOCASE не знает кириллицу) — прогон с тем же именем перезаписывается."""
+        name = (name or "").strip()
+        if not name or len(name) > 80:
+            raise DbError("Название прогона: от 1 до 80 символов")
+        now = time.time()
+        with self.conn() as c:
+            same = next((r for r in c.execute("SELECT id, name FROM saved_runs WHERE user_id=?", (user_id,)) if r["name"].casefold() == name.casefold()), None)
+            if same:
+                c.execute("UPDATE saved_runs SET name=?, params=?, tf=?, summary=?, created=? WHERE id=?",
+                          (name, json.dumps(params, ensure_ascii=False), str(tf), json.dumps(summary, ensure_ascii=False), now, same["id"]))
+                rid = same["id"]
+            else:
+                if c.execute("SELECT COUNT(*) FROM saved_runs WHERE user_id=?", (user_id,)).fetchone()[0] >= self.MAX_RUNS:
+                    raise DbError(f"Не больше {self.MAX_RUNS} сохранённых прогонов — удалите ненужные")
+                rid = c.execute("INSERT INTO saved_runs(user_id, name, params, tf, summary, created) VALUES (?,?,?,?,?,?)",
+                                (user_id, name, json.dumps(params, ensure_ascii=False), str(tf), json.dumps(summary, ensure_ascii=False), now)).lastrowid
+            return self._run(c.execute("SELECT * FROM saved_runs WHERE id=?", (rid,)).fetchone())
+
+    def delete_run(self, user_id, run_id):
+        with self.conn() as c:
+            return c.execute("DELETE FROM saved_runs WHERE id=? AND user_id=?", (run_id, user_id)).rowcount > 0
 
     # ---------------- привязка Telegram ----------------
     def create_link_code(self, user_id, ttl=600):

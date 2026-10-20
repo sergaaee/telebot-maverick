@@ -1,4 +1,4 @@
-import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, Params, SyncStatus, UiState } from './types';
+import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -106,3 +106,21 @@ export const putUiState = (state: UiState, keepalive = false) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(state),
   });
+
+export const runMonteCarlo = (p: Params, runs: number, mode: MonteCarlo['mode']) =>
+  request<MonteCarlo>('/api/montecarlo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...p, runs, mode }),
+  });
+
+export const listRuns = () => request<{ runs: SavedRun[] }>('/api/runs').then((r) => r.runs);
+
+export const saveRun = (name: string, params: Params, tf: TfMode, summary: RunSummary) =>
+  request<SavedRun>('/api/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, params, tf, summary }),
+  });
+
+export const deleteRun = (id: number) => request<{ ok: boolean }>(`/api/runs/${id}`, { method: 'DELETE' });

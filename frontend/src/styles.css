@@ -162,3 +162,21 @@ main { position: relative; }
 .calc-badge { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 20; display: inline-flex; gap: 8px; align-items: center; background: var(--panel); border: 1px solid var(--accent); border-radius: 999px; padding: 5px 14px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
 @media (prefers-reduced-motion: reduce) { .progress-bar::before { animation: none; width: 100%; left: 0; opacity: .7; } .spinner { animation-duration: 2.4s; } }
 .tag-add { color: #e0b050; }
+
+/* таблица сделок: панель с экспортом */
+.table-bar { position: sticky; left: 0; top: 0; display: flex; gap: 8px; align-items: center; padding: 3px 8px; font-size: 11px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 2; }
+.table-bar .ghost { padding: 1px 8px; font-size: 11px; }
+/* правая колонка: Монте-Карло и сохранённые прогоны */
+.side-block { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 4px; }
+.side-block h3 { display: flex; align-items: center; gap: 6px; }
+.mc-controls { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
+.mc-controls .field { flex: 1; min-width: 110px; }
+.mc-fan { width: 100%; height: 120px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; display: block; }
+.mc-band-wide { fill: var(--accent); opacity: .18; } .mc-band { fill: var(--accent); opacity: .3; }
+.mc-base { stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.mc-median { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.runs-save { display: flex; gap: 6px; margin-bottom: 6px; } .runs-save input { flex: 1; min-width: 0; }
+.runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.runs-list li { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+.run-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; } .run-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-actions { display: inline-flex; gap: 4px; flex: none; } .run-actions .ghost { padding: 1px 8px; font-size: 11px; } .run-sub { font-size: 11px; margin-top: 2px; }

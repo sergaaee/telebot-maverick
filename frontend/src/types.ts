@@ -359,3 +359,42 @@ export interface AddAssetResult {
   added: boolean;
   job: Job | null;
 }
+
+/** Монте-Карло по сделкам стратегии. Доли — в процентах; fan — перцентили капитала (в долях депозита) по ходу серии сделок. */
+export interface MonteCarlo {
+  runs: number;
+  mode: 'shuffle' | 'bootstrap';
+  trades: number;
+  compound: boolean;
+  final_pct: Record<'5' | '25' | '50' | '75' | '95' | 'mean', number>;
+  max_dd_pct: Record<'5' | '25' | '50' | '75' | '95' | 'mean', number>;
+  prob_loss_pct: number;
+  prob_ruin_pct: number;
+  prob_dd_pct: Record<string, number>;
+  actual: { final_pct: number; max_dd_pct: number };
+  fan: { n: number; '5': number; '25': number; '50': number; '75': number; '95': number }[];
+}
+
+/** Сохранённый прогон: параметры + ключевые цифры на момент сохранения (результат при загрузке пересчитывается заново). */
+export interface RunSummary {
+  trades: number;
+  total_usd: number;
+  return_pct: number | null;
+  sharpe: number | null;
+  max_dd_pct: number | null;
+  winrate: number;
+  profit_factor: number | null;
+  symbol: string;
+  source: string;
+  first_ts: number;
+  last_ts: number;
+}
+
+export interface SavedRun {
+  id: number;
+  name: string;
+  params: Partial<Params>;
+  tf: TfMode;
+  summary: RunSummary;
+  created: number;
+}

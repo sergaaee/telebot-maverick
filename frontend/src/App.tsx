@@ -4,6 +4,8 @@ import { addAsset, downloadTop, getConfig, getLatest, getSync, runSync, getUiSta
 import EquityChart from './components/EquityChart';
 import Help from './components/Help';
 import MetricsBar from './components/MetricsBar';
+import MonteCarloPanel from './components/MonteCarloPanel';
+import RunsPanel from './components/RunsPanel';
 import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
 import StatsPanel from './components/StatsPanel';
@@ -11,11 +13,12 @@ import Toasts from './components/Toasts';
 import UserMenu from './components/UserMenu';
 import TopPanel from './components/TopPanel';
 import TradesTable from './components/TradesTable';
-import { LEGACY_OFF, parseConfig } from './configIO';
+import { CONFIG_FORMAT, LEGACY_OFF, parseConfig } from './configIO';
+import { downloadText, tradesCsv, tradesCsvName } from './tradesCsv';
 import { fmtDate, fmtPrice, metricsStr, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
 import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
-import type { AppConfig, BacktestResult, Job, LatestSource, Params, Signal, SyncStatus, TfMode, Trade, UiState } from './types';
+import type { AppConfig, BacktestResult, Job, LatestSource, Params, SavedRun, Signal, SyncStatus, TfMode, Trade, UiState } from './types';
 
 const profileKey = (source: string, symbol: string) => `${source}|${symbol}`;
 
@@ -315,6 +318,12 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
+  };
+
+  /** Загрузка сохранённого прогона: параметры применяются так же, как импортированный конфиг (в том числе совместимость со старыми ключами). */
+  const onLoadRun = (r: SavedRun) => {
+    const err = onImportConfig(JSON.stringify({ format: CONFIG_FORMAT, version: 1, tf: r.tf, params: r.params }));
+    if (err) push({ kind: 'error', autoCloseMs: 8000, text: `Не удалось загрузить прогон «${r.name}»: ${err}` });
   };
 
   const resetParams = () => {
@@ -617,14 +626,23 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
               <div className="empty">нет данных</div>
             )}
           </div>
-          <TradesTable trades={trades} selected={sel} onSelect={selectTrade} top={view === 'top'} />
+          <TradesTable trades={trades} selected={sel} onSelect={selectTrade} top={view === 'top'}
+            onExport={params && trades.length ? () => downloadText(tradesCsvName(params, view === 'top'), tradesCsv(trades, view === 'top')) : undefined} />
         </section>
 
         <section className="right">
           {result && view === 'top' && topSec && params ? (
             <TopPanel top={topSec} params={params} downloading={topDownloading} onDownload={() => void onDownloadTop()} onPickCoin={pickCoin} />
           ) : result ? (
-            <StatsPanel result={result} />
+            <>
+              <StatsPanel result={result} />
+              {params && (
+                <>
+                  <MonteCarloPanel params={params} result={result} />
+                  <RunsPanel params={params} tf={tfMode} result={result} onLoad={onLoadRun} />
+                </>
+              )}
+            </>
           ) : (
             <div className="empty">{loading ? <span className="busy"><span className="spinner" /> Считаю…</span> : 'Нет результата'}</div>
           )}

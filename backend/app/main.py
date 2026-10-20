@@ -15,8 +15,8 @@ from .candle_sync import CandleSync
 from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
-from .schemas import BacktestParams
-from .service import ParamError, run_backtest
+from .schemas import BacktestParams, MonteCarloRequest
+from .service import ParamError, run_backtest, run_montecarlo
 
 
 class LoginIn(BaseModel):
@@ -266,6 +266,16 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         except ParamError as e:
             raise HTTPException(422, str(e))
 
+    @app.post("/api/montecarlo")
+    def montecarlo_run(req: MonteCarloRequest):
+        """Монте-Карло по сделкам стратегии: разброс итога и просадки при другом порядке/составе сделок."""
+        try:
+            return run_montecarlo(store, s.defaults, req, available_fn=available_fn)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        except ParamError as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/top/download")
     def top_download(params: BacktestParams, request: Request):
         """Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + TOP_DAYS) для текущих параметров."""
@@ -294,6 +304,27 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         if len(json.dumps(state)) > 500_000:
             raise HTTPException(413, "Слишком большое состояние")
         db.put_ui_state(request.state.user["id"], state)
+        return {"ok": True}
+
+    # ---- сохранённые прогоны: именованные снимки «параметры + ключевые цифры», у каждого пользователя свои ----
+    @app.get("/api/runs")
+    def list_runs(request: Request):
+        return {"runs": db.list_runs(request.state.user["id"])}
+
+    @app.post("/api/runs")
+    def save_run(request: Request, body: dict = Body(...)):
+        params, summary = body.get("params"), body.get("summary")
+        if not isinstance(params, dict) or not isinstance(summary, dict) or len(json.dumps([params, summary])) > 100_000:
+            raise HTTPException(422, "Нужны params и summary (объекты)")
+        try:
+            return db.save_run(request.state.user["id"], str(body.get("name") or ""), params, body.get("tf", "auto"), summary)
+        except DbError as e:
+            raise HTTPException(422, str(e))
+
+    @app.delete("/api/runs/{run_id}")
+    def delete_run(run_id: int, request: Request):
+        if not db.delete_run(request.state.user["id"], run_id):
+            raise HTTPException(404, "Прогон не найден")
         return {"ok": True}
 
     return app

@@ -175,6 +175,32 @@ def fill_message(cfg, result, ev, source_label):
     return "\n".join(lines)
 
 
+def positions_message(cfg, result, price_now, last_candle_ts):
+    """Состояние конфига сейчас (по расчёту бэктеста на свечах): открытая позиция с ногами, уровнями и результатом либо последняя закрытая сделка."""
+    p = result["params"]
+    head = f"📍 <b>#{cfg['id']} {esc(cfg['name'])}</b> · {esc(str(p['symbol']))}"
+    open_legs = [t for t in result["trades"] if t["reason"] == "OPEN"]
+    if not open_legs:
+        last = result["trades"][-1] if result["trades"] else None
+        tail = (f"Последняя сделка: {side_line(last['side'])} {ts_str(last['entry_ts'])} → {ts_str(last['exit_ts'])}, {last['reason']}, {usd(last['pnl_usd'])}"
+                if last else "Сделок по этому конфигу пока не было.")
+        return f"{head}\nПозиции сейчас нет.\n{tail}"
+    side = open_legs[0]["side"]
+    d = 1 if side == "long" else -1
+    lines = [f"{head}", f"{side_line(side)} · открыта с {ts_str(min(t['entry_ts'] for t in open_legs))} · " + (f"ног: {len(open_legs)}" if len(open_legs) > 1 else "одна нога")]
+    for t in sorted(open_legs, key=lambda x: x["entry_ts"]):
+        name = ("усреднённая позиция" + (f" (вход средней из {t['adds_n'] + 1})" if t.get("adds_n") else "")) if t.get("avg") else (f"добор #{t.get('leg', 1) - 1}" if t.get("pyramid") else "вход")
+        stop = t["entry"] if (t["be"] and t["tp_hits"] >= 1) else t["sl"]
+        move = d * (price_now / t["entry"] - 1) * 100 if price_now else None
+        left = [f"TP{i} <code>{price(x)}</code>" for i, x in enumerate(t["tps"], 1) if i > t["tp_hits"]]
+        lines.append(f"• {name}: <code>{price(t['entry'])}</code> · {'БУ' if stop == t['entry'] and t['tp_hits'] else 'SL'} <code>{price(stop)}</code> · "
+                     + (("осталось " + " / ".join(left)) if left else "тейки исполнены") + f" · исполнено тейков {t['tp_hits']}/{len(t['tps'])}"
+                     + (f"\n   сейчас {pct(move, 2)} от входа · результат {usd(t['pnl_usd'])}" if move is not None else f"\n   результат {usd(t['pnl_usd'])}"))
+    lines.append(f"Итого по позиции: <b>{usd(sum(t['pnl_usd'] for t in open_legs))}</b> (с учётом уже исполненных тейков)")
+    lines.append(f"<i>Цена {price(price_now)} · расчёт по свечам до {ts_str(last_candle_ts)}</i>")
+    return "\n".join(lines)
+
+
 def top_block(top, sig, p, result):
     if "skip" in top:
         return f"🪙 <b>Топ-коин</b>: пропущен — {esc(top['skip'])}"
@@ -244,5 +270,6 @@ HELP = """🤖 <b>Бот сигналов Maverick</b>
 /remove &lt;№|имя&gt;
 /check — проверить новые сигналы сейчас
 /cancel — остановить долгий подсчёт (не посчитанные конфиги встанут на паузу)
+/positions [№|имя] — открытые позиции по конфигам и их текущий результат
 /status — состояние данных и подгрузки
 /unlink — отвязать Telegram от аккаунта"""

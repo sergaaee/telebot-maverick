@@ -1,8 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { fmtHold, fmtPct, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
+import { HELP } from '../helpTexts';
 import type { Trade } from '../types';
+import Help from './Help';
 
-export default function TradesTable({ trades, selected, onSelect, top = false }: { trades: Trade[]; selected: number | null; onSelect: (n: number) => void; top?: boolean }) {
+export default function TradesTable({ trades, selected, onSelect, top = false, onExport }: { trades: Trade[]; selected: number | null; onSelect: (n: number) => void; top?: boolean; onExport?: () => void }) {
   const row = useRef<HTMLTableRowElement>(null);
   useEffect(() => {
     row.current?.scrollIntoView({ block: 'nearest' });
@@ -11,6 +13,13 @@ export default function TradesTable({ trades, selected, onSelect, top = false }:
   if (!trades.length) return <div className="empty">{top ? 'Сделок по топ-коинам нет — проверьте параметры или скачайте свечи' : 'Сделок нет — измените параметры'}</div>;
   return (
     <div className="table-wrap">
+      {onExport && (
+        <div className="table-bar">
+          <span className="muted">{trades.length} сделок</span>
+          <button type="button" className="ghost" onClick={onExport} data-testid="export-csv">⬇ CSV</button>
+          <Help text={HELP.csv_trades} />
+        </div>
+      )}
       <table className="trades">
         <thead>
           <tr>
