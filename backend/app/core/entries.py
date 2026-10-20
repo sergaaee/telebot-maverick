@@ -15,11 +15,20 @@ entries(signals, ...) -> [(ts_ms, d)], d = +1 лонг / -1 шорт. Без ф�
           Перцентиль считается только по прошлым отчётам — заглядывания в будущее нет.
 """
 import csv
+import logging
+import sys
 from bisect import bisect_right, insort
 from collections import deque
 from datetime import datetime
 
 from .signal_parser import parse_liquidation, parse_signal, parse_top_coin, should_long, should_short
+
+
+# по умолчанию csv не читает поля длиннее 128 КБ («field larger than field limit»): в истории бывают очень длинные сообщения
+# (или лишняя кавычка, склеившая строки), поэтому лимит поднят; такие строки попадают в лог
+csv.field_size_limit(min(sys.maxsize, 2 ** 30))
+TEXT_WARN = 100_000
+log = logging.getLogger("entries")
 
 
 def _ts(s):
@@ -42,6 +51,8 @@ def load_signals(path):
                 if liq:
                     ll, ls = liq["long"], liq["short"]
             top = parse_top_coin(r.get("text") or "")
+            if len(r.get("text") or "") > TEXT_WARN:
+                log.warning("%s: строка id=%s содержит текст на %d символов — возможно, в файле лишняя кавычка (строки склеились)", path, r.get("id"), len(r["text"]))
             dg = None
             if r.get("deep_global") not in (None, ""):
                 dg = float(r["deep_global"])
