@@ -69,7 +69,7 @@ npm run dev                       # http://localhost:5173, /api проксиру
 | Стратегия (умолчания) | `SIDE`, `ONLY`, `LOCAL_MIN`, `SCALP_MIN`, `SHORT_LOCAL_MAX`, `SHORT_SCALP_MAX`, `GLOBAL_MIN`, `SHORT_GLOBAL_MAX` (необязательные пороги Deep Global), `CONFIRM`, `TP_PCT` или `TP_LEVELS`, `BE_AFTER_TP1`, `SL_PCT`, `DEPOSIT`, `TRADE_PCT`, `LEVERAGE`, `COMPOUND`, `FEE`, `SLIPPAGE` |
 | Тренд (умолчания) | `TREND_ENABLED`, `TREND_EMAS` (20,50,100,200), `TREND_TF` |
 | Топ-коины (умолчания) | `TOP_ENABLED`, `TOP_SIDES`, `TOP_TP_PCT` или `TOP_TP_LEVELS`, `TOP_BE_AFTER_TP1`, `TOP_SL_PCT`, `TOP_SIZE_USD`, `TOP_FEE`, `TOP_SLIPPAGE`, `TOP_DAYS`, `TOP_MIN_VALUE` |
-| Пирамидинг и паузы (умолчания) | `PYRAMID_ENABLED`, `PYRAMID_MAX`, `PYRAMID_PCT`, `PYRAMID_GAP_H`, `PYRAMID_MOVE_PCT`, `PYRAMID_MOVE_DIR`, `PYRAMID_AVG`, `SIGNAL_GAP_H`, `SL_HOLD_STRONG` |
+| Пирамидинг и паузы (умолчания) | `PYRAMID_ENABLED`, `PYRAMID_MAX`, `PYRAMID_PCT`, `PYRAMID_GAP_H`, `PYRAMID_MOVE_PCT`, `PYRAMID_MOVE_DIR`, `PYRAMID_LEVERAGE`, `LIQUIDATION_SIM`, `MAINT_MARGIN_PCT`, `PYRAMID_AVG`, `SIGNAL_GAP_H`, `SL_HOLD_STRONG` |
 | Фильтры (умолчания) | `COOL_METRIC`, `COOL_DROP`, `COOL_DECLINES`, `LIQ_HOURS`, `LIQ_FRAC`, `LIQ_PCT`, `COOLDOWN_H` |
 | Автоподгрузка свечей | `CANDLES_SYNC`, `CANDLES_SYNC_MIN` (5), `CANDLES_SYNC_SYMBOLS` |
 | Telegram и биржа (бот, экспорт) | `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`, `TG_CHANNEL_ID`, `API_KEY`, `API_SECRET`, `API_PASSWORD`, `DRY_RUN` |
@@ -205,3 +205,14 @@ cd backend && python -m pytest -q          # движок, API, экспорт
 cd frontend && npm run typecheck && npm run build
 python e2e/run.py                          # браузерная проверка интерфейса (нужны playwright и собранный фронтенд, см. шапку файла)
 ```
+
+## Плечо, ликвидация и реальная просадка
+
+- **Плечо доборов** (`PYRAMID_LEVERAGE`, пусто — как у первой ноги): размер добора = доля депозита × это плечо; маржа от плеча не зависит. У усреднённой позиции веса — объём (доля × плечо).
+- **Моделировать ликвидацию** (`LIQUIDATION_SIM`, по умолчанию выключено — как раньше): цена ликвидации ноги — вход × (1 − 1/плечо + `MAINT_MARGIN_PCT`) для лонга, зеркально для шорта;
+  маржа изолированная, у каждой ноги своё плечо, у усреднённой позиции — эффективное плечо (общий объём / общая маржа). Касание закрывает остаток ноги с потерей **всей** её маржи
+  (−100%/плечо от объёма, метка `LIQ`). Если стоп ближе к входу, чем ликвидация, раньше срабатывает он; если дальше или снят режимом «не ставить SL, пока метрики сильны» — ликвидация.
+  Упрощения: без ступеней поддерживающей маржи по объёму, без фандинга; гэпы — по цене банкротства (потеря маржи не больше 100%).
+- **Реальная просадка** (карточка в статистике, строка «с открытыми позициями» в боте): капитал = депозит + закрытые результаты + нереализованный результат открытых ног по худшей цене свечи.
+  Показывает, насколько глубоко счёт проседал внутри сделок — с учётом плеча, размера и одновременных ног пирамидинга. Обычная «Макс. просадка» считается только по закрытым сделкам.
+  Приближённо: свечи группируются в блоки (до ~15 000), усреднённая позиция берётся полным размером с первой свечи (консервативно).

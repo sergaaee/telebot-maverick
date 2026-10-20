@@ -57,9 +57,11 @@ def stats_block(stats, params, rng=None, title="📈 <b>Статистика к�
         f"{title}{esc(period)}",
         f"Сделок <b>{t['trades']}</b> · Winrate <b>{t['winrate']:.1f}%</b> · PF <b>{pf}</b>",
         f"Итог <b>{usd(t['total_usd'])}</b>" + (f" (<b>{pct(t['return_pct'], 1)}</b> от депозита)" if t.get("return_pct") is not None else ""),
-        f"Просадка <b>{pct(t['max_dd_pct'], 1, sign=False) if t.get('max_dd_pct') is not None else '–'}</b> · Sharpe <b>{sharpe}</b>",
+        f"Просадка <b>{pct(t['max_dd_pct'], 1, sign=False) if t.get('max_dd_pct') is not None else '–'}</b>"
+        + (f" (с открытыми позициями <b>{pct(t['max_dd_real_pct'], 1, sign=False)}</b>)" if t.get("max_dd_real_pct") is not None else "")
+        + f" · Sharpe <b>{sharpe}</b>",
         f"Средняя сделка {pct(t['avg_pct'], 3)} · ср. плюс/минус {usd(t['avg_win_usd'])} / {usd(t['avg_loss_usd'])}",
-        f"Серия убытков до {t['max_loss_streak']} · TP {t['tp']} · SL {t['sl']} · БУ {t['be']}",
+        f"Серия убытков до {t['max_loss_streak']} · TP {t['tp']} · SL {t['sl']} · БУ {t['be']}" + (f" · ликвидаций {t['liq']}" if t.get("liq") else ""),
     ]
     if t.get("adds"):
         lines.append(f"Позиций {t['positions']} · доборов {t['adds']} (сделок считается по ногам)")
@@ -100,6 +102,10 @@ def config_summary(cfg, result=None):
         bits.append(f"пауза между сигналами {p['signal_gap_h']:g} ч")
     if p.get("sl_hold_strong"):
         bits.append("SL после остывания метрик")
+    if p.get("liquidation_sim"):
+        bits.append(f"ликвидация {p.get('maint_margin_pct', 0.5):g}%")
+    if p.get("pyramid_enabled") and p.get("pyramid_leverage"):
+        bits.append(f"плечо доборов {p['pyramid_leverage']:g}×")
     return " · ".join(bits)
 
 
@@ -145,7 +151,7 @@ def signal_message(cfg, result, sig, report, plan, entry_price, top, source_labe
     return "\n\n".join(blocks)
 
 
-FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>"}
+FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>", "LIQ": "💥 <b>ЛИКВИДАЦИЯ</b>"}
 
 
 def fill_message(cfg, result, ev, source_label):

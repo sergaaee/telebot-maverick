@@ -642,6 +642,44 @@ def scenario(pg, base, state_url):
     check("прогон удалён", "Пока ничего не сохранено" in pg.get_by_test_id("runs-panel").inner_text())
     rp.get_by_label("Название прогона").fill("Для второго пользователя"); rp.get_by_role("button", name="Сохранить").click(); pg.wait_for_timeout(1500)
 
+    # --- плечо доборов, моделирование ликвидации и реальная просадка
+    check("карточка «Реальная просадка» есть, с «?», и не меньше обычной", pg.locator(".card-label", has_text="Реальная просадка").locator(".help").count() == 1)
+    dd_closed = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({leverage: 5, trade_pct: 25})}).then(r => r.json()).then(j => [j.stats.total.max_dd_usd, j.stats.total.max_dd_real_usd, j.stats.total.max_dd_real_pct])""")
+    check("API: реальная просадка (по рынку) не меньше просадки по закрытым и в пределах 0–100%", dd_closed[1] >= dd_closed[0] - 1e-6 and 0 < dd_closed[2] <= 100, str(dd_closed))
+    field(pg, "пирамидинг (доборы в позицию)").locator("input").check()
+    check("поля «Моделировать ликвидацию» и «Плечо доборов» есть, с «?», по умолчанию выключены/пусты", field(pg, "моделировать ликвидацию").locator(".help").count() == 1
+          and not field(pg, "моделировать ликвидацию").locator("input").is_checked() and field(pg, "Плечо доборов").locator(".help").count() == 1 and num(pg, "Плечо доборов").input_value() == "")
+    check("поддерживающая маржа появляется только при включённой ликвидации", field(pg, "Поддерживающая маржа").count() == 0)
+    num(pg, "Плечо").first.fill("30"); num(pg, "Стоп-лосс").first.fill("20")
+    field(pg, "моделировать ликвидацию").locator("input").check()
+    check("у поддерживающей маржи есть «?»", field(pg, "Поддерживающая маржа").locator(".help").count() == 1)
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    liq_n = pg.locator("table.trades tbody tr .tag-LIQ").count()
+    check("плечо 30× со стопом 20% и ликвидацией: в таблице сделки с причиной LIQ", liq_n > 0, f"LIQ: {liq_n}")
+    check("в карточке сделок видно число ликвидаций", "ликвид." in pg.locator(".card", has_text="Сделок").first.inner_text())
+    liq_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({leverage: 30, sl_pct: 20, liquidation_sim: true})}).then(r => r.json()).then(j => j.trades.filter(t => t.reason === 'LIQ').map(t => [t.pnl_pct, t.pnl_usd, t.margin]))""")
+    check("API: ликвидация съедает всю маржу ноги (−100%/плечо от объёма) плюс комиссия 2 × 0.05% объёма", liq_api and all(abs(p + 100 / 30 + 0.1) < 1e-6 and abs(u + m * 1.03) < 1e-6 * m for p, u, m in liq_api), str(liq_api[:2]))
+    field(pg, "моделировать ликвидацию").locator("input").uncheck()
+    num(pg, "Плечо").first.fill("1"); num(pg, "Стоп-лосс").first.fill("2")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    check("выключили ликвидацию — LIQ пропали", pg.locator("table.trades tbody tr .tag-LIQ").count() == 0)
+    # старый конфиг без этих полей: ликвидация выключена, плечо доборов пусто
+    with pg.expect_download() as dl4:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg4 = _json.loads(Path(dl4.value.path()).read_text(encoding="utf-8"))
+    check("в скачанном конфиге есть новые поля", cfg4["params"]["liquidation_sim"] is False and cfg4["params"]["pyramid_leverage"] is None and "maint_margin_pct" in cfg4["params"])
+    cfg4["params"]["liquidation_sim"] = True
+    for k in ("liquidation_sim", "pyramid_leverage", "maint_margin_pct"):
+        cfg4["params"].pop(k)
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg4))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("старый конфиг без ликвидации и плеча доборов: всё выключено", not field(pg, "моделировать ликвидацию").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-LIQ").count() == 0)
+    with pg.expect_download() as dl5:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg5 = _json.loads(Path(dl5.value.path()).read_text(encoding="utf-8"))
+    check("после загрузки старого конфига в экспорте: ликвидация выключена, плечо доборов не задано", cfg5["params"]["liquidation_sim"] is False and cfg5["params"]["pyramid_leverage"] is None)
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):

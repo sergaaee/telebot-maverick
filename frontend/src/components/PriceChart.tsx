@@ -42,8 +42,8 @@ type Range = { from: number; to: number };
 
 const COLORS = { up: '#26a69a', down: '#ef5350', rev: '#f0a030', open: '#8a94a8', be: '#6ea0ff', sl: '#ef5350', entry: '#8a94a8' };
 const TP_COLORS = ['#26a69a', '#35c9b8', '#7be0d2'];
-/** Цвет маркера закрытия по метке исполнения: TP1..TP3, SL, BE, REV, OPEN. */
-const labelColor = (l: string) => (l.startsWith('TP') ? COLORS.up : l === 'SL' ? COLORS.down : l === 'BE' ? COLORS.be : l === 'REV' ? COLORS.rev : COLORS.open);
+/** Цвет маркера закрытия по метке исполнения: TP1..TP3, SL, BE, REV, LIQ, OPEN. */
+const labelColor = (l: string) => (l.startsWith('TP') ? COLORS.up : l === 'SL' ? COLORS.down : l === 'BE' ? COLORS.be : l === 'REV' ? COLORS.rev : l === 'LIQ' ? '#d81b60' : COLORS.open);
 
 /** Для фиксированного ТФ: сколько баров запрашиваем за раз и сколько максимум показываем в видимой области. */
 const FIXED_MAX_BARS = 6000;

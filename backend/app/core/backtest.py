@@ -260,9 +260,12 @@ def normalize_tps(tps):
     return [(p, s / 100) for p, s in levels]
 
 
-def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None):
+def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None):
     """Ход позиции, открытой на open свечи i. tps: [(цена, доля)]. Возвращает события [(idx, цена, доля, метка)],
-    метки: TP1..TP3, SL, BE (стоп в безубытке), OPEN (данные кончились).
+    метки: TP1..TP3, SL, BE (стоп в безубытке), LIQ (ликвидация), OPEN (данные кончились).
+
+    liq=(цена ликвидации, цена банкротства) — необязательно: касание цены ликвидации закрывает остаток по цене банкротства (теряется вся маржа ноги: -100%/плечо
+    от объёма). Если стоп ближе к входу, чем ликвидация, раньше сработает он; если стоп дальше (или снят из-за hold) — раньше ликвидация.
 
     Порядок внутри свечи (внутри минуты он неизвестен, поэтому выбираем худшее для результата):
       1. сначала проверяется действующий стоп (SL, а после первого тейка при be — вход): если задет, остаток закрыт по нему;
@@ -277,7 +280,11 @@ def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None):
     for k in range(i, len(candles)):
         _, o, h, l, _ = candles[k]
         stop_on = not (hold is not None and stop_label == "SL" and hold(candles[k][0]))
-        if stop_on and ((l <= stop) if d == 1 else (h >= stop)):
+        stop_hit = stop_on and ((l <= stop) if d == 1 else (h >= stop))
+        if liq is not None and ((l <= liq[0]) if d == 1 else (h >= liq[0])) and not (stop_hit and ((stop >= liq[0]) if d == 1 else (stop <= liq[0]))):
+            events.append((k, liq[1], remaining, "LIQ"))
+            return events
+        if stop_hit:
             px = min(stop, o) * (1 - slip) if d == 1 else max(stop, o) * (1 + slip)
             events.append((k, px, remaining, stop_label))
             return events
@@ -358,8 +365,10 @@ class AvgPosition:
     с обычной одиночной сделкой, а после добора остаток делится между оставшимися тейками в прежних пропорциях.
     Порядок внутри свечи и правила исполнения — те же, что в _scan (стоп → тейки → возврат в безубыток в той же свече, гэпы по open, hold)."""
 
-    def __init__(self, candles, d, i0, price0, w0, levels, sl_pct, slip, be, hold=None):
+    def __init__(self, candles, d, i0, price0, w0, levels, sl_pct, slip, be, hold=None, lev0=1.0, mmr=None):
         self.c, self.d, self.n = candles, d, len(candles)
+        self.mmr = mmr                   # доля поддерживающей маржи (None — ликвидация не моделируется)
+        self.M = w0 / (lev0 or 1.0)      # маржа в тех же весах: вес / плечо
         self.k = i0                      # следующая необработанная свеча
         self.A, self.q, self.W = price0, w0 / price0, w0
         self.levels, self.sl_pct, self.slip, self.be, self.hold = levels, sl_pct, slip, be, hold
@@ -370,8 +379,9 @@ class AvgPosition:
         self.done = False
         self.q0 = self.q
 
-    def add(self, i, price, w):
-        """Добор по open свечи i (все предыдущие свечи уже обработаны): новая средняя цена, количество и вес."""
+    def add(self, i, price, w, lev=None):
+        """Добор по open свечи i (все предыдущие свечи уже обработаны): новая средняя цена, количество и вес (вес — объём, т.е. доля × плечо)."""
+        self.M += w / (lev or 1.0)
         q_new = w / price
         self.A = (self.q * self.A + w) / (self.q + q_new)
         self.q += q_new
@@ -385,6 +395,13 @@ class AvgPosition:
     def sl(self):
         return self.A * (1 - self.d * self.sl_pct / 100)
 
+    def liq(self):
+        """(цена ликвидации, цена банкротства) объединённой позиции: эффективное плечо = объём / маржа, маржа изолированная."""
+        if self.mmr is None:
+            return None
+        r = self.M / self.W
+        return self.A * (1 - self.d * (r - self.mmr)), self.A * (1 - self.d * r)
+
     def _close(self, k, px, qty, label):
         self.fills.append((k, px, qty, self.A, label))
         self.q -= qty
@@ -397,7 +414,13 @@ class AvgPosition:
             _, o, h, l, _c = self.c[k]
             stop = self.A if self.label == "BE" else self.sl()
             stop_on = not (self.hold is not None and self.label == "SL" and self.hold(self.c[k][0]))
-            if stop_on and ((l <= stop) if d == 1 else (h >= stop)):
+            stop_hit = stop_on and ((l <= stop) if d == 1 else (h >= stop))
+            liq = self.liq()
+            if liq is not None and ((l <= liq[0]) if d == 1 else (h >= liq[0])) and not (stop_hit and ((stop >= liq[0]) if d == 1 else (stop <= liq[0]))):
+                self._close(k, liq[1], self.q, "LIQ")
+                self.done = True
+                break
+            if stop_hit:
                 px = min(stop, o) * (1 - slip) if d == 1 else max(stop, o) * (1 + slip)
                 self._close(k, px, self.q, self.label)
                 self.done = True
@@ -456,7 +479,7 @@ class AvgPosition:
 
 
 def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None,
-               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None):
+               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None):
     """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам. levels — результат normalize_tps. notional (USD) задаёт размер
     позиции в долларах вместо size (в единицах актива).
 
@@ -468,6 +491,8 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         позицию (AvgPosition): тейки и стоп пересчитываются от новой средней цены;
       сигнал в противоположную сторону: разворот — все открытые ноги закрываются по open свечи входа (исполненные тейки остаются);
       cooldown_h — пауза после стопа; signal_gap_h — минимум часов между открытиями позиций (включая развороты);
+      leverage / add_leverage (плечо первой ноги / доборов; доборы по умолчанию с тем же плечом) и mmr (доля поддерживающей маржи, 0.005 = 0.5%) нужны, только
+        чтобы моделировать ликвидацию (mmr задан): иначе плечо на ход сделки не влияет, а размер считается после (apply_sizing);
       hold(d, ts_мс) -> bool — «стоп-лосс не ставить, пока метрики сильны» (см. _scan);
       skipped — список, в который дописываются (ts, сторона, причина) пропущенных сигналов."""
     ts = [c[0] for c in candles]
@@ -495,7 +520,9 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         leg = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": prices[-1], "tps": prices,
                "tp_shares": levels_shares, "sl": sl, "be": be, "leg": leg_no, "group": group, "pyramid": leg_no > 1}
         hold_d = (lambda t: hold(d, t)) if hold else None
-        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d), candles, fee, size, notional)
+        lev = leverage if leg_no == 1 else (add_leverage or leverage)
+        liq = (entry * (1 - d * (1 / lev - mmr)), entry * (1 - d / lev)) if mmr is not None else None
+        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d, liq), candles, fee, size, notional)
         trades.append(leg)
         open_legs.append(leg)
         return leg
@@ -541,7 +568,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
                     continue
             adds += 1
             if avg:
-                avg_pos.add(i, candles[i][1] * (1 + d * slip), pyramid["w"])
+                avg_pos.add(i, candles[i][1] * (1 + d * slip), pyramid["w"], add_leverage or leverage)
                 avg_trade["add_signals"].append(sts)
             else:
                 open_leg(sts, d, side, i, adds + 1)
@@ -568,7 +595,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         if avg:
             entry = candles[i][1] * (1 + d * slip)
             hold_d = (lambda t, d=d: hold(d, t)) if hold else None
-            avg_pos = AvgPosition(candles, d, i, entry, pyramid["w0"], levels, sl_pct, slip, be, hold_d)
+            avg_pos = AvgPosition(candles, d, i, entry, pyramid["w0"], levels, sl_pct, slip, be, hold_d, leverage, mmr)
             avg_trade = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry_first": entry, "be": be, "leg": 1, "group": group,
                          "pyramid": False, "add_signals": [], "tp_shares": levels_shares, "_j": n, "_events": []}
             trades.append(avg_trade)
@@ -587,7 +614,8 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
 
 def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055, size=0.1, slip=0.0, confirm=1,
              short=None, liq=None, cool=None, cooldown_h=0.0, only=None, tps=None, be_after_tp1=False, event_filter=None,
-             pyramid=None, signal_gap_h=0.0, sl_hold_strong=False, skipped=None, global_min=None, short_global_max=None):
+             pyramid=None, signal_gap_h=0.0, sl_hold_strong=False, skipped=None, global_min=None, short_global_max=None,
+             leverage=1.0, add_leverage=None, mmr=None):
     """global_min / short_global_max — пороги Deep Global (None — не учитывается; в режиме only='global' учитывается только он).
     short=(local_max, scalp_max) включает шорты; liq/cool — фильтры входа (см. entries.py).
     tps — тейки частями [(% от цены входа, % позиции)], 1–3 уровня (по умолчанию один тейк tp_pct на 100%);
@@ -601,7 +629,7 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
         events = [e for e in events if event_filter(*e)]
     hold = strong_checker(signals, local_min, scalp_min, short, global_min, short_global_max) if sl_hold_strong else None
     return run_events(events, candles, levels, sl_pct, fee, size, slip, cooldown_h, be_after_tp1,
-                      pyramid=pyramid, signal_gap_h=signal_gap_h, hold=hold, skipped=skipped)
+                      pyramid=pyramid, signal_gap_h=signal_gap_h, hold=hold, skipped=skipped, leverage=leverage, add_leverage=add_leverage, mmr=mmr)
 
 
 def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_global_max=None):
@@ -621,7 +649,7 @@ def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_
 
 def stats(trades):
     if not trades:
-        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "time": 0, "rev": 0, "winrate": 0, "total_usd": 0,
+        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "time": 0, "rev": 0, "liq": 0, "winrate": 0, "total_usd": 0,
                 "avg_pct": 0, "profit_factor": 0, "max_dd_usd": 0}
     wins = [t["pnl_usd"] for t in trades if t["pnl_usd"] > 0]
     losses = [-t["pnl_usd"] for t in trades if t["pnl_usd"] <= 0]
@@ -637,6 +665,7 @@ def stats(trades):
             "open": sum(t["reason"] == "OPEN" for t in trades),
             "time": sum(t["reason"] == "TIME" for t in trades),
             "rev": sum(t["reason"] == "REV" for t in trades),
+            "liq": sum(t["reason"] == "LIQ" for t in trades),
             "winrate": 100 * len(wins) / len(trades),
             "total_usd": eq,
             "avg_pct": sum(t["pnl_pct"] for t in trades) / len(trades),

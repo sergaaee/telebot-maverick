@@ -59,6 +59,11 @@ export interface Params {
   /** размер добора, % депозита */
   pyramid_pct: number;
   pyramid_gap_h: number;
+  /** плечо доборов; null — как у первой ноги */
+  pyramid_leverage: number | null;
+  /** моделировать ликвидацию: касание цены ликвидации закрывает ногу с потерей всей маржи; поддерживающая маржа — % объёма */
+  liquidation_sim: boolean;
+  maint_margin_pct: number;
   /** добор только если цена ушла от последнего входа не меньше чем на столько % (0 — не проверять) и куда именно */
   pyramid_move_pct: number;
   pyramid_move_dir: 'any' | 'favor' | 'against';
@@ -123,7 +128,7 @@ export interface AppConfig {
   data: DataInfo;
 }
 
-export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME';
+export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME' | 'LIQ';
 
 /** Частичное или финальное закрытие: метка TP1..TP3 / SL / BE / REV / OPEN, доля от исходной позиции (0..1). */
 export interface Fill {
@@ -219,6 +224,12 @@ export interface Stats {
   sharpe: number | null;
   return_pct: number | null;
   max_dd_pct: number | null;
+  /** просадка с учётом открытых позиций по рыночной цене (плечо, доборы), только в «Всего» */
+  max_dd_real_usd?: number;
+  max_dd_real_pct?: number;
+  min_equity_usd?: number;
+  /** закрыто ликвидацией */
+  liq?: number;
   /** сколько сделок дошли до 1-го / 2-го / 3-го тейка */
   tp_reach: number[];
 }

@@ -314,3 +314,33 @@ def test_montecarlo_endpoint(client):
     assert client.post("/api/montecarlo", json={"runs": 5}).status_code == 422                                              # слишком мало прогонов
     assert client.post("/api/montecarlo", json={"mode": "x"}).status_code == 422
     assert client.post("/api/montecarlo", json={"confirm": 100}).status_code == 422                                          # нет сделок: ошибка с пояснением
+
+
+def test_liquidation_sim_and_real_drawdown_in_api(client):
+    # шорт с первого отчёта: цена растёт ~8%, при плече 20× ликвидация шорта на +4.5%
+    wide = {"tps": [{"pct": 50, "share": 100}], "sl_pct": 50, "side": "short", "short_local_max": 10, "short_scalp_max": 10, "leverage": 20, "trade_pct": 10, "confirm": 2}
+    off = client.post("/api/backtest", json=wide).json()
+    on = client.post("/api/backtest", json={**wide, "liquidation_sim": True}).json()
+    assert off["params"]["liquidation_sim"] is False and off["stats"]["total"]["liq"] == 0
+    assert any("за ценой ликвидации" in w for w in off["warnings"]) and not any("за ценой ликвидации" in w for w in on["warnings"])      # стоп 50% × плечо 20 ≥ 100: предупреждение только без моделирования
+    assert on["stats"]["total"]["liq"] > 0 and any(t["reason"] == "LIQ" for t in on["trades"])
+    liq = next(t for t in on["trades"] if t["reason"] == "LIQ")
+    assert abs(liq["pnl_pct"] + 100 / 20) < 1e-6 and abs(liq["pnl_usd"] + liq["margin"]) < 1e-6          # теряется вся маржа ноги
+    assert on["stats"]["total"]["total_usd"] < off["stats"]["total"]["total_usd"]
+    t = on["stats"]["total"]
+    assert t["max_dd_real_usd"] >= t["max_dd_usd"] - 1e-6 and 0 <= t["max_dd_real_pct"] <= 100            # просадка по рынку не меньше, чем по закрытым сделкам
+    assert client.post("/api/backtest", json={"maint_margin_pct": 50}).status_code == 422
+
+
+def test_pyramid_leverage_changes_add_size_only(client):
+    kw = dict(pyramid_enabled=True, pyramid_max=3, pyramid_pct=5, trade_pct=10, leverage=2, compound=False, deposit=10000)
+    base = client.post("/api/backtest", json=kw).json()
+    assert base["params"]["pyramid_leverage"] is None
+    same = client.post("/api/backtest", json={**kw, "pyramid_leverage": 2}).json()
+    assert same["stats"]["total"]["total_usd"] == base["stats"]["total"]["total_usd"]                      # то же плечо — тот же результат
+    more = client.post("/api/backtest", json={**kw, "pyramid_leverage": 10}).json()
+    first = next(t for t in more["trades"] if t["leg"] == 1)
+    add = next(t for t in more["trades"] if t["leg"] == 2)
+    assert abs(first["notional"] - 2000) < 1e-6 and abs(add["notional"] - 5000) < 1e-6                    # 10% × 2× и 5% × 10×
+    assert abs(first["margin"] - 1000) < 1e-6 and abs(add["margin"] - 500) < 1e-6                        # маржа от плеча не зависит
+    assert client.post("/api/backtest", json={**kw, "pyramid_leverage": 0.5}).status_code == 422

@@ -72,7 +72,7 @@ input:focus, select:focus { outline: 1px solid var(--accent); }
 .trades th:nth-child(2), .trades td:nth-child(2), .trades th:nth-child(3), .trades td:nth-child(3), .trades th:nth-child(5), .trades td:nth-child(5) { text-align: left; }
 .trades tbody tr { cursor: pointer; } .trades tbody tr:hover { background: #172030; } .trades tr.sel { background: #1b2a47; }
 .tag { padding: 1px 6px; border-radius: 4px; font-size: 11px; background: #232b38; }
-.tag-TP { color: var(--pos); } .tag-SL { color: var(--neg); } .tag-REV { color: var(--warn); } .tag-OPEN { color: var(--muted); }
+.tag-TP { color: var(--pos); } .tag-SL { color: var(--neg); } .tag-REV { color: var(--warn); } .tag-LIQ { color: #d81b60; font-weight: 700; } .tag-OPEN { color: var(--muted); }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
 
 @media (max-width: 1280px) {

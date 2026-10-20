@@ -143,7 +143,7 @@ def load_settings() -> Settings:
         cooldown_h=_num("COOLDOWN_H", 0.0),
         # пирамидинг, паузы между сигналами и «стоп не ставить, пока метрики сильны» (по умолчанию выключено — как раньше)
         pyramid_enabled=_bool("PYRAMID_ENABLED"), pyramid_max=_num("PYRAMID_MAX", 3, int), pyramid_pct=_num("PYRAMID_PCT", 5.0),
-        pyramid_gap_h=_num("PYRAMID_GAP_H", 0.0), pyramid_avg=_bool("PYRAMID_AVG"), pyramid_move_pct=_num("PYRAMID_MOVE_PCT", 0.0), pyramid_move_dir=(_opt("PYRAMID_MOVE_DIR") or "any").lower(), signal_gap_h=_num("SIGNAL_GAP_H", 0.0), sl_hold_strong=_bool("SL_HOLD_STRONG"),
+        pyramid_gap_h=_num("PYRAMID_GAP_H", 0.0), pyramid_avg=_bool("PYRAMID_AVG"), pyramid_leverage=_num("PYRAMID_LEVERAGE", None), liquidation_sim=_bool("LIQUIDATION_SIM"), maint_margin_pct=_num("MAINT_MARGIN_PCT", 0.5), pyramid_move_pct=_num("PYRAMID_MOVE_PCT", 0.0), pyramid_move_dir=(_opt("PYRAMID_MOVE_DIR") or "any").lower(), signal_gap_h=_num("SIGNAL_GAP_H", 0.0), sl_hold_strong=_bool("SL_HOLD_STRONG"),
         trend_enabled=_bool("TREND_ENABLED"), trend_tf=(_opt("TREND_TF") or "1h").lower(),
         trend_emas=[int(x) for x in (_opt("TREND_EMAS") or "50,200").split(",") if x.strip()],
         # топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии
