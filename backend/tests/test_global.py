@@ -80,3 +80,18 @@ def test_fill_metrics_report_strong_flag_for_sl_hold():
     at = _metrics_at([x[0] for x in s], s, hold)
     assert at(T0 + 5, 1)["strong"] is True and at(T0 + H + 5, 1)["strong"] is False
     assert "strong" not in _metrics_at([x[0] for x in s], s)(T0 + 5, 1)
+
+
+def test_very_long_message_text_does_not_break_history_loading(tmp_path, caplog):
+    import logging
+    p = tmp_path / "h.csv"
+    big = "x" * 300_000                                              # больше лимита csv по умолчанию (128 КБ)
+    with open(p, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "date_utc", "deep_global", "deep_local", "deep_scalp", "text"])
+        w.writerow([1, "2024-01-01T00:00:00+00:00", "1.0", "1.5", "1.4", big])
+        w.writerow([2, "2024-01-01T01:00:00+00:00", "1.0", "1.6", "1.5", ""])
+    with caplog.at_level(logging.WARNING, logger="entries"):
+        rows = load_signals(p)
+    assert [r[1] for r in rows] == [1.5, 1.6]
+    assert any("лишняя кавычка" in m for m in caplog.messages)
