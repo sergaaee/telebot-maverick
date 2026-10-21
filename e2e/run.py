@@ -680,6 +680,25 @@ def scenario(pg, base, state_url):
     cfg5 = _json.loads(Path(dl5.value.path()).read_text(encoding="utf-8"))
     check("после загрузки старого конфига в экспорте: ликвидация выключена, плечо доборов не задано", cfg5["params"]["liquidation_sim"] is False and cfg5["params"]["pyramid_leverage"] is None)
 
+    # --- «ждёт подтверждения»: серия подтверждена, а вход держит фильтр
+    api_pend = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({cool_drop: 5, cool_metric: 'scalp'})}).then(r => r.json()).then(j => ({pending: j.pending.length, now: j.ready_now, trades: j.trades.length, first: j.pending[0]}))""")
+    check("API: при недостижимом откате серии висят в ожидании, строки объясняют чего не хватает", api_pend["pending"] > 0 and api_pend["trades"] < 5 and "откат" in api_pend["first"]["lines"][0] and api_pend["first"]["waiting"] == ["cool"], str(api_pend["first"])[:160])
+    cfg5["params"]["cool_drop"] = 5.0
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg5))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("переключатель «ждут подтверждения» есть, с «?», включён по умолчанию", pg.locator(".chart-bar label", has_text="ждут подтверждения").locator(".help").count() == 1
+          and pg.locator(".chart-bar label", has_text="ждут подтверждения").locator("input").is_checked())
+    banner = pg.get_by_test_id("ready-now").count()
+    check("баннер «ждёт подтверждения» показан ровно тогда, когда по последнему отчёту что-то ждёт", banner == (1 if api_pend["now"] else 0), f"баннер {banner}, ready_now {len(api_pend['now'])}")
+    if api_pend["now"]:
+        check("в баннере перечислены условия", "откат" in pg.get_by_test_id("ready-now").inner_text() and "ждёт подтверждения" in pg.get_by_test_id("ready-now").inner_text())
+    cfg5["params"]["cool_drop"] = None
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg5))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("без фильтров баннера нет", pg.get_by_test_id("ready-now").count() == 0)
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):

@@ -14,13 +14,16 @@ import {
 } from 'lightweight-charts';
 import { useEffect, useRef } from 'react';
 import { getCandles } from '../api';
-import type { Signal, TfMode, Trade } from '../types';
+import type { PendingSignal, Signal, TfMode, Trade } from '../types';
 
 interface Props {
   trades: Trade[];
   signals: Signal[];
   showLevels: boolean;
   showSkipped: boolean;
+  /** отчёты с подтверждённой серией, ждущие фильтр, и показывать ли их */
+  pending: PendingSignal[];
+  showPending: boolean;
   selected: number | null;
   onSelect: (n: number) => void;
   /** меняется при каждом явном выборе сделки (в том числе повторном) — график приближается к ней */
@@ -72,7 +75,7 @@ export default function PriceChart(props: Props) {
   const redraw = () => {
     const c = candle.current;
     if (!c || !chart.current) return;
-    const { trades, signals, showLevels, showSkipped } = propsRef.current;
+    const { trades, signals, showLevels, showSkipped, pending, showPending } = propsRef.current;
     const t = tf.current;
     // Всё рисуем только внутри загруженного окна свечей: времена всех серий входят в общую шкалу времени графика,
     // и точки линий далеко за пределами окна ломают масштабирование (диапазон «прыгает»).
@@ -117,6 +120,17 @@ export default function PriceChart(props: Props) {
     if (showSkipped) {
       for (const s of signals.filter((x) => !x.taken && inWin(snap(x.ts / 1000)))) {
         markers.push({ time: snap(s.ts / 1000) as UTCTimestamp, position: 'inBar', shape: 'square', color: '#5d6677', size: 0.4 });
+      }
+    }
+    if (showPending && pending.length) {
+      const lastTs = pending[pending.length - 1].ts;
+      for (const p of pending) {
+        let sec = snap(p.ts / 1000);
+        if (sec > hi && sec - hi < 2 * 3600) sec = hi;           // свежий отчёт может быть позже последней загруженной свечи
+        if (!inWin(sec)) continue;
+        const now = p.ts === lastTs;
+        markers.push({ time: sec as UTCTimestamp, position: p.side === 'long' ? 'belowBar' : 'aboveBar', shape: 'circle', color: '#a78bfa', size: now ? 1.1 : 0.45,
+          text: now ? `ждёт ${p.side === 'long' ? 'L' : 'S'}` : '' });
       }
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
@@ -364,7 +378,7 @@ export default function PriceChart(props: Props) {
   // новые сделки / флаги отображения
   useEffect(() => {
     redraw();
-  }, [props.trades, props.signals, props.showLevels, props.showSkipped]);
+  }, [props.trades, props.signals, props.showLevels, props.showSkipped, props.pending, props.showPending]);
 
   // выбранная сделка: линии входа/TP/SL на шкале цены
   useEffect(() => {

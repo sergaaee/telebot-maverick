@@ -171,6 +171,38 @@ def _metrics_at(report_ts, reports, hold=None):
     return at
 
 
+METRIC_NAMES = {"scalp": "DS", "local": "DL", "global": "DG"}
+WAIT_ORDER = ("cool", "liq", "trend")
+
+
+def waiting_lines(d, w):
+    """Что именно ждёт вход, человеческим языком (одни и те же строки идут в интерфейс и в бота): w = {"cool": …, "liq": …, "trend": …} с цифрами."""
+    side = "лонга" if d == 1 else "шорта"
+    out = []
+    c = w.get("cool")
+    if c:
+        name = METRIC_NAMES.get(c["metric"], c["metric"])
+        if c["kind"] == "drop":
+            ref = "максимума" if d == 1 else "минимума"
+            out.append(f"откат {name}: нужен ≥ {c['need']:g} от {ref} серии ({c['ext']:.2f}), сейчас {c['have']:.3f} (значение {c['now']:.2f})")
+        else:
+            out.append(f"остывание {name}: {c['have']} из {c['need']} отчётов подряд")
+    q = w.get("liq")
+    if q:
+        who = "лонгов" if d == 1 else "шортов"
+        if q["reason"] == "no_data":
+            out.append(f"ликвидации {who}: в отчёте нет данных")
+        elif q["reason"] == "no_spike":
+            thr = f", нужен всплеск не ниже {q['thr']:.1f}k" if q.get("thr") is not None else ", мало истории для перцентиля"
+            out.append(f"ликвидации {who}: за {q['hours']:g} ч не было достаточного всплеска (максимум {q['max']:.1f}k{thr})")
+        else:
+            out.append(f"ликвидации {who}: сейчас {q['now']:.1f}k, нужно ≤ {q['limit']:.1f}k ({q['frac']:g} от пика {q['max']:.1f}k)")
+    t = w.get("trend")
+    if t:
+        out.append(f"тренд: для {side} цена должна быть {'выше' if d == 1 else 'ниже'} EMA {'/'.join(str(x) for x in t['emas'])} на {t['tf']}")
+    return out
+
+
 def _trade_out(n, t, rep, at=None):
     r = rep.get(t["signal_ts"])
     out = {
@@ -346,7 +378,8 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
 
     # все подтверждённые сигналы (в том числе пропущенные: позиция открыта, пауза после стопа)
     lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
-    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm)
+    pend = []
+    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend)
     trend_blocked = 0
     if allow:
         passed = [e for e in confirmed if allow(*e)]
@@ -354,6 +387,29 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         blocked_ts = {e[0] for e in confirmed} - {e[0] for e in passed}
     else:
         blocked_ts = set()
+    # «ждёт подтверждения»: серия уже подтверждена, но вход держат фильтры (откат метрики, ликвидации, тренд)
+    trend_info = {"emas": sorted(set(eff.get("trend_emas") or [])), "tf": eff.get("trend_tf")} if allow else None
+    pend_items = {}
+    for ts_, d_, w_ in pend:
+        item = dict(w_)
+        if allow and not allow(ts_, d_):
+            item["trend"] = trend_info
+        pend_items[(ts_, d_)] = item
+    for ts_, d_ in confirmed:
+        if ts_ in blocked_ts:
+            pend_items.setdefault((ts_, d_), {})["trend"] = trend_info
+    pending_out = [{"ts": ts_, "side": "long" if d_ == 1 else "short", "waiting": [k for k in WAIT_ORDER if k in w_], "lines": waiting_lines(d_, w_)}
+                   for (ts_, d_), w_ in sorted(pend_items.items())]
+    last_report_ts = sigs[-1][0]
+    ready_now = []
+    for p_ in pending_out:
+        if p_["ts"] != last_report_ts:
+            continue
+        open_same = any(t["reason"] == "OPEN" and t["side"] == p_["side"] for t in trades)
+        if open_same and not eff.get("pyramid_enabled"):
+            continue                                   # позиция уже открыта, сигнал всё равно был бы пропущен — ждать нечего
+        ready_now.append({**p_, "add": open_same})
+
     taken = {t["signal_ts"] for t in trades} | {s_ for t in trades for s_ in t.get("add_signals", [])}
     limit = 5000
     why = {ts: reason for ts, _side, reason in skipped}
@@ -418,6 +474,8 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "signals": signals_out,
         "signals_truncated": len(confirmed) > limit,
         "skipped_reasons": skipped_reasons,
+        "pending": pending_out[-3000:],
+        "ready_now": ready_now,
         "last_signals": last_signals,                  # самые свежие подтверждённые сигналы (для бота: список signals обрезается по первым 5000)
         "equity": equity,
         "monthly": list(monthly.values()),

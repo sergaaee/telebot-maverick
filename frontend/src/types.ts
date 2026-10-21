@@ -196,6 +196,16 @@ export interface Signal {
   reason?: string | null;
 }
 
+/** Серия подтверждена, но вход держат фильтры: waiting — cool (откат метрики) / liq (ликвидации) / trend; lines — что именно не хватает, по-русски. */
+export interface PendingSignal {
+  ts: number;
+  side: 'long' | 'short';
+  waiting: ('cool' | 'liq' | 'trend')[];
+  lines: string[];
+  /** только в ready_now: позиция этой стороны уже открыта, ждём добор */
+  add?: boolean;
+}
+
 export interface Stats {
   trades: number;
   tp: number;
@@ -245,6 +255,9 @@ export interface BacktestResult {
   signals: Signal[];
   signals_truncated: boolean;
   skipped_reasons: Record<string, number>;
+  pending: PendingSignal[];
+  /** что ждёт подтверждения по последнему отчёту прямо сейчас */
+  ready_now: PendingSignal[];
   equity: [number, number][];
   monthly: { month: string; trades: number; pnl_usd: number; wins: number }[];
   top: TopSection;

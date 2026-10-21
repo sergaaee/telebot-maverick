@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS configs (
     last_ts INTEGER NOT NULL DEFAULT 0,
     alerts INTEGER NOT NULL DEFAULT 0,
     fill_ts INTEGER,
+    ready TEXT,
     error TEXT,
     created REAL NOT NULL,
     updated REAL NOT NULL,
@@ -112,6 +113,8 @@ class Database:
         with self.conn() as c:
             c.executescript(SCHEMA)
             cols = {r["name"] for r in c.execute("PRAGMA table_info(configs)")}
+            if "ready" not in cols:          # состояние «ждёт подтверждения»: NULL = ещё не фиксировали (первое сообщение не шлём)
+                c.execute("ALTER TABLE configs ADD COLUMN ready TEXT")
             if "fill_ts" not in cols:        # база от версии до уведомлений об исполнениях: NULL = «ещё не фиксировали», прошлые исполнения не присылаем
                 c.execute("ALTER TABLE configs ADD COLUMN fill_ts INTEGER")
 
@@ -357,7 +360,7 @@ class Database:
         with self.conn() as c:
             old = self._by_name(c, user_id, name)
             if old:
-                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, error=NULL, updated=? WHERE id=?",
+                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, error=NULL, updated=? WHERE id=?",
                           (json.dumps(params, ensure_ascii=False), str(tf), now, old["id"]))
                 cid, created = old["id"], False
             else:
@@ -367,7 +370,7 @@ class Database:
             return self._cfg(c.execute("SELECT * FROM configs WHERE id=?", (cid,)).fetchone()), created
 
     def update_config(self, cfg_id, **fields):
-        allowed = {"name", "paused", "baseline", "last_ts", "alerts", "error", "fill_ts"}
+        allowed = {"name", "paused", "baseline", "last_ts", "alerts", "error", "fill_ts", "ready"}
         sets = {k: (int(v) if isinstance(v, bool) else v) for k, v in fields.items() if k in allowed}
         if not sets:
             return

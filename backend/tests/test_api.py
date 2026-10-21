@@ -344,3 +344,22 @@ def test_pyramid_leverage_changes_add_size_only(client):
     assert abs(first["notional"] - 2000) < 1e-6 and abs(add["notional"] - 5000) < 1e-6                    # 10% × 2× и 5% × 10×
     assert abs(first["margin"] - 1000) < 1e-6 and abs(add["margin"] - 500) < 1e-6                        # маржа от плеча не зависит
     assert client.post("/api/backtest", json={**kw, "pyramid_leverage": 0.5}).status_code == 422
+
+
+def test_ready_now_and_pending_in_backtest_result(client):
+    # длинная серия по DS при подтверждении 2 и откате: цифры зависят от фикстуры, но структура и текст должны быть
+    r = client.post("/api/backtest", json={"side": "long", "cool_drop": 0.5, "cool_metric": "scalp"}).json()
+    assert isinstance(r["pending"], list) and isinstance(r["ready_now"], list)
+    assert r["pending"], "серия есть, а отката 0.5 нет — отчёты должны висеть в ожидании"
+    p = r["pending"][0]
+    assert p["side"] == "long" and p["waiting"] == ["cool"] and "откат" in p["lines"][0]
+    plain = client.post("/api/backtest", json={"side": "long"}).json()
+    assert plain["pending"] == [] and plain["ready_now"] == []                                   # без фильтров ждать нечего
+
+
+def test_trend_waiting_is_reported(client):
+    r = client.post("/api/backtest", json={"side": "long", "trend_enabled": True, "trend_emas": [20], "trend_tf": "1h"}).json()
+    assert r["trades"] == [] and r["trend"]["blocked"] > 0                                     # свечей мало для EMA 20 на 1h — тренд неизвестен, входы заблокированы
+    assert r["pending"] and all(p["waiting"] == ["trend"] and "тренд" in p["lines"][0] and "EMA 20" in p["lines"][0] for p in r["pending"])
+    both = client.post("/api/backtest", json={"side": "long", "trend_enabled": True, "trend_emas": [20], "trend_tf": "1h", "cool_drop": 5}).json()
+    assert any(p["waiting"] == ["cool", "trend"] for p in both["pending"])                     # ждут и откат, и тренд
