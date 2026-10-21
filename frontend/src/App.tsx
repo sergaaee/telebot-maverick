@@ -18,7 +18,7 @@ import { downloadText, tradesCsv, tradesCsvName } from './tradesCsv';
 import { fmtDate, fmtPrice, metricsStr, fmtTs, fmtUsd, signClass, tfLabel, tfSeconds } from './format';
 import { HELP } from './helpTexts';
 import { askNotificationPermission, isActive, notifyBrowser, useJobs } from './jobs';
-import type { AppConfig, BacktestResult, Job, LatestSource, Params, SavedRun, Signal, SyncStatus, TfMode, Trade, UiState } from './types';
+import type { AppConfig, BacktestResult, Job, LatestSource, Params, PendingSignal, SavedRun, Signal, SyncStatus, TfMode, Trade, UiState } from './types';
 
 const profileKey = (source: string, symbol: string) => `${source}|${symbol}`;
 
@@ -44,6 +44,7 @@ function loadProfile(cfg: AppConfig, source: string, symbol: string, st: UiState
 
 const NO_TRADES: Trade[] = [];
 const NO_SIGNALS: Signal[] = [];
+const NO_PENDING: PendingSignal[] = [];
 
 interface AppProps {
   me: Me;
@@ -84,6 +85,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
   const [focusKey, setFocusKey] = useState(0); // растёт при каждом явном выборе сделки: график возвращается к ней, даже если она уже выбрана
   const [showLevels, setShowLevels] = useState(true);
   const [showSkipped, setShowSkipped] = useState(false);
+  const [showPending, setShowPending] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   const [tfMode, setTfMode] = useState<TfMode>('auto');
   const [effTf, setEffTf] = useState<{ tf: number; truncated: boolean } | null>(null);
@@ -576,6 +578,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
             </div>
             <Help text={HELP.nav} />
             <label><input type="checkbox" checked={showLevels} onChange={(e) => setShowLevels(e.target.checked)} /> уровни TP / SL<Help text={HELP.levels} /></label>
+            {view === 'main' && <label><input type="checkbox" checked={showPending} onChange={(e) => setShowPending(e.target.checked)} /> ждут подтверждения<Help text={HELP.pending} /></label>}
             {view === 'main' && <label><input type="checkbox" checked={showSkipped} onChange={(e) => setShowSkipped(e.target.checked)} /> пропущенные сигналы<Help text={HELP.skipped} /></label>}
             <span className="legend">
               <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="neg">LIQ</b> <b className="muted">{view === 'top' ? 'TIME' : 'OPEN'}</b>
@@ -584,6 +587,17 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
             {effTf?.truncated && <span className="chip warn">окно слишком широкое для {tfLabel(effTf.tf)} — показана последняя часть, приблизьте или возьмите ТФ крупнее</span>}
             {result?.signals_truncated && <span className="chip warn">сигналов слишком много, показаны первые 5000</span>}
           </div>
+          {view === 'main' && result && result.ready_now.length > 0 && (
+            <div className="ready-info" data-testid="ready-now">
+              {result.ready_now.map((r) => (
+                <div key={r.side}>
+                  <b>⏳ Готов к {r.add ? 'добору' : r.side === 'long' ? 'ЛОНГУ' : 'ШОРТУ'}, ждёт подтверждения</b> <Help text={HELP.ready_now} />
+                  <span className="muted"> · отчёт {fmtTs(r.ts)}</span>
+                  <ul>{r.lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
+                </div>
+              ))}
+            </div>
+          )}
           {selTrade && (
             <div className="sel-info">
               <b>#{selTrade.n}</b>{selTrade.symbol && <b> {selTrade.symbol.split('/')[0]}</b>} <span className={selTrade.side === 'long' ? 'pos' : 'neg'}>{selTrade.side === 'long' ? 'лонг' : 'шорт'}</span>
@@ -605,6 +619,8 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
               signals={view === 'main' ? result?.signals ?? NO_SIGNALS : NO_SIGNALS}
               showLevels={showLevels}
               showSkipped={showSkipped && view === 'main'}
+              pending={view === 'main' ? result?.pending ?? NO_PENDING : NO_PENDING}
+              showPending={showPending && view === 'main'}
               selected={sel}
               onSelect={selectTrade}
               focusKey={focusKey}

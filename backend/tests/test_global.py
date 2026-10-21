@@ -95,3 +95,52 @@ def test_very_long_message_text_does_not_break_history_loading(tmp_path, caplog)
         rows = load_signals(p)
     assert [r[1] for r in rows] == [1.5, 1.6]
     assert any("лишняя кавычка" in m for m in caplog.messages)
+
+
+# ---------------- «ждёт подтверждения» ----------------
+def sig_rows(values, liq_long=None):
+    return [(T0 + i * H, 1.0, v, (liq_long[i] if liq_long else None), None, None, None, None) for i, v in enumerate(values)]
+
+
+def test_pending_reports_which_filter_holds_the_entry():
+    from app.core.entries import entries
+    pend = []
+    ev = entries(sig_rows([2.1, 2.2, 2.3, 2.4, 2.4, 2.3]), 0, 2.0, 4, None, None, {"metric": "scalp", "drop": 0.075}, pending=pend)
+    assert [t for t, _ in ev] == [T0 + 5 * H]                                                    # вход только на откате
+    assert [p[0] for p in pend] == [T0 + 3 * H, T0 + 4 * H]                                      # 4-й и 5-й отчёты: серия есть, отката нет
+    w = pend[0][2]["cool"]
+    assert w["kind"] == "drop" and w["need"] == 0.075 and w["have"] == 0.0 and w["ext"] == 2.4
+    assert "liq" not in pend[0][2]
+    assert entries(sig_rows([2.1, 2.2, 2.3, 2.4, 2.4, 2.3]), 0, 2.0, 4, None, None, {"metric": "scalp", "drop": 0.075}) == ev           # без pending результат тот же
+
+
+def test_pending_cool_declines_and_liq_reasons():
+    from app.core.entries import entries
+    pend = []
+    entries(sig_rows([2.1, 2.2, 2.3, 2.4, 2.5]), 0, 2.0, 4, None, None, {"metric": "scalp", "declines": 2}, pending=pend)
+    assert pend[-1][2]["cool"] == {"kind": "declines", "metric": "scalp", "need": 2, "have": 0}
+    # только ликвидации: всплеск 500 в окне, сейчас 450 > 0.8 × 500 = 400 — ждём спада
+    pend = []
+    rows = sig_rows([2.1, 2.2, 2.3, 2.4, 2.5], liq_long=[100, 500, 480, 470, 450])
+    ev = entries(rows, 0, 2.0, 4, None, {"hours": 120, "frac": 0.8, "pct": 0}, None, pending=pend)
+    assert ev == [] and [p[2]["liq"]["reason"] for p in pend] == ["not_calmed", "not_calmed"]
+    assert pend[-1][2]["liq"]["limit"] == 400.0 and pend[-1][2]["liq"]["max"] == 500
+    # данных о ликвидациях в отчёте нет
+    pend = []
+    entries(sig_rows([2.1, 2.2, 2.3, 2.4]), 0, 2.0, 4, None, {"hours": 120, "frac": 0.8, "pct": 0}, None, pending=pend)
+    assert pend[0][2]["liq"] == {"reason": "no_data"}
+    # перцентиль 90 при короткой истории (<50 значений): всплеска «нет»
+    pend = []
+    entries(rows, 0, 2.0, 4, None, {"hours": 120, "frac": 0.8, "pct": 90}, None, pending=pend)
+    assert pend[0][2]["liq"]["reason"] == "no_spike" and pend[0][2]["liq"]["thr"] is None
+
+
+def test_waiting_lines_text():
+    from app.service import waiting_lines
+    t = waiting_lines(1, {"cool": {"kind": "drop", "metric": "scalp", "need": 0.075, "have": 0.0, "ext": 2.4, "now": 2.4},
+                         "liq": {"reason": "not_calmed", "now": 450.0, "max": 500.0, "limit": 400.0, "frac": 0.8},
+                         "trend": {"emas": [20, 50], "tf": "1d"}})
+    assert "откат DS" in t[0] and "максимума" in t[0] and "0.075" in t[0]
+    assert "ликвидации лонгов" in t[1] and "≤ 400.0k" in t[1]
+    assert "выше EMA 20/50 на 1d" in t[2]
+    assert "минимума" in waiting_lines(-1, {"cool": {"kind": "drop", "metric": "scalp", "need": 0.1, "have": 0.0, "ext": 0.8, "now": 0.8}})[0]

@@ -356,7 +356,7 @@ class SignalService:
         upd = {"error": None}
         if not cfg["baseline"]:
             # первый расчёт: фиксируем текущее состояние, чтобы не засыпать старыми сигналами, и присылаем карточку конфига
-            upd.update(last_ts=max([s["ts"] for s in res["last_signals"] if not s["trend_blocked"]], default=0), baseline=True,
+            upd.update(last_ts=max([s["ts"] for s in res["last_signals"] if not s["trend_blocked"]], default=0), baseline=True, ready=self._ready_key(res),
                        fill_ts=max([e["ts"] for e in self.engine.fill_events(res)], default=0))
             self.send(chat, fm.accepted_message(cfg, res))
         else:
@@ -379,6 +379,7 @@ class SignalService:
             if sent:
                 upd["alerts"] = cfg["alerts"] + sent
             self._send_fills(cfg, res, chat, label, upd)             # исполнения в счётчик «сигналов» (alerts) не входят
+            self._send_ready(cfg, res, chat, label, upd, entered=sent > 0)
         self.db.update_config(cfg["id"], **upd)
         self._fp[cfg["id"]] = fp
         # окна свечей топ-коинов для статистики докачиваются в конце цикла, с ограничением по времени (карточка и сигналы от них не зависят)
@@ -386,6 +387,26 @@ class SignalService:
             wins, _ = self.engine.pending_windows(res, self.b.top_windows)
             for w in wins:
                 memo["top"].setdefault(w, set()).add(cfg["id"])
+
+    @staticmethod
+    def _ready_key(res):
+        """Состояние «ждёт подтверждения»: 'long|cool,liq' (несколько сторон через ';'), пусто — ничего не ждёт."""
+        return ";".join(f"{x['side']}|{','.join(x['waiting'])}{'|add' if x.get('add') else ''}" for x in res.get("ready_now") or [])
+
+    def _send_ready(self, cfg, res, chat, label, upd, entered):
+        """Сообщение, когда конфиг готов к входу и ждёт фильтр (откат / ликвидации / тренд), и когда набор ожидаемых условий меняется;
+        при отмене (серия прервалась без входа) — короткое сообщение. Первое состояние у конфига без отметки фиксируется молча."""
+        key = self._ready_key(res)
+        prev = cfg.get("ready")
+        if prev is None or key == prev:
+            if prev is None:
+                upd["ready"] = key
+            return
+        upd["ready"] = key
+        if key:
+            self.send(chat, fm.ready_message(cfg, res, res["ready_now"], label))
+        elif prev and not entered:
+            self.send(chat, fm.ready_cancelled_message(cfg, res, prev))
 
     def _send_fills(self, cfg, res, chat, label, upd):
         """Уведомления об исполнениях (TP / SL / БУ / разворот) после отметки fill_ts. У конфига без отметки (создан до этой функции) прошлое не присылаем:

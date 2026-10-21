@@ -180,3 +180,7 @@ main { position: relative; }
 .runs-list li { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
 .run-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; } .run-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-actions { display: inline-flex; gap: 4px; flex: none; } .run-actions .ghost { padding: 1px 8px; font-size: 11px; } .run-sub { font-size: 11px; margin-top: 2px; }
+
+/* «ждёт подтверждения» над графиком */
+.ready-info { background: #1d1a33; border: 1px solid #4b3f8a; border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+.ready-info ul { margin: 2px 0 0 18px; padding: 0; } .ready-info li { margin: 1px 0; }

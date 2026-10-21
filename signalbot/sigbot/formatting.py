@@ -207,6 +207,27 @@ def positions_message(cfg, result, price_now, last_candle_ts):
     return "\n".join(lines)
 
 
+def ready_message(cfg, result, items, source_label):
+    """Конфиг почти готов к входу: серия подтверждена, но вход держат фильтры. items — result['ready_now'] (по сторонам)."""
+    p = result["params"]
+    blocks = []
+    for it in items:
+        what = "ДОБОР" if it.get("add") else ("ЛОНГ" if it["side"] == "long" else "ШОРТ")
+        lines = [f"⏳ <b>Готов к {what}, ждёт подтверждения</b>  ·  <b>{esc(str(p['symbol']))}</b>",
+                 f"📋 Конфиг: <b>{esc(cfg['name'])}</b>  <i>({esc(source_label)})</i>",
+                 f"🕒 Отчёт: {ts_str(it['ts'])} — серия из {p.get('confirm')} подряд подтверждена"]
+        lines += [f"• {esc(x)}" for x in it["lines"]]
+        lines.append("<i>Вход будет на первом отчёте, где выполнены все условия, пока серия не прервётся.</i>")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def ready_cancelled_message(cfg, result, key):
+    side = "ЛОНГ" if key.split("|")[0] == "long" else "ШОРТ"
+    return (f"⌛ <b>Ожидание отменено</b>  ·  <b>{esc(str(result['params']['symbol']))}</b>\n📋 Конфиг: <b>{esc(cfg['name'])}</b>\n"
+            f"Серия по {side} прервалась до подтверждения — входа не было.")
+
+
 def top_block(top, sig, p, result):
     if "skip" in top:
         return f"🪙 <b>Топ-коин</b>: пропущен — {esc(top['skip'])}"

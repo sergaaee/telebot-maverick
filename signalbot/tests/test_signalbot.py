@@ -679,3 +679,58 @@ def test_liquidation_fill_and_real_drawdown_in_messages():
              "avg_win_usd": 50.0, "avg_loss_usd": -30.0, "max_loss_streak": 2, "tp": 2, "sl": 2, "be": 0, "liq": 1}
     s = fm.stats_block(stats, {})
     assert "с открытыми позициями" in s and "7.5%" in s and "ликвидаций 1" in s
+
+
+# ---------------- «ждёт подтверждения» ----------------
+def _cool_config(**extra):
+    cfg = json.loads(json.dumps(UI_CONFIG))
+    cfg["params"].pop("bogus")
+    cfg["params"] |= {"cool_drop": 0.5, "cool_metric": "scalp"} | extra
+    return cfg
+
+
+def test_ready_notification_and_cancel(env):
+    env.handle_update(msg(json.dumps(_cool_config())))
+    env.cycle()                                                                  # карточка, начальное состояние фиксируется молча
+    env.tg.sent.clear()
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)                                 # серия подтверждена (confirm 2), но DS не откатывает
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.cycle()
+    ready = [t for t in env.tg.texts(CHAT) if "ждёт подтверждения" in t]
+    assert len(ready) == 1 and "ЛОНГ" in ready[0] and "откат DS" in ready[0] and "default-BTC" in ready[0]
+    assert not _signals_text(env)                                               # входа ещё нет
+    n = len(env.tg.sent)
+    env.now["t"] += 600
+    env.cycle()
+    assert len(env.tg.sent) == n                                                 # то же состояние — повторов нет
+    nxt = start + 3 * H // 2
+    append_reports(env.hist, NEUTRAL(2, nxt), 14)                                # серия прервалась без входа
+    env.now["t"] = (nxt + 2 * H // 2) / 1000
+    env.cycle()
+    assert any("Ожидание отменено" in t for t in env.tg.texts(CHAT))
+
+
+def test_ready_state_is_silent_for_configs_without_mark_and_entry_has_no_cancel(env):
+    env.handle_update(msg(json.dumps(_cool_config())))
+    env.cycle()
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    assert cfg["ready"] == ""                                                    # состояние зафиксировано (ничего не ждёт)
+    env.db.update_config(cfg["id"], ready=None)                                  # как у конфига, созданного до этой функции
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.tg.sent.clear()
+    env.cycle()
+    assert not any("ждёт подтверждения" in t for t in env.tg.texts(CHAT))      # первое состояние молча
+    assert env.db.list_configs(env.alice["id"])[0]["ready"].startswith("long|cool")
+
+
+def test_ready_message_format():
+    from sigbot import formatting as fm
+    items = [{"ts": 1_700_000_000_000, "side": "short", "waiting": ["cool", "trend"], "add": False,
+              "lines": ["откат DS: нужен ≥ 0.075 от минимума серии (0.80), сейчас 0.000", "тренд: для шорта цена должна быть ниже EMA 20 на 1d"]}]
+    t = fm.ready_message({"name": "A<b>"}, {"params": {"symbol": "BTC/USDT:USDT", "confirm": 4}}, items, "Coinbase")
+    assert "ШОРТ" in t and "A&lt;b&gt;" in t and "• откат DS" in t and "• тренд" in t and "из 4 подряд" in t
+    assert "ДОБОР" in fm.ready_message({"name": "x"}, {"params": {"symbol": "B", "confirm": 2}}, [{**items[0], "add": True}], "x")
+    assert "Ожидание отменено" in fm.ready_cancelled_message({"name": "x"}, {"params": {"symbol": "B"}}, "long|cool")

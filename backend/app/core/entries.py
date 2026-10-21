@@ -79,8 +79,10 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     return out, hit
 
 
-def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None):
-    """global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует."""
+def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None):
+    """global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует.
+    pending — список, в который добавляются (ts, d, waiting): отчёты, где серия УЖЕ подтверждена, но вход ждёт фильтр; waiting = {"cool": …, "liq": …} с цифрами:
+    чего не хватает (откат метрики / ликвидации). Фильтр тренда применяется снаружи (service), здесь его нет."""
     sides = [(1, lambda s: should_long(s, local_min, scalp_min, global_min))]
     if short is not None:
         sides.append((-1, lambda s: should_short(s, *short, short_global_max)))
@@ -121,13 +123,24 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
             else:
                 s.update(streak=0, ext=None, prev=None, dec=0)
             ok = s["streak"] >= confirm
+            waiting = {}
             if ok and cool:
                 if "drop" in cool:
-                    ok = abs(m - s["ext"]) >= cool["drop"] - 1e-9 and (m < s["ext"] if d == 1 else m > s["ext"])
-                else:
-                    ok = s["dec"] >= cool["declines"]
+                    have = (s["ext"] - m) if d == 1 else (m - s["ext"])
+                    if not (have >= cool["drop"] - 1e-9 and have > 0):
+                        waiting["cool"] = {"kind": "drop", "metric": metric, "need": cool["drop"], "have": max(have, 0.0), "ext": s["ext"], "now": m}
+                elif s["dec"] < cool["declines"]:
+                    waiting["cool"] = {"kind": "declines", "metric": metric, "need": cool["declines"], "have": s["dec"]}
             if ok and liq:
-                ok = d in mx and mx[d] > 0 and mx[d] >= thr[d] and liqv[d] <= liq["frac"] * mx[d]
+                if d not in mx:
+                    waiting["liq"] = {"reason": "no_data"}
+                elif mx[d] <= 0 or mx[d] < thr[d]:
+                    waiting["liq"] = {"reason": "no_spike", "hours": liq["hours"], "max": mx[d], "thr": None if thr[d] == float("inf") else thr[d]}
+                elif liqv[d] > liq["frac"] * mx[d]:
+                    waiting["liq"] = {"reason": "not_calmed", "now": liqv[d], "max": mx[d], "limit": liq["frac"] * mx[d], "frac": liq["frac"]}
+            if ok and waiting and pending is not None:
+                pending.append((sts, d, waiting))
+            ok = ok and not waiting
             if ok and not chosen:
                 chosen = d
         if liq:
