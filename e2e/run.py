@@ -703,6 +703,17 @@ def scenario(pg, base, state_url):
     split_tbl = pg.get_by_test_id("weekday-split")
     check("таблица «Будни и выходные» есть, с «?», строка тейков/стопов/открыто", split_tbl.count() == 1 and pg.locator("h3", has_text="Будни и выходные").locator(".help").count() == 1
           and all(w in split_tbl.inner_text() for w in ("Тейки", "Стопы", "Winrate", "Входов")), split_tbl.inner_text()[:120] if split_tbl.count() else "нет")
+    ts_box = pg.get_by_test_id("time-stats")
+    n_trades_tbl = pg.locator("table.trades tbody tr").count()
+    days_n = [int(x) for x in ts_box.get_by_test_id("stats-days").locator("tbody tr td:nth-child(2)").all_inner_texts()]
+    sess_n = [int(x) for x in ts_box.get_by_test_id("stats-sessions").locator("tbody tr td:nth-child(2)").all_inner_texts()]
+    check("статистика по дням: 7 строк, сумма = число сделок; по сессиям: 4 строки, сумма = число сделок; у раздела есть «?»",
+          len(days_n) == 7 and len(sess_n) == 4 and sum(days_n) == n_trades_tbl == sum(sess_n) and ts_box.locator("h3 .help").count() == 1, f"{days_n} {sess_n} таблица {n_trades_tbl}")
+    first_day_in = ts_box.get_by_test_id("stats-days").locator("tbody").inner_text()
+    ts_box.get_by_role("button", name="по выходу").click()
+    days_out = [int(x) for x in ts_box.get_by_test_id("stats-days").locator("tbody tr td:nth-child(2)").all_inner_texts()]
+    check("переключатель «по выходу» пересчитывает таблицы (сумма та же, распределение другое или то же)", sum(days_out) == n_trades_tbl and "Пн" in first_day_in and "Азия" in ts_box.get_by_test_id("stats-sessions").inner_text())
+    ts_box.get_by_role("button", name="по входу").click()
     base_split = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({})}).then(r => r.json()).then(j => [j.stats.total.trades, j.weekday_split.weekday.trades, j.weekday_split.weekend.trades, j.weekday_split.entered.weekend])""")
     check("API: сделки делятся на будни и выходные без потерь, выходные в демо-данных есть", base_split[0] == base_split[1] + base_split[2] and base_split[2] > 0 and base_split[3] > 0, str(base_split))
     check("«Торговать только в будни» выключено по умолчанию, с «?», поле пятницы скрыто", not field(pg, "торговать только в будни").locator("input").is_checked() and field(pg, "торговать только в будни").locator(".help").count() == 1 and field(pg, "Закрыть в пятницу за").count() == 0)

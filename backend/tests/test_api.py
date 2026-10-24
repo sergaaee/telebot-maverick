@@ -374,3 +374,12 @@ def test_weekdays_only_param_and_weekday_split_in_api(client):
     on = client.post("/api/backtest", json={"weekdays_only": True, "friday_close_before_min": 15}).json()
     assert on["params"]["weekdays_only"] is True and on["stats"]["total"]["wknd"] >= 0
     assert client.post("/api/backtest", json={"friday_close_before_min": -1}).status_code == 422
+
+
+def test_time_stats_in_api(client):
+    r = client.post("/api/backtest", json={}).json()
+    n = r["stats"]["total"]["trades"]
+    for which in ("entry", "exit"):
+        ts = r["time_stats"][which]
+        assert len(ts["day"]) == 7 and [s["key"] for s in ts["session"]] == ["asia", "europe", "us", "night"]
+        assert sum(b["trades"] for b in ts["day"]) == n and sum(s["trades"] for s in ts["session"]) == n

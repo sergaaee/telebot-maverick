@@ -1,6 +1,7 @@
 import { fmtPct, fmtPf, fmtUsd, signClass } from '../format';
 import { HELP } from '../helpTexts';
-import type { BacktestResult, Stats, WeekdayBucket, WeekdaySplit } from '../types';
+import { useState } from 'react';
+import type { BacktestResult, Stats, TimeBucket, TimeStats, WeekdayBucket, WeekdaySplit } from '../types';
 import Help from './Help';
 
 export function Card({ label, value, cls = '', sub, help }: { label: string; value: string; cls?: string; sub?: string; help?: string }) {
@@ -38,6 +39,52 @@ function WeekdayTable({ split }: { split: WeekdaySplit }) {
   );
 }
 
+const DAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+const REASON_NAMES: Record<string, string> = { TP: 'тейк', BE: 'БУ', SL: 'стоп', REV: 'разворот', LIQ: 'ликвидация', WKND: 'закрытие пт', OPEN: 'открыто' };
+
+function timeRow(name: string, b: TimeBucket, hint?: string) {
+  const pct = (n: number) => (b.trades ? `${((n / b.trades) * 100).toFixed(0)}%` : '–');
+  const title = b.trades ? Object.entries(b.reasons).filter(([, n]) => n > 0).map(([k, n]) => `${REASON_NAMES[k] ?? k}: ${n}`).join(' · ') : 'сделок нет';
+  const pf = b.trades === 0 ? '–' : b.gross_loss === 0 ? (b.gross_win > 0 ? '∞' : '–') : (b.gross_win / b.gross_loss).toFixed(2);
+  return (
+    <tr key={name} title={title} className={b.trades ? '' : 'dim'}>
+      <td>{name}{hint && <span className="muted"> {hint}</span>}</td>
+      <td>{b.trades}</td>
+      <td>{pct(b.reasons.TP)}</td>
+      <td>{pct(b.reasons.SL)}</td>
+      <td>{b.trades ? `${((b.wins / b.trades) * 100).toFixed(0)}%` : '–'}</td>
+      <td>{pf}</td>
+      <td className={signClass(b.pnl_usd)}>{b.trades ? fmtUsd(b.pnl_usd) : '–'}</td>
+    </tr>
+  );
+}
+
+/** Статистика по дням недели и сессиям: по моменту входа или выхода (переключатель). */
+function TimeTables({ ts }: { ts: TimeStats }) {
+  const [which, setWhich] = useState<'entry' | 'exit'>('entry');
+  const cur = ts[which];
+  const head = (
+    <thead><tr><th></th><th>n</th><th>TP%</th><th>SL%</th><th>win%</th><th>PF</th><th>итого</th></tr></thead>
+  );
+  return (
+    <div data-testid="time-stats">
+      <h3>По дням и сессиям <Help text={HELP.time_stats} /></h3>
+      <div className="seg-mini">
+        <button type="button" className={which === 'entry' ? 'on' : ''} onClick={() => setWhich('entry')}>по входу</button>
+        <button type="button" className={which === 'exit' ? 'on' : ''} onClick={() => setWhich('exit')}>по выходу</button>
+      </div>
+      <table className="mini" data-testid="stats-days">
+        {head}
+        <tbody>{cur.day.map((b, i) => timeRow(DAY_NAMES[i], b))}</tbody>
+      </table>
+      <table className="mini" data-testid="stats-sessions">
+        {head}
+        <tbody>{cur.session.map((b) => timeRow(b.name, b, `${String(b.hours[0]).padStart(2, '0')}–${String(b.hours[1]).padStart(2, '0')}`))}</tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function StatsPanel({ result }: { result: BacktestResult }) {
   const { total: t } = result.stats;
   const rows: [string, Stats][] = [
@@ -71,6 +118,8 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
         <Card label="Серия убытков" value={String(t.max_loss_streak)} sub="макс. подряд" />
         <Card label="В позиции" value={`${t.exposure_pct.toFixed(0)}%`} sub="доля времени" />
       </div>
+
+      {result.time_stats && result.stats.total.trades > 0 && <TimeTables ts={result.time_stats} />}
 
       {result.weekday_split && result.weekday_split.weekday.trades + result.weekday_split.weekend.trades > 0 && <WeekdayTable split={result.weekday_split} />}
 
