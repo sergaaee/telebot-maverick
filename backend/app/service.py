@@ -224,6 +224,44 @@ def weekday_split(trades, before_min=0.0):
     return {**out, "entered": entered}
 
 
+SESSIONS = (("asia", "Азия (Токио)", 0, 8), ("europe", "Европа (Лондон)", 8, 13), ("us", "США (Нью-Йорк)", 13, 21), ("night", "Вечер / ночь", 21, 24))     # часы UTC, без пересечений
+
+
+def session_of(ts_ms):
+    h = (ts_ms // 3_600_000) % 24
+    return next(k for k, _n, a, b in SESSIONS if a <= h < b)
+
+
+def _bucket():
+    return {"trades": 0, "reasons": {r: 0 for r in SPLIT_REASONS}, "pnl_usd": 0.0, "wins": 0, "gross_win": 0.0, "gross_loss": 0.0}
+
+
+def _add(b, t):
+    b["trades"] += 1
+    b["reasons"][t["reason"] if t["reason"] in b["reasons"] else "TP"] += 1
+    b["pnl_usd"] += t["pnl_usd"]
+    if t["pnl_usd"] > 0:
+        b["wins"] += 1
+        b["gross_win"] += t["pnl_usd"]
+    else:
+        b["gross_loss"] += -t["pnl_usd"]
+
+
+def time_stats(trades):
+    """Статистика по дням недели (пн…вс, UTC) и по сессиям (Азия 00–08, Европа 08–13, США 13–21, вечер/ночь 21–24 UTC; границы фиксированные, без перехода на летнее время)
+    отдельно по моменту ВХОДА и по моменту ВЫХОДА: число сделок, причины выхода, winrate, итог. Ноги пирамидинга считаются сделками."""
+    out = {}
+    for which, key in (("entry", "entry_ts"), ("exit", "exit_ts")):
+        days = [_bucket() for _ in range(7)]
+        sess = {k: _bucket() for k, *_ in SESSIONS}
+        for t in trades:
+            ts = t[key]
+            _add(days[(ts // 86_400_000 + 3) % 7], t)           # 1970-01-01 — четверг: (дни от эпохи + 3) % 7 → 0 = понедельник
+            _add(sess[session_of(ts)], t)
+        out[which] = {"day": days, "session": [{"key": k, "name": n, "hours": [a, b], **sess[k]} for k, n, a, b in SESSIONS]}
+    return out
+
+
 def _trade_out(n, t, rep, at=None):
     r = rep.get(t["signal_ts"])
     out = {
@@ -496,6 +534,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "signals": signals_out,
         "signals_truncated": len(confirmed) > limit,
         "skipped_reasons": skipped_reasons,
+        "time_stats": time_stats(trades),
         "weekday_split": weekday_split(trades, eff.get("friday_close_before_min") or 0.0),
         "pending": pending_out[-3000:],
         "ready_now": ready_now,

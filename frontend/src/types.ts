@@ -222,6 +222,16 @@ export interface WeekdaySplit {
   entered: { weekday: number; weekend: number };
 }
 
+/** Группа сделок по дню недели или сессии: причины выхода, число плюсовых, итог и суммы для profit factor. */
+export interface TimeBucket extends WeekdayBucket {
+  gross_win: number;
+  gross_loss: number;
+}
+export interface TimeStats {
+  entry: { day: TimeBucket[]; session: (TimeBucket & { key: string; name: string; hours: [number, number] })[] };
+  exit: { day: TimeBucket[]; session: (TimeBucket & { key: string; name: string; hours: [number, number] })[] };
+}
+
 export interface Stats {
   trades: number;
   tp: number;
@@ -274,6 +284,7 @@ export interface BacktestResult {
   signals_truncated: boolean;
   skipped_reasons: Record<string, number>;
   weekday_split: WeekdaySplit;
+  time_stats: TimeStats;
   pending: PendingSignal[];
   /** что ждёт подтверждения по последнему отчёту прямо сейчас */
   ready_now: PendingSignal[];

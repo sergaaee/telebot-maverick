@@ -47,3 +47,24 @@ def test_weekday_split_by_exit_moment():
     assert r["weekend"]["reasons"]["SL"] == 1 and r["weekend"]["reasons"]["TP"] == 1
     assert abs(r["weekday"]["pnl_usd"] - 50.0) < 1e-9 and r["weekday"]["wins"] == 1 and r["weekend"]["wins"] == 1
     assert r["entered"] == {"weekday": 4, "weekend": 1}
+
+
+def test_time_stats_by_day_and_session():
+    from app.service import session_of, time_stats
+    def tr(reason, entry, exit_, pnl):
+        return {"reason": reason, "entry_ts": entry, "exit_ts": exit_, "pnl_usd": pnl}
+    assert [session_of(ms(2026, 1, 5, h)) for h in (0, 7, 8, 12, 13, 20, 21, 23)] == ["asia", "asia", "europe", "europe", "us", "us", "night", "night"]
+    trades = [tr("TP", ms(2026, 1, 5, 1), ms(2026, 1, 5, 9), 100.0),           # пн, Азия -> выход пн, Европа
+              tr("SL", ms(2026, 1, 5, 14), ms(2026, 1, 6, 2), -50.0),          # пн, США -> вт, Азия
+              tr("TP", ms(2026, 1, 11, 22), ms(2026, 1, 12, 3), 30.0)]         # вс, ночь -> пн, Азия
+    r = time_stats(trades)
+    d_in, d_out = r["entry"]["day"], r["exit"]["day"]
+    assert [b["trades"] for b in d_in] == [2, 0, 0, 0, 0, 0, 1]                  # пн ×2, вс ×1 (по входу)
+    assert [b["trades"] for b in d_out] == [2, 1, 0, 0, 0, 0, 0]                 # пн ×2 (09:00 и 03:00 следующего пн), вт ×1
+    assert d_in[0]["reasons"]["TP"] == 1 and d_in[0]["reasons"]["SL"] == 1 and abs(d_in[0]["pnl_usd"] - 50.0) < 1e-9 and d_in[0]["wins"] == 1
+    assert abs(d_in[0]["gross_win"] - 100.0) < 1e-9 and abs(d_in[0]["gross_loss"] - 50.0) < 1e-9
+    s_in = {x["key"]: x for x in r["entry"]["session"]}
+    assert (s_in["asia"]["trades"], s_in["europe"]["trades"], s_in["us"]["trades"], s_in["night"]["trades"]) == (1, 0, 1, 1)
+    s_out = {x["key"]: x for x in r["exit"]["session"]}
+    assert (s_out["asia"]["trades"], s_out["europe"]["trades"]) == (2, 1)
+    assert sum(b["trades"] for b in d_in) == sum(x["trades"] for x in r["entry"]["session"]) == 3
