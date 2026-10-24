@@ -363,3 +363,14 @@ def test_trend_waiting_is_reported(client):
     assert r["pending"] and all(p["waiting"] == ["trend"] and "тренд" in p["lines"][0] and "EMA 20" in p["lines"][0] for p in r["pending"])
     both = client.post("/api/backtest", json={"side": "long", "trend_enabled": True, "trend_emas": [20], "trend_tf": "1h", "cool_drop": 5}).json()
     assert any(p["waiting"] == ["cool", "trend"] for p in both["pending"])                     # ждут и откат, и тренд
+
+
+def test_weekdays_only_param_and_weekday_split_in_api(client):
+    base = client.post("/api/backtest", json={}).json()
+    assert base["params"]["weekdays_only"] is False and base["params"]["friday_close_before_min"] == 0
+    s = base["weekday_split"]
+    assert s["weekday"]["trades"] + s["weekend"]["trades"] == base["stats"]["total"]["trades"] and sum(s["weekday"]["reasons"].values()) == s["weekday"]["trades"]
+    assert s["entered"]["weekday"] + s["entered"]["weekend"] == base["stats"]["total"]["trades"]
+    on = client.post("/api/backtest", json={"weekdays_only": True, "friday_close_before_min": 15}).json()
+    assert on["params"]["weekdays_only"] is True and on["stats"]["total"]["wknd"] >= 0
+    assert client.post("/api/backtest", json={"friday_close_before_min": -1}).status_code == 422

@@ -1,6 +1,6 @@
 import { fmtPct, fmtPf, fmtUsd, signClass } from '../format';
 import { HELP } from '../helpTexts';
-import type { BacktestResult, Stats } from '../types';
+import type { BacktestResult, Stats, WeekdayBucket, WeekdaySplit } from '../types';
 import Help from './Help';
 
 export function Card({ label, value, cls = '', sub, help }: { label: string; value: string; cls?: string; sub?: string; help?: string }) {
@@ -10,6 +10,31 @@ export function Card({ label, value, cls = '', sub, help }: { label: string; val
       <div className={`card-value ${cls}`}>{value}</div>
       {sub && <div className="card-sub">{sub}</div>}
     </div>
+  );
+}
+
+const SPLIT_ROWS: [keyof WeekdayBucket['reasons'], string][] = [['TP', 'Тейки'], ['BE', 'Безубыток'], ['SL', 'Стопы'], ['REV', 'Развороты'], ['LIQ', 'Ликвидации'], ['WKND', 'Закрыто в пятницу'], ['OPEN', 'Открыто']];
+
+/** Исходы сделок в будни и в выходные: сколько и какой процент от сделок группы. */
+function WeekdayTable({ split }: { split: WeekdaySplit }) {
+  const { weekday: a, weekend: b } = split;
+  const cell = (bk: WeekdayBucket, n: number) => (bk.trades ? `${n} · ${((n / bk.trades) * 100).toFixed(0)}%` : '–');
+  return (
+    <>
+      <h3>Будни и выходные <Help text={HELP.weekday_split} /></h3>
+      <table className="mini" data-testid="weekday-split">
+        <thead><tr><th></th><th>будни</th><th>выходные</th></tr></thead>
+        <tbody>
+          <tr><td>Сделок (по выходу)</td><td>{a.trades}</td><td>{b.trades}</td></tr>
+          {SPLIT_ROWS.filter(([k]) => a.reasons[k] + b.reasons[k] > 0).map(([k, name]) => (
+            <tr key={k}><td>{name}</td><td>{cell(a, a.reasons[k])}</td><td>{cell(b, b.reasons[k])}</td></tr>
+          ))}
+          <tr><td>Winrate</td><td>{a.trades ? `${((a.wins / a.trades) * 100).toFixed(0)}%` : '–'}</td><td>{b.trades ? `${((b.wins / b.trades) * 100).toFixed(0)}%` : '–'}</td></tr>
+          <tr><td>Итого</td><td className={signClass(a.pnl_usd)}>{a.trades ? fmtUsd(a.pnl_usd) : '–'}</td><td className={signClass(b.pnl_usd)}>{b.trades ? fmtUsd(b.pnl_usd) : '–'}</td></tr>
+          <tr><td>Входов</td><td>{split.entered.weekday}</td><td>{split.entered.weekend}</td></tr>
+        </tbody>
+      </table>
+    </>
   );
 }
 
@@ -28,7 +53,7 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
     <div className="stats">
       <div className="cards">
         <Card label="Итого" value={fmtUsd(t.total_usd)} cls={signClass(t.total_usd)} sub={t.return_pct != null ? `${fmtPct(t.return_pct, 1)} от депозита ${result.params.deposit.toLocaleString('ru-RU')} $` : undefined} />
-        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev}${t.liq ? ` · ликвид. ${t.liq}` : ''} · откр. ${t.open}`} />
+        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev}${t.liq ? ` · ликвид. ${t.liq}` : ''}${t.wknd ? ` · пятница ${t.wknd}` : ''} · откр. ${t.open}`} />
         <Card label="Коэф. Шарпа" value={t.sharpe == null ? '–' : t.sharpe.toFixed(2)} cls={t.sharpe == null ? '' : signClass(t.sharpe)} sub="годовой, по дням" />
         <Card label="Winrate" value={`${t.winrate.toFixed(1)}%`} />
         <Card label="Profit factor" value={fmtPf(t.profit_factor)} />
@@ -46,6 +71,8 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
         <Card label="Серия убытков" value={String(t.max_loss_streak)} sub="макс. подряд" />
         <Card label="В позиции" value={`${t.exposure_pct.toFixed(0)}%`} sub="доля времени" />
       </div>
+
+      {result.weekday_split && result.weekday_split.weekday.trades + result.weekday_split.weekend.trades > 0 && <WeekdayTable split={result.weekday_split} />}
 
       {Object.keys(result.skipped_reasons ?? {}).length > 0 && (
         <>

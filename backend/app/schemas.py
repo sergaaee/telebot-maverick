@@ -54,6 +54,8 @@ class BacktestParams(BaseModel):
     pyramid_leverage: Optional[float] = Field(None, ge=1, le=125, description="плечо доборов; не задано (null) — как у первой ноги")
     liquidation_sim: Optional[bool] = Field(None, description="моделировать ликвидацию: касание цены ликвидации закрывает ногу с потерей всей маржи")
     maint_margin_pct: Optional[float] = Field(None, ge=0, le=20, description="поддерживающая маржа, % объёма (для цены ликвидации)")
+    weekdays_only: Optional[bool] = Field(None, description="вход только с открытия Токио в понедельник; остаток закрывается к закрытию Нью-Йорка в пятницу")
+    friday_close_before_min: Optional[float] = Field(None, ge=0, le=720, description="закрыть позицию в пятницу за столько минут до закрытия Нью-Йорка")
     signal_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между открытиями позиций")
     sl_hold_strong: Optional[bool] = None
     # торговля только по тренду (EMA на таймфрейме trend_tf)

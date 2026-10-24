@@ -699,6 +699,36 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
     check("без фильтров баннера нет", pg.get_by_test_id("ready-now").count() == 0)
 
+    # --- «торговать только в будни» и разбивка исходов по будням/выходным
+    split_tbl = pg.get_by_test_id("weekday-split")
+    check("таблица «Будни и выходные» есть, с «?», строка тейков/стопов/открыто", split_tbl.count() == 1 and pg.locator("h3", has_text="Будни и выходные").locator(".help").count() == 1
+          and all(w in split_tbl.inner_text() for w in ("Тейки", "Стопы", "Winrate", "Входов")), split_tbl.inner_text()[:120] if split_tbl.count() else "нет")
+    base_split = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({})}).then(r => r.json()).then(j => [j.stats.total.trades, j.weekday_split.weekday.trades, j.weekday_split.weekend.trades, j.weekday_split.entered.weekend])""")
+    check("API: сделки делятся на будни и выходные без потерь, выходные в демо-данных есть", base_split[0] == base_split[1] + base_split[2] and base_split[2] > 0 and base_split[3] > 0, str(base_split))
+    check("«Торговать только в будни» выключено по умолчанию, с «?», поле пятницы скрыто", not field(pg, "торговать только в будни").locator("input").is_checked() and field(pg, "торговать только в будни").locator(".help").count() == 1 and field(pg, "Закрыть в пятницу за").count() == 0)
+    field(pg, "торговать только в будни").locator("input").check()
+    check("при включении появляется «Закрыть в пятницу за» с «?»", field(pg, "Закрыть в пятницу за").locator(".help").count() == 1)
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    wk_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({weekdays_only: true})}).then(r => r.json()).then(j => ({
+        bad_entries: j.trades.filter(t => { const d = new Date(t.entry_ts); const dow = d.getUTCDay(); const h = d.getUTCHours(); return dow === 0 || dow === 6 || (dow === 5 && h >= 22); }).length,
+        wknd: j.trades.filter(t => t.reason === 'WKND').map(t => { const d = new Date(t.exit_ts); return [d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes()]; }),
+        reasons: j.skipped_reasons, weekend_exits: j.weekday_split.weekend.trades, total: j.stats.total.trades, wknd_stat: j.stats.total.wknd,
+        open_weekend: j.trades.filter(t => { const d = new Date(t.exit_ts); return d.getUTCDay() === 6 || d.getUTCDay() === 0; }).length}))""")
+    check("API: ни одного входа в субботу/воскресенье/пятницу после закрытия", wk_api["bad_entries"] == 0 and wk_api["total"] > 0, str(wk_api["bad_entries"]))
+    check("API: закрытия WKND — по пятницам ровно в 21:00 или 22:00 UTC", wk_api["wknd"] and all(d == 5 and h in (21, 22) and m == 0 for d, h, m in wk_api["wknd"]) and wk_api["wknd_stat"] == len(wk_api["wknd"]), str(wk_api["wknd"][:3]))
+    check("API: выходных выходов нет, пропуски по выходным названы", wk_api["weekend_exits"] == 0 and wk_api["open_weekend"] == 0 and wk_api["reasons"].get("выходные: вне торгового окна", 0) > 0, str(wk_api["reasons"]))
+    check("в таблице сделок есть закрытия WKND, в карточке «пятница N»", pg.locator("table.trades tbody tr .tag-WKND").count() > 0 and "пятница" in pg.locator(".card", has_text="Сделок").first.inner_text())
+    with pg.expect_download() as dl6:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg6 = _json.loads(Path(dl6.value.path()).read_text(encoding="utf-8"))
+    check("в скачанном конфиге есть weekdays_only", cfg6["params"]["weekdays_only"] is True and "friday_close_before_min" in cfg6["params"])
+    for k in ("weekdays_only", "friday_close_before_min"):
+        cfg6["params"].pop(k)
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg6))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("старый конфиг без этих полей: режим «только будни» выключен", not field(pg, "торговать только в будни").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() == 0)
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):

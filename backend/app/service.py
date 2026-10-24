@@ -8,6 +8,7 @@ import time
 
 from .core import backtest, montecarlo, topcoins, trend
 from .core import equity as equity_mod
+from .core import tradingweek
 from .core.entries import entries
 
 from .data import DataStore
@@ -203,6 +204,26 @@ def waiting_lines(d, w):
     return out
 
 
+SPLIT_REASONS = ("TP", "BE", "SL", "REV", "LIQ", "WKND", "OPEN")
+
+
+def weekday_split(trades, before_min=0.0):
+    """Сделки по причине выхода отдельно для будней и выходных. Будни — внутри торговой недели (с открытия Токио в понедельник до закрытия Нью-Йорка в пятницу,
+    см. core/tradingweek.py), выходные — пятница после закрытия, суббота, воскресенье. Причина относится к моменту ВЫХОДА (закрытие в пятницу считается будним),
+    «открыто» — отдельно по моменту входа."""
+    out = {k: {"trades": 0, "reasons": {r: 0 for r in SPLIT_REASONS}, "pnl_usd": 0.0, "wins": 0} for k in ("weekday", "weekend")}
+    entered = {"weekday": 0, "weekend": 0}
+    for t in trades:
+        k = "weekday" if tradingweek.in_window(t["exit_ts"] - 60_000, before_min) else "weekend"
+        b = out[k]
+        b["trades"] += 1
+        b["reasons"][t["reason"] if t["reason"] in b["reasons"] else "TP"] += 1
+        b["pnl_usd"] += t["pnl_usd"]
+        b["wins"] += t["pnl_usd"] > 0
+        entered["weekday" if tradingweek.in_window(t["entry_ts"], before_min) else "weekend"] += 1
+    return {**out, "entered": entered}
+
+
 def _trade_out(n, t, rep, at=None):
     r = rep.get(t["signal_ts"])
     out = {
@@ -364,10 +385,11 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             warnings.append(f"Пирамидинг: {eff['trade_pct']:g}% + {eff['pyramid_max']} × {eff['pyramid_pct']:g}% больше депозита — доборов не больше {room}")
         pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "move_pct": eff.get("pyramid_move_pct") or 0.0, "move_dir": eff.get("pyramid_move_dir") or "any", "avg": bool(eff.get("pyramid_avg")),
                             "w0": eff["trade_pct"] * lev, "w": eff["pyramid_pct"] * lev_add}, eff["pyramid_pct"]      # веса усреднения — объём (доля × плечо)
+    week = {"before_min": eff.get("friday_close_before_min") or 0.0} if eff.get("weekdays_only") else None
     skipped = []
     trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, pyramid=pyramid,
                                signal_gap_h=eff.get("signal_gap_h") or 0.0, sl_hold_strong=bool(eff.get("sl_hold_strong")), skipped=skipped,
-                               leverage=lev, add_leverage=lev_add, mmr=mmr,
+                               leverage=lev, add_leverage=lev_add, mmr=mmr, week=week,
                                **common, **extra)
 
     apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True), pyr_pct, eff.get("pyramid_leverage"))
@@ -474,6 +496,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "signals": signals_out,
         "signals_truncated": len(confirmed) > limit,
         "skipped_reasons": skipped_reasons,
+        "weekday_split": weekday_split(trades, eff.get("friday_close_before_min") or 0.0),
         "pending": pending_out[-3000:],
         "ready_now": ready_now,
         "last_signals": last_signals,                  # самые свежие подтверждённые сигналы (для бота: список signals обрезается по первым 5000)

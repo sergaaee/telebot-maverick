@@ -734,3 +734,36 @@ def test_ready_message_format():
     assert "ШОРТ" in t and "A&lt;b&gt;" in t and "• откат DS" in t and "• тренд" in t and "из 4 подряд" in t
     assert "ДОБОР" in fm.ready_message({"name": "x"}, {"params": {"symbol": "B", "confirm": 2}}, [{**items[0], "add": True}], "x")
     assert "Ожидание отменено" in fm.ready_cancelled_message({"name": "x"}, {"params": {"symbol": "B"}}, "long|cool")
+
+
+# ---------------- «только будни» ----------------
+def test_old_stored_config_ignores_env_weekdays_default(env):
+    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items() if k not in ("weekdays_only", "friday_close_before_min")}
+    env.s.defaults.update(weekdays_only=True)
+    assert env.engine.evaluate(old)["params"]["weekdays_only"] is False
+    assert validate(UI_CONFIG["params"], env.s.defaults)[0]["weekdays_only"] is True
+
+
+def test_new_signals_skips_weekend_and_expires_previous_week_position():
+    from datetime import datetime, timezone
+    def ms(*a):
+        return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
+    base = {"candles_last_ts": ms(2026, 1, 5, 0, 0)}
+    trade = {"side": "long", "reason": "OPEN", "group": 1, "leg": 1, "entry_ts": ms(2026, 1, 5, 1, 0), "entry": 100.0, "signal_ts": ms(2026, 1, 5, 1, 0)}
+    def run(ts, **kw):
+        sig = {"ts": ts, "side": "long", "taken": False, "trend_blocked": False}
+        res = {"params": {"pyramid_enabled": False, "trade_pct": 10, "pyramid_pct": 5, "pyramid_max": 3, "weekdays_only": True, **kw}, "range": base, "trades": [trade], "last_signals": [sig]}
+        return Engine.new_signals(res, 0)
+    assert run(ms(2026, 1, 10, 12)) == []                                         # суббота — вне торгового окна
+    assert run(ms(2026, 1, 7, 12)) == []                                          # будни, но позиция открыта и пирамидинга нет
+    nxt = run(ms(2026, 1, 12, 3))                                                 # следующий понедельник: позиция прошлой недели закрыта в пятницу — новый вход
+    assert len(nxt) == 1 and nxt[0]["pyramid"] is False
+
+
+def test_weekend_close_fill_message_and_summary():
+    from sigbot import formatting as fm
+    ev = {"ts": 1_700_000_000_000, "label": "WKND", "price": 100.0, "share": 0.5, "metrics": None, "side": "long", "leg": 1, "pyramid": False, "avg": False, "adds_n": 0,
+          "entry": 99.0, "entry_ts": 1, "closed": True, "reason": "WKND", "pnl_usd": 12.0, "pnl_pct": 1.0, "hold_h": 80.0, "be": False, "tp1_be": False}
+    t = fm.fill_message({"name": "x"}, {"params": {"symbol": "BTC/USDT:USDT"}}, ev, "Coinbase")
+    assert "Закрытие к концу недели" in t and "3.3 сут" in t
+    assert "только будни" in fm.config_summary({"params": {"source": "a", "symbol": "b", "side": "both", "confirm": 2, "weekdays_only": True}})

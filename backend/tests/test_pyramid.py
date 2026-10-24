@@ -485,3 +485,52 @@ def test_avg_position_liquidation_uses_effective_leverage():
     assert abs(t["pnl_pct"] + ratio * 100) < 1e-6
     t2 = run_lev(ev(10, 20), c, sl=50.0, pyramid={"max": 1, "gap_h": 0, "avg": True, "w0": 100.0, "w": 10.0}, leverage=3.0, add_leverage=3.0, mmr=0.005)[0]   # 3×: ликвидация далеко
     assert t2["reason"] == "OPEN"
+
+
+# ---------------- «только будни» ----------------
+def wk(*a):
+    from datetime import datetime, timezone
+    return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def week_candles(start, minutes, price=100.0):
+    return [(start + i * M, price, price, price, price) for i in range(minutes)]
+
+
+def test_weekend_signals_are_skipped_and_friday_close_closes_open_position():
+    start = wk(2026, 1, 3, 12, 0)                           # суббота
+    c = week_candles(start, 8 * 1440)                       # до следующей субботы
+    ev_ = [(wk(2026, 1, 3, 13, 0), 1), (wk(2026, 1, 5, 9, 0), 1), (wk(2026, 1, 9, 23, 0), 1)]    # сб (нельзя), пн 09:00 (можно), пт после закрытия (нельзя)
+    skipped = []
+    trades = run_events(ev_, c, LEVELS, 2.0, fee=0.0, slip=0.0, skipped=skipped, week={"before_min": 0})
+    assert len(trades) == 1 and trades[0]["entry_ts"] == wk(2026, 1, 5, 9, 0)
+    assert trades[0]["reason"] == "WKND" and trades[0]["exit_ts"] == wk(2026, 1, 9, 22, 0)      # закрытие NY зимой — 22:00 UTC
+    assert [r for _, _, r in skipped] == ["выходные: вне торгового окна"] * 2
+
+
+def test_friday_close_before_minutes_and_tp_sl_still_work_first():
+    start = wk(2026, 1, 5, 0, 0)
+    c = week_candles(start, 5 * 1440)
+    t = run_events([(wk(2026, 1, 5, 1, 0), 1)], c, LEVELS, 2.0, fee=0.0, slip=0.0, week={"before_min": 45})[0]
+    assert t["reason"] == "WKND" and t["exit_ts"] == wk(2026, 1, 9, 21, 15)
+    for i in range(3 * 1440, 3 * 1440 + 10):               # в среду цена улетает на +4%: тейк раньше пятницы
+        c[i] = (c[i][0], 104.0, 104.0, 104.0, 104.0)
+    t = run_events([(wk(2026, 1, 5, 1, 0), 1)], c, LEVELS, 2.0, fee=0.0, slip=0.0, week={"before_min": 0})[0]
+    assert t["reason"] == "TP"
+
+
+def test_without_week_mode_nothing_changes_and_summer_close_is_21_utc():
+    start = wk(2026, 7, 4, 12, 0)
+    c = week_candles(start, 8 * 1440)
+    ev_ = [(wk(2026, 7, 4, 13, 0), 1)]
+    assert run_events(ev_, c, LEVELS, 2.0, fee=0.0, slip=0.0)[0]["reason"] == "OPEN"            # как раньше: выходной вход разрешён
+    t = run_events([(wk(2026, 7, 6, 1, 0), 1)], c, LEVELS, 2.0, fee=0.0, slip=0.0, week={"before_min": 0})[0]
+    assert t["exit_ts"] == wk(2026, 7, 10, 21, 0)                                              # лето: 17:00 ET = 21:00 UTC
+
+
+def test_avg_position_and_add_signals_respect_week():
+    start = wk(2026, 1, 5, 0, 0)
+    c = week_candles(start, 5 * 1440)
+    ev_ = [(wk(2026, 1, 5, 1, 0), 1), (wk(2026, 1, 6, 1, 0), 1), (wk(2026, 1, 9, 23, 0), 1)]
+    t, sk = run_events(ev_, c, LEVELS, 2.0, fee=0.0, slip=0.0, skipped=[], pyramid={"max": 3, "gap_h": 0, "avg": True, "w0": 10.0, "w": 5.0}, week={"before_min": 0}), None
+    assert len(t) == 1 and t[0]["adds_n"] == 1 and t[0]["reason"] == "WKND" and t[0]["exit_ts"] == wk(2026, 1, 9, 22, 0)
