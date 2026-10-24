@@ -1,7 +1,7 @@
 import { fmtPct, fmtPf, fmtUsd, signClass } from '../format';
 import { HELP } from '../helpTexts';
 import { useState } from 'react';
-import type { BacktestResult, Stats, TimeBucket, TimeStats, WeekdayBucket, WeekdaySplit } from '../types';
+import type { BacktestResult, HoldQuantiles, HoldStats, Stats, TimeBucket, TimeStats, WeekdayBucket, WeekdaySplit } from '../types';
 import Help from './Help';
 
 export function Card({ label, value, cls = '', sub, help }: { label: string; value: string; cls?: string; sub?: string; help?: string }) {
@@ -85,6 +85,56 @@ function TimeTables({ ts }: { ts: TimeStats }) {
   );
 }
 
+const fmtH = (h: number | null) => (h == null ? '–' : h < 1 ? `${Math.round(h * 60)} мин` : h < 48 ? `${h.toFixed(1)} ч` : `${(h / 24).toFixed(1)} сут`);
+
+function corrText(r: number | null): string {
+  if (r == null) return 'мало данных для корреляции (нужно ≥ 10 закрытых сделок)';
+  const a = Math.abs(r);
+  const w = a < 0.1 ? 'связи практически нет' : r > 0 ? (a < 0.3 ? 'слабо: чем дольше держим, тем немного лучше результат' : 'чем дольше держим, тем лучше результат') : (a < 0.3 ? 'слабо: чем дольше держим, тем немного хуже результат' : 'чем дольше держим, тем хуже результат');
+  return `r = ${r.toFixed(2)} — ${w}`;
+}
+
+/** Распределение срока удержания позиций и зависимость результата от него. */
+function HoldTable({ hs }: { hs: HoldStats }) {
+  const total = hs.buckets.reduce((a, b) => a + b.trades, 0);
+  if (!total) return null;
+  const maxN = Math.max(...hs.buckets.map((b) => b.trades));
+  const q = (name: string, x: HoldQuantiles) => (x.n ? <tr><td>{name}</td><td>{x.n}</td><td>{fmtH(x.median)}</td><td>{fmtH(x.mean)}</td><td>{fmtH(x.p90)}</td></tr> : null);
+  return (
+    <div data-testid="hold-stats">
+      <h3>Сколько держатся позиции <Help text={HELP.hold_stats} /></h3>
+      <table className="mini">
+        <thead><tr><th></th><th>n</th><th>медиана</th><th>среднее</th><th>p90</th></tr></thead>
+        <tbody>
+          {q('Все закрытые', hs.summary.all)}
+          {q('Плюсовые', hs.summary.wins)}
+          {q('Минусовые', hs.summary.losses)}
+          {Object.entries(hs.summary.by_reason).map(([r, x]) => q(REASON_NAMES[r] ?? r, x))}
+        </tbody>
+      </table>
+      <table className="mini hold-table" data-testid="hold-buckets">
+        <thead><tr><th>срок</th><th></th><th>n</th><th>TP%</th><th>SL%</th><th>win%</th><th>PF</th><th>итого</th></tr></thead>
+        <tbody>
+          {hs.buckets.map((b) => {
+            const pct = (n: number) => (b.trades ? `${((n / b.trades) * 100).toFixed(0)}%` : '–');
+            const pf = b.trades === 0 ? '–' : b.gross_loss === 0 ? (b.gross_win > 0 ? '∞' : '–') : (b.gross_win / b.gross_loss).toFixed(2);
+            return (
+              <tr key={b.label} className={b.trades ? '' : 'dim'} title={b.trades ? `${b.trades} сделок (${((b.trades / total) * 100).toFixed(0)}% от всех)` : 'сделок нет'}>
+                <td>{b.label}</td>
+                <td className="hold-bar"><span style={{ width: `${(b.trades / maxN) * 100}%` }} /></td>
+                <td>{b.trades}</td><td>{pct(b.reasons.TP)}</td><td>{pct(b.reasons.SL)}</td>
+                <td>{b.trades ? `${((b.wins / b.trades) * 100).toFixed(0)}%` : '–'}</td><td>{pf}</td>
+                <td className={signClass(b.pnl_usd)}>{b.trades ? fmtUsd(b.pnl_usd) : '–'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="note">Корреляция срока и результата: {corrText(hs.summary.corr)}.{hs.open > 0 && ` Не учтено открытых позиций: ${hs.open}.`}</p>
+    </div>
+  );
+}
+
 export default function StatsPanel({ result }: { result: BacktestResult }) {
   const { total: t } = result.stats;
   const rows: [string, Stats][] = [
@@ -120,6 +170,8 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
       </div>
 
       {result.time_stats && result.stats.total.trades > 0 && <TimeTables ts={result.time_stats} />}
+
+      {result.hold_stats && <HoldTable hs={result.hold_stats} />}
 
       {result.weekday_split && result.weekday_split.weekday.trades + result.weekday_split.weekend.trades > 0 && <WeekdayTable split={result.weekday_split} />}
 

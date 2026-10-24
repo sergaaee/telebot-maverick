@@ -262,6 +262,49 @@ def time_stats(trades):
     return out
 
 
+HOLD_EDGES = (0, 1, 4, 12, 24, 48, 96)            # часы; последняя группа — дольше 96 ч
+HOLD_LABELS = ("< 1 ч", "1–4 ч", "4–12 ч", "12–24 ч", "1–2 сут", "2–4 сут", "> 4 сут")
+
+
+def _quantile(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * q
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
+def hold_stats(trades):
+    """Сколько держатся позиции и как это связано с результатом. Берутся закрытые сделки (открытые на конец данных не считаются — их срок ещё не известен).
+    buckets — группы по сроку удержания (те же поля, что у дней/сессий), summary — медиана/среднее/p90 в часах (всего, у плюсовых, у минусовых, по причинам выхода)
+    и корреляция Пирсона между log(срок) и результатом сделки в % (None, если мало данных или нет разброса)."""
+    closed = [t for t in trades if t["reason"] != "OPEN"]
+    buckets = [dict(_bucket(), label=lab, from_h=lo, to_h=(HOLD_EDGES[i + 1] if i + 1 < len(HOLD_EDGES) else None)) for i, (lab, lo) in enumerate(zip(HOLD_LABELS, HOLD_EDGES))]
+    for t in closed:
+        h = t["hold_h"]
+        k = max(i for i, lo in enumerate(HOLD_EDGES) if h >= lo)
+        _add(buckets[k], t)
+        buckets[k]["hold_sum"] = buckets[k].get("hold_sum", 0.0) + h
+
+    def stat(sel):
+        v = sorted(t["hold_h"] for t in sel)
+        return {"n": len(v), "median": _quantile(v, 0.5), "mean": (sum(v) / len(v)) if v else None, "p90": _quantile(v, 0.9)}
+
+    corr = None
+    if len(closed) >= 10:
+        xs = [math.log(max(t["hold_h"], 1 / 60)) for t in closed]
+        ys = [t["pnl_pct"] for t in closed]
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        sx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+        sy = math.sqrt(sum((y - my) ** 2 for y in ys))
+        if sx > 0 and sy > 0:
+            corr = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sx * sy)
+    reasons = {r: stat([t for t in closed if t["reason"] == r]) for r in SPLIT_REASONS if r != "OPEN" and any(t["reason"] == r for t in closed)}
+    return {"buckets": buckets, "open": len(trades) - len(closed),
+            "summary": {"all": stat(closed), "wins": stat([t for t in closed if t["pnl_usd"] > 0]), "losses": stat([t for t in closed if t["pnl_usd"] <= 0]), "by_reason": reasons, "corr": corr}}
+
+
 def _trade_out(n, t, rep, at=None):
     r = rep.get(t["signal_ts"])
     out = {
@@ -535,6 +578,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "signals_truncated": len(confirmed) > limit,
         "skipped_reasons": skipped_reasons,
         "time_stats": time_stats(trades),
+        "hold_stats": hold_stats(out_trades),
         "weekday_split": weekday_split(trades, eff.get("friday_close_before_min") or 0.0),
         "pending": pending_out[-3000:],
         "ready_now": ready_now,

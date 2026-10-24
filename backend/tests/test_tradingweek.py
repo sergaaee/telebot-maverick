@@ -68,3 +68,24 @@ def test_time_stats_by_day_and_session():
     s_out = {x["key"]: x for x in r["exit"]["session"]}
     assert (s_out["asia"]["trades"], s_out["europe"]["trades"]) == (2, 1)
     assert sum(b["trades"] for b in d_in) == sum(x["trades"] for x in r["entry"]["session"]) == 3
+
+
+def test_hold_stats_buckets_summary_and_correlation():
+    from app.service import hold_stats
+    def tr(reason, hold_h, pnl_pct, pnl_usd):
+        return {"reason": reason, "hold_h": hold_h, "pnl_pct": pnl_pct, "pnl_usd": pnl_usd}
+    trades = [tr("SL", 0.5, -2.0, -20.0), tr("SL", 0.9, -2.0, -20.0), tr("TP", 3.0, 3.0, 30.0), tr("TP", 5.0, 4.0, 40.0), tr("BE", 12.0, 0.0, -1.0),
+              tr("TP", 30.0, 5.0, 50.0), tr("TP", 100.0, 6.0, 60.0), tr("OPEN", 200.0, 1.0, 10.0)]
+    trades += [tr("SL", 0.7, -2.0, -20.0)] * 3                                  # для корреляции нужно ≥ 10 закрытых сделок
+    r = hold_stats(trades)
+    assert [b["trades"] for b in r["buckets"]] == [5, 1, 1, 1, 1, 0, 1]      # 0.5, 0.9 и три по 0.7 ч; 3 ч; 5 ч; 12 ч; 30 ч; —; 100 ч (открытая сделка не считается)
+    assert r["open"] == 1 and sum(b["trades"] for b in r["buckets"]) == 10
+    assert r["buckets"][0]["reasons"]["SL"] == 5 and r["buckets"][0]["wins"] == 0 and abs(r["buckets"][0]["pnl_usd"] + 100.0) < 1e-9
+    assert r["buckets"][6]["to_h"] is None and r["buckets"][0]["to_h"] == 1
+    sm = r["summary"]
+    assert sm["all"]["n"] == 10 and abs(sm["all"]["median"] - 1.95) < 1e-9
+    assert sm["wins"]["n"] == 4 and sm["losses"]["n"] == 6 and sm["wins"]["median"] > sm["losses"]["median"]          # плюсовые держатся дольше
+    assert set(sm["by_reason"]) == {"TP", "BE", "SL"} and sm["by_reason"]["SL"]["median"] == 0.7
+    assert sm["corr"] is not None and sm["corr"] > 0.8                                                               # чем дольше держим, тем лучше результат
+    assert hold_stats(trades[:3])["summary"]["corr"] is None                                                         # мало данных
+    assert hold_stats([])["summary"]["all"]["n"] == 0

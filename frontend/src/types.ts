@@ -232,6 +232,19 @@ export interface TimeStats {
   exit: { day: TimeBucket[]; session: (TimeBucket & { key: string; name: string; hours: [number, number] })[] };
 }
 
+export interface HoldQuantiles {
+  n: number;
+  median: number | null;
+  mean: number | null;
+  p90: number | null;
+}
+/** Как долго держатся позиции: группы по сроку (часы) и сводка (медиана / среднее / p90), корреляция log(срок) с результатом сделки в %. */
+export interface HoldStats {
+  buckets: (TimeBucket & { label: string; from_h: number; to_h: number | null })[];
+  open: number;
+  summary: { all: HoldQuantiles; wins: HoldQuantiles; losses: HoldQuantiles; by_reason: Record<string, HoldQuantiles>; corr: number | null };
+}
+
 export interface Stats {
   trades: number;
   tp: number;
@@ -285,6 +298,7 @@ export interface BacktestResult {
   skipped_reasons: Record<string, number>;
   weekday_split: WeekdaySplit;
   time_stats: TimeStats;
+  hold_stats: HoldStats;
   pending: PendingSignal[];
   /** что ждёт подтверждения по последнему отчёту прямо сейчас */
   ready_now: PendingSignal[];

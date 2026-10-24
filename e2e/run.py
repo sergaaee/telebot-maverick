@@ -714,6 +714,12 @@ def scenario(pg, base, state_url):
     days_out = [int(x) for x in ts_box.get_by_test_id("stats-days").locator("tbody tr td:nth-child(2)").all_inner_texts()]
     check("переключатель «по выходу» пересчитывает таблицы (сумма та же, распределение другое или то же)", sum(days_out) == n_trades_tbl and "Пн" in first_day_in and "Азия" in ts_box.get_by_test_id("stats-sessions").inner_text())
     ts_box.get_by_role("button", name="по входу").click()
+    hs_box = pg.get_by_test_id("hold-stats")
+    hold_n = [int(x) for x in hs_box.get_by_test_id("hold-buckets").locator("tbody tr td:nth-child(3)").all_inner_texts()]
+    check("срок удержания: 7 групп, сумма = число закрытых сделок, есть медиана/p90, корреляция и «?»", len(hold_n) == 7 and sum(hold_n) > 0 and sum(hold_n) <= n_trades_tbl
+          and hs_box.locator("h3 .help").count() == 1 and "p90" in hs_box.inner_text() and "Корреляция срока и результата" in hs_box.inner_text() and "Плюсовые" in hs_box.inner_text(), f"{hold_n} из {n_trades_tbl}")
+    hold_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({})}).then(r => r.json()).then(j => ({sum: j.hold_stats.buckets.reduce((a, b) => a + b.trades, 0), open: j.hold_stats.open, total: j.stats.total.trades, med: j.hold_stats.summary.all.median, corr: j.hold_stats.summary.corr}))""")
+    check("API: закрытые + открытые = все сделки, медиана срока положительна", hold_api["sum"] + hold_api["open"] == hold_api["total"] and hold_api["med"] > 0, str(hold_api))
     base_split = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({})}).then(r => r.json()).then(j => [j.stats.total.trades, j.weekday_split.weekday.trades, j.weekday_split.weekend.trades, j.weekday_split.entered.weekend])""")
     check("API: сделки делятся на будни и выходные без потерь, выходные в демо-данных есть", base_split[0] == base_split[1] + base_split[2] and base_split[2] > 0 and base_split[3] > 0, str(base_split))
     check("«Торговать только в будни» выключено по умолчанию, с «?», поле пятницы скрыто", not field(pg, "торговать только в будни").locator("input").is_checked() and field(pg, "торговать только в будни").locator(".help").count() == 1 and field(pg, "Закрыть в пятницу за").count() == 0)
