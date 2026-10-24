@@ -383,3 +383,10 @@ def test_time_stats_in_api(client):
         ts = r["time_stats"][which]
         assert len(ts["day"]) == 7 and [s["key"] for s in ts["session"]] == ["asia", "europe", "us", "night"]
         assert sum(b["trades"] for b in ts["day"]) == n and sum(s["trades"] for s in ts["session"]) == n
+
+
+def test_hold_stats_in_api(client):
+    r = client.post("/api/backtest", json={}).json()
+    h = r["hold_stats"]
+    assert len(h["buckets"]) == 7 and sum(b["trades"] for b in h["buckets"]) + h["open"] == r["stats"]["total"]["trades"]
+    assert h["summary"]["all"]["n"] == sum(b["trades"] for b in h["buckets"])
