@@ -581,7 +581,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
             {view === 'main' && <label><input type="checkbox" checked={showPending} onChange={(e) => setShowPending(e.target.checked)} /> ждут подтверждения<Help text={HELP.pending} /></label>}
             {view === 'main' && <label><input type="checkbox" checked={showSkipped} onChange={(e) => setShowSkipped(e.target.checked)} /> пропущенные сигналы<Help text={HELP.skipped} /></label>}
             <span className="legend">
-              <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="neg">LIQ</b> <b className="muted">{view === 'top' ? 'TIME' : 'OPEN'}</b>
+              <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="neg">LIQ</b> <b className="muted">WKND</b> <b className="muted">{view === 'top' ? 'TIME' : 'OPEN'}</b>
             </span>
             {result?.trend?.enabled && view === 'main' && <span className="chip">тренд: отсечено {result.trend.blocked} из {result.trend.confirmed} сигналов</span>}
             {effTf?.truncated && <span className="chip warn">окно слишком широкое для {tfLabel(effTf.tf)} — показана последняя часть, приблизьте или возьмите ТФ крупнее</span>}

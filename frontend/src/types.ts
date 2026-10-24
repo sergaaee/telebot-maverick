@@ -59,6 +59,9 @@ export interface Params {
   /** размер добора, % депозита */
   pyramid_pct: number;
   pyramid_gap_h: number;
+  /** вход только с открытия Токио в понедельник; позиция, оставшаяся открытой, закрывается к закрытию Нью-Йорка в пятницу (на столько минут раньше) */
+  weekdays_only: boolean;
+  friday_close_before_min: number;
   /** плечо доборов; null — как у первой ноги */
   pyramid_leverage: number | null;
   /** моделировать ликвидацию: касание цены ликвидации закрывает ногу с потерей всей маржи; поддерживающая маржа — % объёма */
@@ -128,7 +131,7 @@ export interface AppConfig {
   data: DataInfo;
 }
 
-export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME' | 'LIQ';
+export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME' | 'LIQ' | 'WKND';
 
 /** Частичное или финальное закрытие: метка TP1..TP3 / SL / BE / REV / OPEN, доля от исходной позиции (0..1). */
 export interface Fill {
@@ -206,6 +209,19 @@ export interface PendingSignal {
   add?: boolean;
 }
 
+/** Исходы сделок отдельно для будней и выходных (по моменту выхода); entered — число входов по моменту входа. */
+export interface WeekdayBucket {
+  trades: number;
+  reasons: Record<'TP' | 'BE' | 'SL' | 'REV' | 'LIQ' | 'WKND' | 'OPEN', number>;
+  pnl_usd: number;
+  wins: number;
+}
+export interface WeekdaySplit {
+  weekday: WeekdayBucket;
+  weekend: WeekdayBucket;
+  entered: { weekday: number; weekend: number };
+}
+
 export interface Stats {
   trades: number;
   tp: number;
@@ -240,6 +256,8 @@ export interface Stats {
   min_equity_usd?: number;
   /** закрыто ликвидацией */
   liq?: number;
+  /** закрыто в пятницу к концу торговой недели */
+  wknd?: number;
   /** сколько сделок дошли до 1-го / 2-го / 3-го тейка */
   tp_reach: number[];
 }
@@ -255,6 +273,7 @@ export interface BacktestResult {
   signals: Signal[];
   signals_truncated: boolean;
   skipped_reasons: Record<string, number>;
+  weekday_split: WeekdaySplit;
   pending: PendingSignal[];
   /** что ждёт подтверждения по последнему отчёту прямо сейчас */
   ready_now: PendingSignal[];

@@ -61,7 +61,7 @@ def stats_block(stats, params, rng=None, title="📈 <b>Статистика к�
         + (f" (с открытыми позициями <b>{pct(t['max_dd_real_pct'], 1, sign=False)}</b>)" if t.get("max_dd_real_pct") is not None else "")
         + f" · Sharpe <b>{sharpe}</b>",
         f"Средняя сделка {pct(t['avg_pct'], 3)} · ср. плюс/минус {usd(t['avg_win_usd'])} / {usd(t['avg_loss_usd'])}",
-        f"Серия убытков до {t['max_loss_streak']} · TP {t['tp']} · SL {t['sl']} · БУ {t['be']}" + (f" · ликвидаций {t['liq']}" if t.get("liq") else ""),
+        f"Серия убытков до {t['max_loss_streak']} · TP {t['tp']} · SL {t['sl']} · БУ {t['be']}" + (f" · ликвидаций {t['liq']}" if t.get("liq") else "") + (f" · закрыто в пятницу {t['wknd']}" if t.get("wknd") else ""),
     ]
     if t.get("adds"):
         lines.append(f"Позиций {t['positions']} · доборов {t['adds']} (сделок считается по ногам)")
@@ -102,6 +102,8 @@ def config_summary(cfg, result=None):
         bits.append(f"пауза между сигналами {p['signal_gap_h']:g} ч")
     if p.get("sl_hold_strong"):
         bits.append("SL после остывания метрик")
+    if p.get("weekdays_only"):
+        bits.append("только будни (пн Токио → пт Нью-Йорк)")
     if p.get("liquidation_sim"):
         bits.append(f"ликвидация {p.get('maint_margin_pct', 0.5):g}%")
     if p.get("pyramid_enabled") and p.get("pyramid_leverage"):
@@ -151,7 +153,7 @@ def signal_message(cfg, result, sig, report, plan, entry_price, top, source_labe
     return "\n\n".join(blocks)
 
 
-FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>", "LIQ": "💥 <b>ЛИКВИДАЦИЯ</b>"}
+FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>", "LIQ": "💥 <b>ЛИКВИДАЦИЯ</b>", "WKND": "📅 <b>Закрытие к концу недели (пятница, закрытие Нью-Йорка)</b>"}
 
 
 def fill_message(cfg, result, ev, source_label):

@@ -3,7 +3,7 @@ import os
 import time
 
 from app import service
-from app.core import backtest, topcoins
+from app.core import backtest, topcoins, tradingweek
 from app.schemas import BacktestParams
 from app.service import ParamError
 
@@ -11,7 +11,7 @@ from app.service import ParamError
 # Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
 # чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
 LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False, "pyramid_move_pct": 0.0, "pyramid_move_dir": "any",
-              "pyramid_leverage": None, "liquidation_sim": False,
+              "pyramid_leverage": None, "liquidation_sim": False, "weekdays_only": False, "friday_close_before_min": 0.0,
               "global_min": None, "short_global_max": None}
 
 
@@ -148,6 +148,12 @@ class Engine:
                     out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid")),
                                 **{k: t[k] for k in ("avg_entry", "avg_tps", "avg_sl") if k in t}})
                 continue
+            if p.get("weekdays_only"):                                # режим «только будни»: вход вне торгового окна пропускается, а позиция прошлой недели к пятнице закрыта
+                bm = p.get("friday_close_before_min") or 0
+                if not tradingweek.in_window(s["ts"], bm):
+                    continue
+                if open_side and last_open_ts is not None and s["ts"] >= tradingweek.window_close(last_open_ts, bm):
+                    open_side, adds = None, 0
             if open_side == s["side"]:                               # позиция открыта в ту же сторону: добор или пропуск
                 if adds >= max_adds or (gap_pyr and last_leg_ts is not None and s["ts"] < last_leg_ts + gap_pyr):
                     continue

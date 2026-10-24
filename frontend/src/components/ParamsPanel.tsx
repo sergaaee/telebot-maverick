@@ -310,6 +310,11 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
             <option value="global">только Global</option>
           </select>
         </label>
+        <label className="field check">
+          <input type="checkbox" checked={p.weekdays_only} onChange={(e) => set('weekdays_only', e.target.checked)} />
+          <Label text="торговать только в будни" help="weekdays_only" />
+        </label>
+        {p.weekdays_only && <Num label="Закрыть в пятницу за" help="friday_close_before_min" value={p.friday_close_before_min} step={5} suffix="мин" onChange={(v) => set('friday_close_before_min', Math.max(0, v ?? 0))} />}
         <Num label="Подтверждение, отчётов" help="confirm" value={p.confirm} step={1} onChange={(v) => set('confirm', Math.max(1, Math.round(v ?? 1)))} />
       </Section>
 
