@@ -214,3 +214,15 @@ main[hidden] { display: none; }
 .mon-nav a:hover { color: var(--text); } .mon-nav a.on { color: var(--text); background: var(--panel-2); border-color: var(--line); }
 a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
 .mon-app .monitor { padding: 0; overflow: visible; }
+/* список стратегий мониторинга */
+.mon-list { display: flex; flex-direction: column; gap: 6px; }
+.mon-row { display: grid; grid-template-columns: 14px minmax(160px, 1.3fr) minmax(220px, 2fr) auto auto; gap: 10px; align-items: center; }
+.mon-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); } .mon-dot.open { background: var(--pos); } .mon-dot.ready { background: #a78bfa; }
+.mon-dot.bad { background: var(--neg); } .mon-dot.paused { background: var(--warn); } .mon-dot.wait { background: #6ea0ff; }
+.mon-btns { display: inline-flex; gap: 6px; } .mon-btns .ghost { padding: 2px 10px; font-size: 12px; white-space: nowrap; }
+.mon-details { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.mon-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .mon-actions .ghost { padding: 2px 10px; font-size: 12px; }
+.mon-tabs { align-self: flex-start; } .mon-pager { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+.mon-cards { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); } .mon-cards .card:first-child { grid-column: auto; } .mon-cards .card:first-child .card-value { font-size: 15px; }
+.mon-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 2px 18px; font-size: 12px; }
+@media (max-width: 900px) { .mon-row { grid-template-columns: 14px 1fr; } .mon-row > * { min-width: 0; } .mon-auto, .mon-btns { grid-column: 2; margin-left: 0; } }

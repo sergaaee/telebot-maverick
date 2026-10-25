@@ -494,11 +494,35 @@ export interface MonitorLeg {
   metrics_at_entry: { dg: number | null; dl: number | null; ds: number | null };
 }
 
+export interface MonitorPositionSummary {
+  side: 'long' | 'short';
+  opened_ts: number;
+  hold_h: number;
+  notional: number;
+  margin: number;
+  avg_entry: number;
+  pnl_usd: number;
+  pnl_pct_deposit: number | null;
+  pnl_pct_margin: number | null;
+  deadline_ts: number | null;
+  legs_n?: number;
+  /** цена уже за оценочной ценой ликвидации */
+  danger?: boolean;
+  /** только в подробностях */
+  legs?: MonitorLeg[];
+}
+
+/** Стратегия (конфиг бота) в мониторинге. В списке — краткий вид, в подробностях (detail) — ещё статистика, история, параметры и журнал. */
 export interface MonitorEntry {
   name: string;
+  title?: string;
   config_id: number | null;
   symbol: string | null;
   source?: string;
+  tf?: string;
+  baseline?: boolean;
+  alerts?: number;
+  created?: number;
   auto: { open: boolean; manage: boolean } | null;
   paused: boolean;
   error?: string | null;
@@ -508,19 +532,11 @@ export interface MonitorEntry {
   ready_now?: PendingSignal[];
   recent?: { side: 'long' | 'short'; entry_ts: number; exit_ts: number; reason: Reason; pnl_usd: number; pnl_pct: number; hold_h: number }[];
   settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side };
-  position: null | {
-    side: 'long' | 'short';
-    opened_ts: number;
-    hold_h: number;
-    legs: MonitorLeg[];
-    notional: number;
-    margin: number;
-    avg_entry: number;
-    pnl_usd: number;
-    pnl_pct_deposit: number | null;
-    pnl_pct_margin: number | null;
-    deadline_ts: number | null;
-  };
+  position: MonitorPositionSummary | null;
+  stats?: Record<string, number | null>;
+  params?: Record<string, unknown>;
+  history?: { n: number; side: 'long' | 'short'; leg: number; entry_ts: number; entry: number; exit_ts: number; exit: number; reason: Reason; tp_hits: number; pnl_pct: number; pnl_usd: number; hold_h: number; fills: Fill[] }[];
+  log?: AutoLogItem[];
 }
 
 export interface AutoLogItem {
@@ -534,9 +550,23 @@ export interface AutoLogItem {
   details: Record<string, unknown>;
 }
 
+export interface ExchangeInfo {
+  name: string;
+  real: boolean;
+  testnet: boolean;
+  min_notional: number;
+}
+
+/** Реальные позиции и баланс на бирже (адаптер hyperliquid). */
+export interface ExchangeState {
+  exchange: ExchangeInfo;
+  positions: { symbol: string; side: 'long' | 'short'; size: number; entry: number | null; mark: number | null; liq: number | null; pnl_usd: number | null; leverage: number | null; margin: number | null; notional: number | null }[];
+  account: { equity?: number | null; free?: number | null; used?: number | null };
+}
+
 export interface MonitorResponse {
   entries: MonitorEntry[];
   log: AutoLogItem[];
-  exchange: { name: string; real: boolean };
+  exchange: ExchangeInfo;
   data: { source: string; now: number };
 }

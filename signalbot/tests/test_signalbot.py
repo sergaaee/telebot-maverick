@@ -809,8 +809,8 @@ def test_auto_only_open_does_not_manage(env):
 
 
 def test_auto_adapter_errors_are_logged_not_raised(env):
-    from app.trading import ArcusAdapter
-    env.adapter = ArcusAdapter()                                                       # коннектор не реализован — ошибка в журнале, цикл бота жив
+    from app.trading import HyperliquidAdapter
+    env.adapter = HyperliquidAdapter(wallet="", key="")                                 # ключей нет — ошибка в журнале, цикл бота жив
     env.handle_update(msg(json.dumps(UI_CONFIG)))
     env.cycle()
     cfg = env.db.list_configs(env.alice["id"])[0]
@@ -820,5 +820,5 @@ def test_auto_adapter_errors_are_logged_not_raised(env):
     env.now["t"] = (start + 3 * H // 2) / 1000
     env.cycle()
     log = env.db.list_auto_log(env.alice["id"])
-    assert log and log[0]["status"] == "error" and "Arcus" in log[0]["details"]["error"]
+    assert log and log[0]["status"] == "error" and "HL_WALLET_ADDRESS" in log[0]["details"]["error"]
     assert any("ЛОНГ" in t for t in env.tg.texts(CHAT))                                # уведомление пришло несмотря на ошибку исполнения

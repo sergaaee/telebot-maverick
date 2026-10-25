@@ -1,4 +1,4 @@
-import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorResponse, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
+import type { ExchangeInfo, ExchangeState, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -125,8 +125,20 @@ export const saveRun = (name: string, params: Params, tf: TfMode, summary: RunSu
 
 export const deleteRun = (id: number) => request<{ ok: boolean }>(`/api/runs/${id}`, { method: 'DELETE' });
 
-export const getMonitor = (runs = false) =>
-  request<MonitorResponse>('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runs }) });
+export const getMonitor = () =>
+  request<MonitorResponse>('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+
+export const getMonitorDetail = (id: number) => request<MonitorEntry>(`/api/monitor/configs/${id}`);
+
+export const pauseConfig = (id: number, paused: boolean) =>
+  request<{ paused: boolean }>(`/api/monitor/configs/${id}/pause`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused }) });
+
+export const renameConfig = (id: number, name: string) =>
+  request<{ name: string }>(`/api/monitor/configs/${id}/name`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+
+export const deleteConfig = (id: number) => request<{ ok: boolean }>(`/api/monitor/configs/${id}`, { method: 'DELETE' });
+
+export const exportBotConfig = (id: number) => request<Record<string, unknown>>(`/api/monitor/configs/${id}/export`);
 
 export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean }) =>
   request<{ auto: { open: boolean; manage: boolean } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
@@ -134,6 +146,11 @@ export const setAuto = (configId: number, patch: { open?: boolean; manage?: bool
 export const autoOffAll = () => request<{ disabled: number }>('/api/monitor/auto/off', { method: 'POST' });
 
 export const openTestPosition = (side: 'long' | 'short') =>
-  request<{ status: string; result: Record<string, unknown>; exchange: { name: string; real: boolean } }>('/api/trading/test-position', {
+  request<{ status: string; result: Record<string, unknown>; margin: number; leverage: number; notional: number; exchange: ExchangeInfo }>('/api/trading/test-position', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true, side, usd: 1 }),
   });
+
+export const closeTestPosition = () =>
+  request<{ status: string; result: Record<string, unknown>; exchange: ExchangeInfo }>('/api/trading/test-position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+
+export const getExchangeState = () => request<ExchangeState>('/api/exchange/positions');

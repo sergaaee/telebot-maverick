@@ -14,7 +14,7 @@ _cache, _lock = {}, threading.Lock()
 TTL = 20.0                                              # секунд: страница опрашивает раз в ~30 с, повторные расчёты одинаковых параметров не нужны
 
 
-def _view(res, price, latest, candle_ts, name, config_id, auto, paused):
+def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=False):
     p = res["params"]
     legs = sorted([t for t in res["trades"] if t["reason"] == "OPEN"], key=lambda t: (t["entry_ts"], t.get("leg", 1)))
     out = {"name": name, "config_id": config_id, "symbol": res["symbol"], "source": res["source"]["label"], "auto": auto, "paused": paused,
@@ -24,6 +24,16 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused):
            "settings": {"sl_pct": p["sl_pct"], "tps": p["tps"], "be_after_tp1": p["be_after_tp1"], "leverage": p["leverage"], "pyramid_leverage": p.get("pyramid_leverage"),
                         "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
                         "weekdays_only": p.get("weekdays_only", False), "side": p["side"]}}
+    if detail:                                             # подробности: статистика, вся история закрытых сделок (последние 300) и полные параметры
+        t = res["stats"]["total"]
+        keys = ("trades", "winrate", "profit_factor", "total_usd", "return_pct", "sharpe", "max_dd_usd", "max_dd_pct", "max_dd_real_usd", "max_dd_real_pct", "avg_pct",
+                "tp", "sl", "be", "rev", "liq", "wknd", "max_loss_streak", "exposure_pct", "positions", "adds")
+        out["stats"] = {k: t.get(k) for k in keys}
+        out["range"] = res["range"]
+        out["params"] = p
+        out["history"] = [{"n": i, "side": x["side"], "leg": x.get("leg", 1), "entry_ts": x["entry_ts"], "entry": x["entry"], "exit_ts": x["exit_ts"], "exit": x["exit_avg"],
+                           "reason": x["reason"], "tp_hits": x["tp_hits"], "pnl_pct": x["pnl_pct"], "pnl_usd": x["pnl_usd"], "hold_h": x["hold_h"],
+                           "fills": x["fills"]} for i, x in reversed(list(enumerate(res["trades"], 1))) if x["reason"] != "OPEN"][:300]
     if not legs:
         return out
     side = legs[0]["side"]
@@ -60,7 +70,18 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused):
     return out
 
 
-def evaluate_entry(store, defaults, name, config_id, params, auto=None, paused=False, available_fn=None):
+def compact(view):
+    """Краткий вид для списка стратегий: без ног, исполнений и истории (они — в подробностях)."""
+    v = dict(view)
+    v.pop("recent", None)
+    pos = v.get("position")
+    if pos:
+        v["position"] = {**{k: pos[k] for k in ("side", "opened_ts", "hold_h", "notional", "margin", "avg_entry", "pnl_usd", "pnl_pct_deposit", "pnl_pct_margin", "deadline_ts")}, "legs_n": len(pos["legs"]),
+                         "danger": any(l["liq_price"] is not None and v.get("price") and ((v["price"] <= l["liq_price"]) if pos["side"] == "long" else (v["price"] >= l["liq_price"])) for l in pos["legs"])}
+    return v
+
+
+def evaluate_entry(store, defaults, name, config_id, params, auto=None, paused=False, available_fn=None, detail=False):
     """Один блок мониторинга; ошибка расчёта превращается в поле error (одна сломанная стратегия не роняет страницу)."""
     key = json.dumps(params, sort_keys=True, default=str)
     now = time.monotonic()
@@ -93,4 +114,5 @@ def evaluate_entry(store, defaults, name, config_id, params, auto=None, paused=F
         latest = store.latest(res["params"]["source"])
     except (KeyError, FileNotFoundError):
         latest = None
-    return _view(res, price, latest, candle_ts, name, config_id, auto, paused)
+    v = _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail)
+    return v if detail else compact(v)

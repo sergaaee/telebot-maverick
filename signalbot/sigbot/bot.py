@@ -432,7 +432,7 @@ class SignalService:
         notional, margin = self.engine.order_size(res, add)
         self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                  lambda: self.adapter.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
-                                                  plan["sl"] if plan else None, [l["price"] for l in plan["levels"]] if plan else None),
+                                                  plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
                  {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1)})
 
     def _auto_fill(self, cfg, res, ev):
