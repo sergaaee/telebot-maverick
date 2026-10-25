@@ -148,8 +148,11 @@ def test_verify_hyperliquid_accepts_only_registered_api_wallet_keys():
     for bad_key in ("", "0x12", "xyz" * 22):
         with pytest.raises(ValueError, match="Ключ"):
             verify_hyperliquid(WALLET, bad_key, True, exchange=VerifyEx())
-    with pytest.raises(ValueError, match="ОСНОВНОГО кошелька"):                                                              # ключ основного кошелька (может выводить средства) не принимаем
-        verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(agent=WALLET))
+    with pytest.raises(ValueError, match="выводить средства"):                                                               # ключ основного кошелька (может выводить средства) не принимаем
+        verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(agent=WALLET, role={"role": "missing"}))
+    other = "0x" + "ee" * 20
+    with pytest.raises(ValueError, match="адрес самого API-кошелька"):                                                       # прислали адрес агента вместо основного
+        verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(agent=WALLET, role={"role": "agent", "data": {"user": other}}))
     with pytest.raises(ValueError, match="не принадлежит API-кошельку"):
         verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(role={"role": "missing"}))
     with pytest.raises(ValueError, match="не принадлежит API-кошельку"):                                                      # агент зарегистрирован, но на ЧУЖОЙ адрес
