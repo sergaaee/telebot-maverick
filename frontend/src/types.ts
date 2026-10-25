@@ -205,6 +205,8 @@ export interface PendingSignal {
   side: 'long' | 'short';
   waiting: ('cool' | 'liq' | 'trend')[];
   lines: string[];
+  /** первый отчёт непрерывного ожидания (на графике отмечается только он и самый свежий) */
+  run_start?: boolean;
   /** только в ready_now: позиция этой стороны уже открыта, ждём добор */
   add?: boolean;
 }

@@ -390,3 +390,10 @@ def test_hold_stats_in_api(client):
     h = r["hold_stats"]
     assert len(h["buckets"]) == 7 and sum(b["trades"] for b in h["buckets"]) + h["open"] == r["stats"]["total"]["trades"]
     assert h["summary"]["all"]["n"] == sum(b["trades"] for b in h["buckets"])
+
+
+def test_pending_run_start_flag(client):
+    r = client.post("/api/backtest", json={"side": "long", "cool_drop": 5}).json()
+    p = r["pending"]
+    assert p and p[0]["run_start"] is True
+    assert sum(1 for x in p if x["run_start"]) < len(p) or len(p) == 1                          # серия подряд идущих отчётов — одна «точка начала»
