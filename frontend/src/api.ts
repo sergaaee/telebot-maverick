@@ -125,8 +125,8 @@ export const saveRun = (name: string, params: Params, tf: TfMode, summary: RunSu
 
 export const deleteRun = (id: number) => request<{ ok: boolean }>(`/api/runs/${id}`, { method: 'DELETE' });
 
-export const getMonitor = (params: Params | null) =>
-  request<MonitorResponse>('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ params }) });
+export const getMonitor = (runs = false) =>
+  request<MonitorResponse>('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runs }) });
 
 export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean }) =>
   request<{ auto: { open: boolean; manage: boolean } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });

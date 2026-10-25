@@ -261,8 +261,8 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     a, b = client(app), client(app)
     assert login(a, "alice", "alice-password").status_code == 200 and login(b, "bob", "bob-password-1").status_code == 200
     assert client(app).post("/api/monitor", json={}, headers=H_).status_code == 401
-    r = a.post("/api/monitor", json={"params": {"side": "long", "confirm": 2}}, headers=H_).json()
-    assert [e["name"] for e in r["entries"]][:2] == ["#1 Открытая", "#2 Сломанная"] and r["entries"][2]["name"] == "Текущие параметры интерфейса"
+    r = a.post("/api/monitor", json={}, headers=H_).json()
+    assert [e["name"] for e in r["entries"]] == ["#1 Открытая", "#2 Сломанная"]
     e = r["entries"][0]
     pos = e["position"]
     assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False}                 # автомод выключен, пока явно не включён
@@ -273,6 +273,10 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     assert r["entries"][1]["error"] and r["entries"][1]["position"] is None                                                   # сломанный конфиг не роняет страницу
     assert r["exchange"] == {"name": "dry-run", "real": False}
     assert b.post("/api/monitor", json={}, headers=H_).json()["entries"] == []                                              # у другого пользователя своих конфигов нет
+    db.save_run(alice["id"], "Мой прогон", _open_cfg(), "auto", {"trades": 1})
+    runs_r = a.post("/api/monitor", json={"runs": True}, headers=H_).json()["entries"]
+    assert [x["name"] for x in runs_r][-1] == "Прогон: Мой прогон" and runs_r[-1]["config_id"] is None and runs_r[-1]["auto"] is None and runs_r[-1]["position"]      # прогон — без автомода
+    assert all(not x["name"].startswith("Прогон") for x in a.post("/api/monitor", json={}, headers=H_).json()["entries"])                                          # по умолчанию только конфиги бота
     # автомод
     cid = e["config_id"]
     s = a.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).json()

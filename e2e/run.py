@@ -747,7 +747,10 @@ def scenario(pg, base, state_url):
     check("старый конфиг без этих полей: режим «только будни» выключен", not field(pg, "торговать только в будни").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() == 0)
 
     # --- страница мониторинга позиций, автомод и тестовая позиция $1
-    pg.get_by_test_id("nav-monitor").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=10000)
+    pg.wait_for_timeout(1500)                                         # состояние интерфейса сохраняется с задержкой 600 мс
+    pg.get_by_test_id("nav-monitor").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=15000)
+    check("мониторинг — отдельная страница (свой адрес, своя шапка), бэктест на ней не загружен", pg.url.endswith("/monitor.html") and pg.locator("aside.params").count() == 0 and pg.locator("table.trades tbody tr").count() == 0
+          and "мониторинг" in pg.locator(".mon-header h1").inner_text() and pg.get_by_test_id("nav-backtest").count() == 1 and pg.title() == "Maverick · мониторинг", pg.url)
     pg.locator("[data-testid=mon-card]").first.wait_for(timeout=30000)
     check("мониторинг: баннер честно говорит, что это расчёт и симуляция", "расчёт" in pg.get_by_test_id("mon-banner").inner_text() and "симуляция" in pg.get_by_test_id("mon-banner").inner_text())
     card = pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест")
@@ -770,8 +773,8 @@ def scenario(pg, base, state_url):
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_role("button", name="⛔ Выключить автомод везде").click(); pg.wait_for_timeout(1500)
     check("«Выключить автомод везде» выключает всё", not pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_checked())
-    pg.get_by_role("button", name="← К бэктесту").click(); pg.wait_for_timeout(500)
-    check("возврат к бэктесту", pg.locator("aside.params").is_visible() and pg.get_by_test_id("monitor-page").count() == 0)
+    pg.get_by_test_id("nav-backtest").click(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(500)
+    check("возврат к бэктесту: параметры на месте, мониторинг не загружен", pg.locator("aside.params").is_visible() and pg.get_by_test_id("monitor-page").count() == 0 and not pg.url.endswith("monitor.html"))
 
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля

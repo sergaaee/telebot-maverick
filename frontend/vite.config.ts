@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
   const target = env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000';
   return {
     plugins: [react()],
+    build: { rollupOptions: { input: { main: 'index.html', monitor: 'monitor.html' } } },
     server: { port: Number(env.VITE_PORT) || 5173, proxy: { '/api': { target, changeOrigin: true } } },
     preview: { port: Number(env.VITE_PORT) || 5173, proxy: { '/api': { target, changeOrigin: true } } },
   };

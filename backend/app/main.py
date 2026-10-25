@@ -314,13 +314,12 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @app.post("/api/monitor")
     def monitor(request: Request, body: dict = Body(default={})):
-        """Открытые позиции по конфигам бота пользователя (и, если передан, по текущим параметрам интерфейса) со всеми уровнями и цифрами.
+        """Открытые позиции по конфигам бота пользователя (и, если runs=true, по его сохранённым прогонам) со всеми уровнями и цифрами.
         Это расчёт стратегии по свечам, а не позиции на бирже."""
         uid = request.state.user["id"]
         entries = [evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn) for c in db.list_configs(uid)]
-        ui = body.get("params")
-        if isinstance(ui, dict):
-            entries.append(evaluate_entry(store, s.defaults, "Текущие параметры интерфейса", None, ui, None, False, available_fn))
+        if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
+            entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
         return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": {"name": adapter.name, "real": adapter.real},
                 "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
 
