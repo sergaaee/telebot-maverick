@@ -1,6 +1,6 @@
 import pytest
 
-from app.trading import DryRunAdapter, ExchangeError, HyperliquidAdapter, NotConfigured, get_adapter
+from app.trading import DryRunAdapter, ExchangeError, HyperliquidAdapter, NotConfigured, adapter_for, mask_address, verify_hyperliquid
 
 
 class FakeEx:
@@ -101,24 +101,91 @@ def test_set_stop_replaces_only_trigger_stops_and_close_cancels_leftovers():
     assert none["status"] == "skipped" and HyperliquidAdapter(exchange=FakeEx()).set_stop("BTC/USDT:USDT", "long", 1.0)["status"] == "skipped"
 
 
-def test_positions_account_and_configuration(monkeypatch):
+def test_positions_account_orders_fills_and_configuration():
     fx = FakeEx(position={"contracts": -0.5, "side": "short", "symbol": "BTC/USDC:USDC", "entryPrice": 100.0, "markPrice": 99.0, "liquidationPrice": 150.0, "unrealizedPnl": 0.5,
-                          "leverage": 5, "initialMargin": 10.0, "notional": 49.5})
+                          "leverage": 5, "initialMargin": 10.0, "notional": 49.5},
+                open_orders=[{"symbol": "BTC/USDC:USDC", "side": "buy", "type": "limit", "amount": 0.5, "price": 95.0, "reduceOnly": True, "timestamp": 1}])
+    fx.fetch_my_trades = lambda sym=None, since=None, limit=None: [{"symbol": "BTC/USDC:USDC", "side": "sell", "amount": 0.5, "price": 100.0, "fee": {"cost": 0.01}, "info": {"closedPnl": "1.5"}, "timestamp": 5},
+                                                                  {"symbol": "BTC/USDC:USDC", "side": "buy", "amount": 0.5, "price": 99.0, "fee": {"cost": 0.01}, "info": {}, "timestamp": 9}]
     a = HyperliquidAdapter(exchange=fx)
-    p = a.positions()
-    assert p == [{"symbol": "BTC/USDC:USDC", "side": "short", "size": 0.5, "entry": 100.0, "mark": 99.0, "liq": 150.0, "pnl_usd": 0.5, "leverage": 5, "margin": 10.0, "notional": 49.5}]
+    assert a.positions() == [{"symbol": "BTC/USDC:USDC", "side": "short", "size": 0.5, "entry": 100.0, "mark": 99.0, "liq": 150.0, "pnl_usd": 0.5, "leverage": 5, "margin": 10.0, "notional": 49.5}]
     assert a.account() == {"equity": 123.0, "free": 100.0, "used": 23.0}
-    with pytest.raises(NotConfigured, match="HL_PRIVATE_KEY"):
+    assert a.open_orders() == [{"symbol": "BTC/USDC:USDC", "side": "buy", "type": "limit", "amount": 0.5, "price": 95.0, "trigger": None, "reduce_only": True, "ts": 1}]
+    f = a.fills(20)
+    assert [x["ts"] for x in f] == [9, 5] and f[1]["pnl"] == "1.5" and f[0]["fee"] == 0.01                                   # последние сверху
+    with pytest.raises(NotConfigured, match="/hl"):
         HyperliquidAdapter(wallet="0xabc", key="").positions()
-    monkeypatch.delenv("HL_TESTNET", raising=False)
-    assert HyperliquidAdapter(wallet="a", key="b").testnet is True                                       # по умолчанию тестовая сеть
-    monkeypatch.setenv("HL_TESTNET", "false")
-    assert HyperliquidAdapter(wallet="a", key="b").testnet is False
-    monkeypatch.setenv("TRADE_EXCHANGE", "hyperliquid")
-    assert isinstance(get_adapter(), HyperliquidAdapter) and isinstance(get_adapter(""), DryRunAdapter)
+    assert HyperliquidAdapter(wallet="a", key="b").testnet is True                                                           # тестовая сеть, если не сказано иное
     d = HyperliquidAdapter(wallet="a", key="b", testnet=True).describe()
-    assert d == {"name": "hyperliquid", "real": True, "testnet": True, "min_notional": 10.0}
-    assert DryRunAdapter().describe()["real"] is False
+    assert d == {"name": "hyperliquid", "real": True, "testnet": True, "min_notional": 10.0} and DryRunAdapter().describe()["real"] is False
+    assert DryRunAdapter().open_orders() == [] and DryRunAdapter().fills() == []
+    assert mask_address("0x1234567890abcdef1234567890abcdef12345678") == "0x1234…5678" and mask_address(None) == ""
+
+
+WALLET = "0x" + "ab" * 20
+AGENT_KEY = "0x" + "11" * 32
+
+
+class VerifyEx(FakeEx):
+    def __init__(self, agent="0x" + "cd" * 20, role=None, **kw):
+        super().__init__(**kw)
+        self.agent, self.role = agent, role
+
+    def eth_get_address_from_private_key(self, key):
+        return self.agent
+
+    def public_post_info(self, req):
+        self.calls.append(("info", req))
+        return self.role if self.role is not None else {"role": "agent", "data": {"user": WALLET}}
+
+
+def test_verify_hyperliquid_accepts_only_registered_api_wallet_keys():
+    r = verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx())
+    assert r["agent"] == "0x" + "cd" * 20 and r["account"]["equity"] == 123.0
+    for bad_wallet in ("", "0x123", "ab" * 20, "0x" + "zz" * 20):
+        with pytest.raises(ValueError, match="Адрес кошелька"):
+            verify_hyperliquid(bad_wallet, AGENT_KEY, True, exchange=VerifyEx())
+    for bad_key in ("", "0x12", "xyz" * 22):
+        with pytest.raises(ValueError, match="Ключ"):
+            verify_hyperliquid(WALLET, bad_key, True, exchange=VerifyEx())
+    with pytest.raises(ValueError, match="ОСНОВНОГО кошелька"):                                                              # ключ основного кошелька (может выводить средства) не принимаем
+        verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(agent=WALLET))
+    with pytest.raises(ValueError, match="не принадлежит API-кошельку"):
+        verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(role={"role": "missing"}))
+    with pytest.raises(ValueError, match="не принадлежит API-кошельку"):                                                      # агент зарегистрирован, но на ЧУЖОЙ адрес
+        verify_hyperliquid(WALLET, AGENT_KEY, True, exchange=VerifyEx(role={"role": "agent", "data": {"user": "0x" + "ee" * 20}}))
+    ok = verify_hyperliquid(WALLET, "11" * 32, True, exchange=VerifyEx())                                                    # ключ без 0x тоже принимается
+    assert ok["agent"]
+
+
+def test_adapter_for_is_per_user_and_encrypted_account_roundtrip(tmp_path, monkeypatch):
+    from app.db import Database
+    from app.secrets_store import decrypt, encrypt
+    monkeypatch.setenv("SECRET_KEY", "")                                                                                     # ключ-файл рядом с базой
+    monkeypatch.delenv("TRADE_EXCHANGE", raising=False)
+    db = Database(tmp_path / "u.db")
+    a, b = db.add_user("alice", "alice-password"), db.add_user("bob", "bob-password-1")
+    assert isinstance(adapter_for(db, a["id"]), DryRunAdapter)
+    enc = encrypt(AGENT_KEY, db.path)
+    assert AGENT_KEY not in enc and decrypt(enc, db.path) == AGENT_KEY and (tmp_path / "secret.key").exists()
+    assert oct((tmp_path / "secret.key").stat().st_mode & 0o777) == "0o600"
+    db.set_exchange_account(a["id"], "hyperliquid", WALLET, enc, True, "0x" + "cd" * 20)
+    ad = adapter_for(db, a["id"])
+    assert isinstance(ad, HyperliquidAdapter) and ad.wallet == WALLET and ad.key == AGENT_KEY and ad.testnet is True
+    assert adapter_for(db, a["id"]) is ad                                                                                    # кэш
+    assert isinstance(adapter_for(db, b["id"]), DryRunAdapter)                                                               # у другого пользователя счёта нет
+    raw = (tmp_path / "u.db").read_bytes()
+    assert AGENT_KEY.encode() not in raw and b"1111111111111111" not in raw                                                  # в файле базы ключа в открытом виде нет
+    monkeypatch.setenv("TRADE_EXCHANGE", "dry-run")
+    assert isinstance(adapter_for(db, a["id"]), DryRunAdapter)                                                               # принудительная симуляция
+    monkeypatch.delenv("TRADE_EXCHANGE")
+    (tmp_path / "secret.key").unlink()                                                                                       # мастер-ключ потерян: адаптер есть, но выдаёт «подключите заново»
+    from app.trading import forget_adapter
+    forget_adapter(a["id"])
+    broken = adapter_for(db, a["id"])
+    with pytest.raises(NotConfigured):
+        broken.positions()
+    assert db.delete_exchange_account(a["id"]) and db.get_exchange_account(a["id"]) is None
 
 
 def test_exchange_failures_are_wrapped():

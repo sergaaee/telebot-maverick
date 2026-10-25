@@ -1,4 +1,4 @@
-import type { ExchangeInfo, ExchangeState, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
+import type { ExchangeAccount, ExchangeInfo, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -153,4 +153,6 @@ export const openTestPosition = (side: 'long' | 'short') =>
 export const closeTestPosition = () =>
   request<{ status: string; result: Record<string, unknown>; exchange: ExchangeInfo }>('/api/trading/test-position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
 
-export const getExchangeState = () => request<ExchangeState>('/api/exchange/positions');
+export const getExchangeAccount = () => request<ExchangeAccount>('/api/exchange/account');
+
+export const disconnectExchange = () => request<{ removed: boolean }>('/api/exchange/account', { method: 'DELETE' });

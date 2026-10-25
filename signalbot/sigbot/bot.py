@@ -13,9 +13,13 @@ from app.db import DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
-from app.trading import get_adapter
+from app import manage
+from app.secrets_store import SecretError, encrypt
+from app.tradelog import read_tail, trade_error, trade_log
+from app.trading import adapter_for, forget_adapter, mask_address, verify_hyperliquid
 
 from .engine import Cancelled, EvalError, fingerprint
+from .ui import MonitorUI
 from .transport import TelegramError
 
 log = logging.getLogger("signalbot")
@@ -35,19 +39,37 @@ class SignalService:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self.last_cycle = None
-        self.adapter = get_adapter()        # исполнение действий автомода; без настроенной биржи — симуляция (ордера не отправляются)
+        self.ui = MonitorUI(self)
+        self._hl = {}                       # user_id -> шаг подключения Hyperliquid (ждём адрес кошелька / ключ API-кошелька)
 
     # ---------------- отправка ----------------
-    def send(self, chat, text):
+    def send(self, chat, text, keyboard=None):
         try:
-            self.tg.send_message(chat, text)
+            self.tg.send_message(chat, text, keyboard=keyboard) if keyboard else self.tg.send_message(chat, text)
         except TelegramError as e:
             log.warning("не удалось отправить в %s: %s", chat, e)
 
     reply = send
 
     # ---------------- входящие ----------------
+    def adapter_for(self, user_id):
+        """Адаптер биржи пользователя: его подключённый счёт Hyperliquid или симуляция (ордера не отправляются)."""
+        return adapter_for(self.db, user_id)
+
+    def forget(self, cfg_id):
+        self._fp.pop(cfg_id, None)                                  # следующий цикл пересчитает конфиг
+
+    def refresh_live(self):
+        self.ui.refresh_live()
+
     def handle_update(self, upd):
+        cb = upd.get("callback_query")
+        if cb:
+            try:
+                self.ui.handle_callback(cb)
+            except Exception:
+                log.exception("ошибка обработки кнопки")
+            return
         msg = upd.get("message")
         if not msg:
             return
@@ -74,6 +96,8 @@ class SignalService:
         user = self.db.user_by_telegram(from_id)
         if not user:
             self.send(chat, fm.NOT_LINKED)
+            return
+        if self._hl_pending(chat, user, msg, text, cmd):                  # идёт подключение счёта: сообщение — адрес кошелька или ключ
             return
         doc = msg.get("document")
         if doc:
@@ -168,6 +192,105 @@ class SignalService:
         if not c:
             self.send(chat, "Конфиг не найден. /list — список." if ref else "Укажите номер или имя конфига: /list")
         return c
+
+    def cmd_monitor(self, chat, user, arg):
+        """Мониторинг в чате: список стратегий с позициями, карточки, автомод, пауза, live — то же, что страница мониторинга на сайте."""
+        self.ui.open(chat, user, "m")
+
+    cmd_m = cmd_monitor
+
+    def cmd_tradelog(self, chat, user, arg):
+        """Последние записи лога автоторговли по вашему аккаунту (ошибки биржи, решения автомода, запросы/ответы). Полный файл — trading.log рядом с базой."""
+        n = int(arg) if arg.strip().isdigit() else 40
+        rows = read_tail(user["id"], min(max(n, 1), 200), self.db.path)
+        if not rows:
+            self.send(chat, "Лог автоторговли по вашему аккаунту пока пуст.")
+            return
+        self.tg.send_document(chat, "trading-log.jsonl", ("\n".join(rows) + "\n").encode("utf-8"), caption=f"Лог автоторговли: последние {len(rows)} записей (JSON по строке)")
+
+    def cmd_hl(self, chat, user, arg):
+        """Подключение счёта Hyperliquid (адрес кошелька + ключ API-кошелька) и состояние счёта."""
+        self.ui.open(chat, user, "x")
+
+    # ---------------- подключение счёта Hyperliquid ----------------
+    HL_TTL = 600
+
+    def start_hl_connect(self, chat, user, testnet=True):
+        self._hl[user["id"]] = {"step": "wallet", "testnet": bool(testnet), "until": time.time() + self.HL_TTL, "tries": 0}
+        net = "тестовая сеть" if testnet else "БОЕВАЯ сеть"
+        self.tg.send_message(chat, f"🔌 <b>Подключение Hyperliquid</b> ({net})\n\nШаг 1 из 2: пришлите <b>адрес основного кошелька</b> Hyperliquid (0x… и 40 символов) — это счёт, на котором лежат средства.\n\n"
+                                   "Дальше я попрошу <b>ключ API-кошелька</b>: он умеет торговать, но не выводить средства (Hyperliquid → More → API). Ключ ОСНОВНОГО кошелька присылать нельзя — я его не приму.\n"
+                                   "Ваши сообщения с адресом и ключом я удалю из чата сразу после обработки; ключ хранится в базе зашифрованным. Отмена — кнопка ниже или /cancel.",
+                             keyboard=[[("Отмена", "hlx")]])
+
+    def cancel_hl(self, user):
+        return self._hl.pop(user["id"], None) is not None
+
+    def _delete(self, chat, msg):
+        mid = (msg or {}).get("message_id")
+        try:
+            return bool(mid) and bool(self.tg.delete_message(chat, mid))
+        except (TelegramError, AttributeError):
+            return False
+
+    def _hl_pending(self, chat, user, msg, text, cmd):
+        """Обрабатывает сообщение, если ждём данные счёта. True — сообщение съедено сценарием (команды сценарий отменяют)."""
+        st = self._hl.get(user["id"])
+        if not st:
+            return False
+        if time.time() > st["until"]:
+            self._hl.pop(user["id"], None)
+            self.send(chat, "⌛ Время подключения вышло. Начните заново: /hl")
+            return False
+        if cmd:
+            self._hl.pop(user["id"], None)
+            if cmd == "/cancel":
+                self.send(chat, "Подключение счёта отменено.")
+                return True
+            return False
+        tokens = text.split()
+        if not tokens:
+            return True
+        secret_here = len(tokens) >= 2 or st["step"] == "key"
+        deleted = self._delete(chat, msg) if secret_here or st["step"] == "wallet" else False          # ключ в чате не оставляем ни при каких условиях
+        if st["step"] == "wallet" and len(tokens) == 1:
+            wallet = tokens[0]
+            if not wallet.startswith("0x") or len(wallet) != 42:
+                self.send(chat, "Адрес должен быть вида <code>0x…</code> (42 символа). Пришлите ещё раз или нажмите «Отмена».")
+                return True
+            st.update(wallet=wallet, step="key")
+            self.send(chat, "Шаг 2 из 2: пришлите <b>ключ API-кошелька</b> (64 символа, можно с 0x). Сообщение с ключом я удалю сразу.", keyboard=[[("Отмена", "hlx")]])
+            return True
+        wallet, key = (tokens[0], tokens[1]) if len(tokens) >= 2 else (st.get("wallet", ""), tokens[0])
+        st["tries"] += 1
+        try:
+            res = verify_hyperliquid(wallet, key, st["testnet"], user_id=user["id"])
+        except ValueError as e:
+            if st["tries"] >= 5:
+                self._hl.pop(user["id"], None)
+                self.send(chat, f"❌ {esc(str(e))}\n\nСлишком много попыток — подключение отменено. Начните заново: /hl")
+                return True
+            st.update(wallet=wallet, step="key")
+            self.send(chat, f"❌ {esc(str(e))}\n\nПришлите ключ ещё раз (или «Отмена»).", keyboard=[[("Отмена", "hlx")]])
+            return True
+        try:
+            enc = encrypt(key if key.startswith("0x") else "0x" + key, self.db.path)
+        except SecretError as e:
+            self._hl.pop(user["id"], None)
+            self.send(chat, f"⚠️ Не удалось сохранить ключ: {esc(str(e))}")
+            return True
+        self.db.set_exchange_account(user["id"], "hyperliquid", wallet, enc, st["testnet"], res["agent"])
+        forget_adapter(user["id"])
+        self._hl.pop(user["id"], None)
+        self.db.add_auto_log(user["id"], None, "exchange_connected", None, None, "info", {"exchange": "hyperliquid", "testnet": st["testnet"], "wallet": mask_address(wallet)})
+        trade_log("account_connected", user=user["id"], exchange="hyperliquid", testnet=st["testnet"], wallet=wallet, agent=res["agent"], message_deleted=deleted)
+        eq = res["account"].get("equity")
+        self.send(chat, f"✅ <b>Hyperliquid подключён</b> ({'тестовая сеть' if st['testnet'] else '<b>БОЕВАЯ сеть</b>'})\nКошелёк <code>{mask_address(wallet)}</code> · API-кошелёк <code>{mask_address(res['agent'])}</code>"
+                        + (f"\nКапитал: {fm.num(eq, 2)} $" if eq is not None else "")
+                        + ("\n🧹 Ваши сообщения с адресом и ключом удалены из чата." if deleted else "\n⚠️ Не удалось удалить ваше сообщение с ключом — удалите его вручную (у себя и «у всех»).")
+                        + "\n\nАвтомод по-прежнему выключен у всех конфигов: включайте его в /monitor. Счёт и позиции видны и на сайте (страница «Мониторинг»).",
+                  )
+        return True
 
     def cmd_list(self, chat, user, arg):
         self.send(chat, fm.list_message(self.db.list_configs(user["id"])))
@@ -415,13 +538,16 @@ class SignalService:
     # ---------------- автомод: действия ----------------
     def _do(self, cfg, kind, symbol, side, fn, details):
         """Выполняет действие через адаптер биржи и пишет результат в журнал; ошибка адаптера не ломает цикл бота."""
+        trade_log("auto_decision", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side, exchange=self.adapter_for(cfg["user_id"]).name, **details)
         try:
             res = fn()
             status = res.get("status", "sent")
+            trade_log("auto_result", user=cfg["user_id"], config=cfg["id"], kind=kind, status=status, result=res)
         except Exception as e:                                  # NotConfigured и ошибки биржи
             res, status = {"error": str(e)}, "error"
             log.warning("автомод %s по %s: %s", kind, cfg["name"], e)
-        self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter.name})
+            trade_error("auto_fail", e, user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side)
+        self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter_for(cfg["user_id"]).name})
 
     def _auto_open(self, cfg, res, sig, plan):
         """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига)."""
@@ -430,8 +556,9 @@ class SignalService:
         p = res["params"]
         add = bool(sig.get("pyramid"))
         notional, margin = self.engine.order_size(res, add)
+        ad = self.adapter_for(cfg["user_id"])
         self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
-                 lambda: self.adapter.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
+                 lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
                                                   plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
                  {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1)})
 
@@ -440,11 +567,12 @@ class SignalService:
         if not cfg["auto"]["manage"]:
             return
         sym, side = res["params"]["symbol"], ev["side"]
+        ad = self.adapter_for(cfg["user_id"])
         if ev.get("tp1_be"):
-            self._do(cfg, "move_stop", sym, side, lambda: self.adapter.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]})
+            self._do(cfg, "move_stop", sym, side, lambda: ad.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]})
         if ev["label"] in ("WKND", "REV"):
             self._do(cfg, "close_weekend" if ev["label"] == "WKND" else "close_reverse", sym, side,
-                     lambda: self.adapter.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]})
+                     lambda: ad.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]})
 
     def _send_fills(self, cfg, res, chat, label, upd):
         """Уведомления об исполнениях (TP / SL / БУ / разворот) после отметки fill_ts. У конфига без отметки (создан до этой функции) прошлое не присылаем:

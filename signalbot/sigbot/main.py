@@ -10,6 +10,7 @@ from app.history_sync import HistorySync
 from app.markets import MarketsCache, ccxt_swap_symbols
 
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.types import BotCommand
 
 from .bot import SignalService
 from .config import load_bot_settings
@@ -17,6 +18,9 @@ from .engine import Engine, make_price_fn
 from .transport import AiogramTransport, build_dispatcher, make_bot
 
 log = logging.getLogger("signalbot")
+LIVE_SEC = 20
+COMMANDS = [("monitor", "мониторинг: стратегии, позиции, автомод, live"), ("positions", "открытые позиции"), ("list", "ваши конфиги"), ("check", "проверить сигналы сейчас"),
+            ("status", "состояние данных"), ("help", "справка")]
 
 
 async def run(service, bot, dp, poll_sec):
@@ -31,12 +35,27 @@ async def run(service, bot, dp, poll_sec):
                 log.exception("цикл")
             await asyncio.to_thread(service.wait, poll_sec)
 
+    async def live():
+        """«Живые» экраны мониторинга: раз в ~20 с перерисовываем подписанные сообщения (правим на месте, только если что-то изменилось)."""
+        while not service.stopped:
+            await asyncio.sleep(LIVE_SEC)
+            try:
+                await asyncio.to_thread(service.refresh_live)
+            except Exception:
+                log.exception("live-обновление")
+
     task = asyncio.create_task(cycles())
+    task2 = asyncio.create_task(live())
     try:
-        await dp.start_polling(bot, allowed_updates=["message"], handle_signals=True)
+        try:
+            await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in COMMANDS])
+        except Exception:
+            log.warning("не удалось задать меню команд")
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=True)
     finally:
         service.stop()
         task.cancel()
+        task2.cancel()
         await bot.session.close()
 
 

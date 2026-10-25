@@ -803,6 +803,18 @@ def scenario(pg, base, state_url):
     pg.once("dialog", lambda d: d.accept())
     card("Удалить-меня").get_by_role("button", name="Удалить").click(); pg.wait_for_timeout(1500)
     check("удаление убирает стратегию из списка", pg.locator("[data-testid=mon-card] b:text-is('Удалить-меня')").count() == 0 and pg.locator("[data-testid=mon-card]").count() == 3)
+    # блок «Биржа»: без счёта — подсказка про бота; с подключённым счётом — сведения о подключении (без ключа) и кнопка отключения
+    ex_box = pg.get_by_test_id("mon-exchange")
+    check("блок «Биржа»: счёт не подключён — инструкция про /hl, ключей и полей ввода на сайте нет", "/hl" in ex_box.inner_text() and "не подключён" in ex_box.inner_text() and ex_box.locator("input").count() == 0)
+    tid = E2E_DB.check_login("tester", USER_PASS)["id"]
+    E2E_DB.set_exchange_account(tid, "hyperliquid", "0x" + "ab" * 20, "не-шифртекст", True, "0x" + "cd" * 20)
+    pg.get_by_role("button", name="Обновить", exact=True).click(); pg.get_by_test_id("exchange-disconnect").wait_for(timeout=15000)
+    ex_text = pg.get_by_test_id("mon-exchange").inner_text()
+    check("блок «Биржа»: подключённый счёт — сеть, замаскированные адреса, кнопка «Отключить», ключа нет на странице", "тестовая сеть" in ex_text and "0xabab…abab" in ex_text and "0xcdcd…cdcd" in ex_text and "не-шифртекст" not in pg.content() and "Hyperliquid" in pg.get_by_test_id("mon-banner").inner_text()
+          and "реальные ордера" not in pg.get_by_test_id("mon-banner").inner_text())
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("exchange-disconnect").click(); pg.wait_for_timeout(1500)
+    check("отключение счёта: блок снова «не подключён», в базе ключа нет", "не подключён" in pg.get_by_test_id("mon-exchange").inner_text() and E2E_DB.get_exchange_account(tid) is None and "симуляция" in pg.get_by_test_id("mon-banner").inner_text())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_role("button", name="Открыть", exact=True).click(); pg.get_by_test_id("mon-msg").wait_for(timeout=10000)
     check("тестовая позиция $1: симуляция, запись в журнале", "Симуляция" in pg.get_by_test_id("mon-msg").inner_text() and "тестовая позиция" in pg.get_by_test_id("mon-log").last.inner_text())
@@ -875,7 +887,11 @@ def scenario(pg, base, state_url):
     check("сессия переживает перезагрузку страницы (без повторного ввода пароля)", num(pg, "Стоп-лосс").first.input_value() == "5")
 
 
+E2E_DB = None
+
+
 def main():
+    global E2E_DB
     from playwright.sync_api import sync_playwright
 
     tmp = Path(tempfile.mkdtemp(prefix="maverick-e2e-"))
@@ -885,6 +901,7 @@ def main():
         sys.path.insert(0, str(ROOT / "backend"))
         from app.db import Database
         db = Database(tmp / "e2e.db")
+        E2E_DB = db
         tester = db.add_user("tester", USER_PASS)
         db.add_user("second", USER_PASS)
         # конфиг бота с далёкими тейками/стопом: позиция остаётся открытой до конца данных — есть что мониторить

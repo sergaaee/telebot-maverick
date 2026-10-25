@@ -1,16 +1,20 @@
 """Торговля: слой исполнения действий (открыть позицию, переставить стоп, закрыть) за единым интерфейсом.
 
-Данные (свечи, отчёты) идут с Binance как раньше, а торговать можно на Hyperliquid (адаптер на ccxt) — либо в режиме симуляции (по умолчанию): действие записывается в журнал,
-ордера не отправляются. Выбор — переменная TRADE_EXCHANGE (пусто = симуляция, hyperliquid = биржа).
+Данные (свечи, отчёты) идут с Binance как раньше, а торговать можно на Hyperliquid (адаптер на ccxt). Счёт у каждого пользователя свой: адрес кошелька и ключ API-кошелька он
+присылает боту (/hl), они проверяются и хранятся в базе ЗАШИФРОВАННЫМИ (secrets_store.py); пока счёт не подключён — режим симуляции: действие записывается в журнал, ордера не отправляются.
+TRADE_EXCHANGE=dry-run принудительно включает симуляцию для всех.
 
 ВАЖНО про Hyperliquid:
- * по умолчанию — ТЕСТОВАЯ сеть (HL_TESTNET=true); боевая включается только явным HL_TESTNET=false;
- * ключ — ключ API-кошелька («агента»), а не основного кошелька: он умеет торговать, но не выводить средства;
+ * сеть (тестовая / боевая) пользователь выбирает при подключении, тестовая — по умолчанию в боте;
+ * принимается только ключ API-кошелька («агента», он умеет торговать, но не выводить средства), ключ основного кошелька отклоняется;
  * каждый ордер ограничен TRADE_MAX_USD (по умолчанию 100 $ объёма) — предохранитель от слишком большого размера по конфигу;
  * код проверен только на имитации биржи (тесты), на живой сети он не запускался: сначала прогоните его на testnet.
 """
-import math
 import os
+import re
+
+from .secrets_store import SecretError, decrypt
+from .tradelog import trade_error, trade_log
 
 TEST_MAX_USD = 5.0                      # потолок тестовой позиции (маржа): даже если подменить запрос, больше не откроется
 
@@ -31,6 +35,12 @@ class ExchangeAdapter:
 
     def describe(self):
         return {"name": self.name, "real": self.real, "testnet": self.testnet, "min_notional": self.min_notional}
+
+    def open_orders(self):
+        return []
+
+    def fills(self, limit=20):
+        return []
 
     def open_market(self, symbol, side, notional, leverage=1.0, stop=None, takes=None):
         """Вход по рынку на объём notional ($) с плечом leverage; stop — цена стопа; takes — [(цена, доля %)] тейков (reduce-only)."""
@@ -69,18 +79,21 @@ class HyperliquidAdapter(ExchangeAdapter):
     real = True
     min_notional = 10.0                 # минимальный ордер на Hyperliquid — 10 $ объёма (по документации биржи; уточните при смене правил)
 
-    def __init__(self, wallet=None, key=None, testnet=None, max_usd=None, exchange=None):
-        self.wallet = wallet if wallet is not None else os.getenv("HL_WALLET_ADDRESS", "")
-        self.key = key if key is not None else os.getenv("HL_PRIVATE_KEY", "")
-        self.testnet = testnet if testnet is not None else os.getenv("HL_TESTNET", "true").strip().lower() != "false"
+    def __init__(self, wallet="", key="", testnet=True, max_usd=None, exchange=None):
+        self.wallet, self.key, self.testnet = wallet or "", key or "", bool(testnet)
         self.max_usd = float(max_usd if max_usd is not None else (os.getenv("TRADE_MAX_USD") or 100))
         self._ex = exchange
+        self.user_id = None                 # для лога: чей счёт
+
+    def _log(self, event, level="info", **f):
+        trade_log(event, level, user=self.user_id, exchange=self.name, testnet=self.testnet, **f)
 
     # ---------- соединение ----------
     def _x(self):
         if self._ex is None:
             if not (self.wallet and self.key):
-                raise NotConfigured("Hyperliquid: укажите в .env HL_WALLET_ADDRESS (адрес основного кошелька) и HL_PRIVATE_KEY (ключ API-кошелька).")
+                self._log("not_configured", "warn", wallet=bool(self.wallet), key=bool(self.key))
+                raise NotConfigured("Счёт Hyperliquid не подключён — отправьте боту /hl (адрес кошелька и ключ API-кошелька).")
             import ccxt
             ex = ccxt.hyperliquid({"walletAddress": self.wallet, "privateKey": self.key, "enableRateLimit": True})
             if self.testnet:
@@ -88,7 +101,9 @@ class HyperliquidAdapter(ExchangeAdapter):
             try:
                 ex.load_markets()
             except Exception as e:
+                trade_error("exchange_fail", e, user=self.user_id, what="load_markets", testnet=self.testnet)
                 raise ExchangeError(f"Hyperliquid недоступен: {e}") from e
+            self._log("exchange_connected", markets=len(getattr(ex, "markets", {}) or {}))
             self._ex = ex
         return self._ex
 
@@ -102,6 +117,7 @@ class HyperliquidAdapter(ExchangeAdapter):
         except (NotConfigured, ExchangeError):
             raise
         except Exception as e:
+            trade_error("exchange_fail", e, user=self.user_id, what=what, testnet=self.testnet)
             raise ExchangeError(f"Hyperliquid, {what}: {e}") from e
 
     def _price(self, ex, sym):
@@ -133,8 +149,10 @@ class HyperliquidAdapter(ExchangeAdapter):
             raise ExchangeError("Размер позиции после округления равен нулю.")
         buy = side == "long"
         entry_side, exit_side = ("buy", "sell") if buy else ("sell", "buy")
+        self._log("order_request", kind="open", symbol=sym, side=side, notional=notional, amount=amount, price=price, leverage=leverage, stop=stop, takes=takes)
         self._call("плечо", ex.set_leverage, int(max(1, round(leverage))), sym, {"marginMode": "isolated"})
         order = self._call("вход", ex.create_order, sym, "market", entry_side, amount, price)
+        self._log("order_ok", kind="entry", symbol=sym, order=order if isinstance(order, dict) and len(str(order)) < 1500 else (order.get("id") if isinstance(order, dict) else str(order)[:300]))
         res = {"status": "sent", "entry_order": order.get("id") if isinstance(order, dict) else None, "symbol": sym, "side": side, "amount": amount, "price": price,
                "notional": amount * price, "leverage": leverage, "orders": []}
         try:
@@ -148,6 +166,7 @@ class HyperliquidAdapter(ExchangeAdapter):
                     res["orders"].append({"kind": "take", "id": o.get("id"), "price": tp_price, "share": share})
         except Exception as e:                              # позиция открыта, а стоп/тейк не встали — без защиты её оставлять нельзя: закрываем
             closed = None
+            trade_error("order_fail", e, user=self.user_id, kind="stop_or_takes", symbol=sym, side=side, note="после входа защита не встала — закрываем позицию")
             try:
                 self.close_market(symbol, side, 1.0)
                 closed = "позиция закрыта по рынку"
@@ -165,11 +184,13 @@ class HyperliquidAdapter(ExchangeAdapter):
             return {"status": "skipped", "note": "позиции на бирже нет — стоп не переставлялся", "symbol": sym}
         exit_side = "sell" if pos_side == "long" else "buy"
         removed = 0
+        self._log("order_request", kind="move_stop", symbol=sym, side=pos_side, size=size, stop=price)
         for o in self._call("ордера", ex.fetch_open_orders, sym) or []:
             if o.get("triggerPrice") and o.get("reduceOnly") and (o.get("side") == exit_side):
                 self._call("снятие стопа", ex.cancel_order, o["id"], sym)
                 removed += 1
         o = self._call("новый стоп", ex.create_order, sym, "market", exit_side, size, float(price), {"stopLossPrice": float(price), "reduceOnly": True})
+        self._log("order_ok", kind="move_stop", symbol=sym, stop=price, removed_old=removed, order=o.get("id") if isinstance(o, dict) else None)
         return {"status": "sent", "symbol": sym, "stop": price, "removed_old": removed, "order": o.get("id") if isinstance(o, dict) else None}
 
     def close_market(self, symbol, side, share=1.0):
@@ -182,7 +203,9 @@ class HyperliquidAdapter(ExchangeAdapter):
         part = min(1.0, max(0.0, float(share)))
         amount = size if part >= 0.999 else float(ex.amount_to_precision(sym, size * part))
         price = self._price(ex, sym)
+        self._log("order_request", kind="close", symbol=sym, side=pos_side, size=size, share=part, amount=amount, price=price)
         o = self._call("закрытие", ex.create_order, sym, "market", exit_side, amount, price, {"reduceOnly": True})
+        self._log("order_ok", kind="close", symbol=sym, amount=amount, order=o.get("id") if isinstance(o, dict) else None)
         if part >= 0.999:                                     # позиция закрыта целиком — висящие стопы и тейки больше не нужны
             for x in self._call("ордера", ex.fetch_open_orders, sym) or []:
                 if x.get("reduceOnly"):
@@ -210,9 +233,103 @@ class HyperliquidAdapter(ExchangeAdapter):
         usdc = b.get("USDC") or {}
         return {"equity": usdc.get("total"), "free": usdc.get("free"), "used": usdc.get("used")}
 
+    def open_orders(self):
+        ex = self._x()
+        out = []
+        for o in self._call("ордера", ex.fetch_open_orders) or []:
+            out.append({"symbol": o.get("symbol"), "side": o.get("side"), "type": o.get("type"), "amount": o.get("amount"), "price": o.get("price"),
+                        "trigger": o.get("triggerPrice"), "reduce_only": bool(o.get("reduceOnly")), "ts": o.get("timestamp")})
+        return out
 
-def get_adapter(name=None):
-    name = (name if name is not None else os.getenv("TRADE_EXCHANGE", "")).strip().lower()
-    if name in ("hyperliquid", "hl"):
-        return HyperliquidAdapter()
-    return DryRunAdapter()
+    def fills(self, limit=20):
+        ex = self._x()
+        rows = self._call("сделки", ex.fetch_my_trades, None, None, limit) or []
+        return [{"symbol": t.get("symbol"), "side": t.get("side"), "amount": t.get("amount"), "price": t.get("price"), "fee": (t.get("fee") or {}).get("cost"),
+                 "pnl": (t.get("info") or {}).get("closedPnl"), "ts": t.get("timestamp")} for t in rows][-limit:][::-1]
+
+
+HEX_ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
+HEX_KEY = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+
+
+def mask_address(a):
+    return f"{a[:6]}…{a[-4:]}" if a and len(a) > 12 else (a or "")
+
+
+def verify_hyperliquid(wallet, key, testnet=True, exchange=None, user_id=None):
+    try:
+        return _verify(wallet, key, testnet, exchange, user_id)
+    except ValueError as e:
+        trade_log("verify_fail", "warn", user=user_id, wallet=wallet, testnet=testnet, reason=str(e))      # причина отказа — в лог (ключ туда не попадает)
+        raise
+
+
+def _verify(wallet, key, testnet, exchange, user_id):
+    """Проверяет присланные адрес и ключ ПЕРЕД сохранением. -> {"agent": адрес ключа, "account": {...}}; ValueError с понятным текстом, если что-то не так.
+    Ключ должен принадлежать API-кошельку («агенту»), подтверждённому на этот адрес: ключ основного кошелька (он умеет выводить средства) отклоняется.
+    Аварийный обход проверки агента: HL_SKIP_AGENT_CHECK=true (только если биржа изменила ответ userRole)."""
+    wallet, key = (wallet or "").strip(), (key or "").strip()
+    if not HEX_ADDR.match(wallet):
+        raise ValueError("Адрес кошелька должен выглядеть как 0x и 40 символов 0–9, a–f.")
+    if not HEX_KEY.match(key):
+        raise ValueError("Ключ должен быть 64 символа 0–9, a–f (можно с префиксом 0x).")
+    key = key if key.startswith("0x") else "0x" + key
+    trade_log("verify_start", user=user_id, wallet=wallet, testnet=testnet)
+    a = HyperliquidAdapter(wallet, key, testnet, exchange=exchange)
+    a.user_id = user_id
+    try:
+        ex = a._x()
+        agent = ex.eth_get_address_from_private_key(key)
+    except NotConfigured as e:
+        raise ValueError(str(e))
+    except ExchangeError as e:
+        raise ValueError(str(e))
+    except Exception as e:
+        raise ValueError(f"Не удалось разобрать ключ: {e}")
+    if agent.lower() == wallet.lower():
+        raise ValueError("Это ключ ОСНОВНОГО кошелька — он позволяет выводить средства. Создайте API-кошелёк (Hyperliquid → More → API), подтвердите его и пришлите ключ API-кошелька.")
+    if os.getenv("HL_SKIP_AGENT_CHECK", "").strip().lower() != "true":
+        try:
+            role = ex.public_post_info({"type": "userRole", "user": agent})
+        except Exception as e:
+            raise ValueError(f"Не удалось проверить API-кошелёк на Hyperliquid: {e}")
+        master = ((role or {}).get("data") or {}).get("user") if isinstance(role, dict) else None
+        if not isinstance(role, dict) or role.get("role") != "agent" or not master or master.lower() != wallet.lower():
+            raise ValueError("Этот ключ не принадлежит API-кошельку, подтверждённому для указанного адреса "
+                             f"(ответ биржи: {str(role)[:120]}). Проверьте адрес основного кошелька, сеть (тестовая/боевая) и что API-кошелёк создан и не истёк.")
+    try:
+        acc = a.account()
+    except (NotConfigured, ExchangeError) as e:
+        raise ValueError(str(e))
+    trade_log("verify_ok", user=user_id, wallet=wallet, agent=agent, testnet=testnet, equity=acc.get("equity"))
+    return {"agent": agent, "account": acc}
+
+
+_cache = {}
+
+
+def adapter_for(db, user_id):
+    """Адаптер конкретного пользователя: его подключённый счёт Hyperliquid, а без счёта (или при TRADE_EXCHANGE=dry-run) — симуляция."""
+    if os.getenv("TRADE_EXCHANGE", "").strip().lower() in ("dry-run", "off", "sim"):
+        return DryRunAdapter()
+    acc = db.get_exchange_account(user_id)
+    if not acc or acc["exchange"] != "hyperliquid":
+        return DryRunAdapter()
+    sig = (acc["wallet"], acc["key_enc"], acc["testnet"])
+    hit = _cache.get(user_id)
+    if hit and hit[0] == sig:
+        return hit[1]
+    try:
+        key = decrypt(acc["key_enc"], db.path)
+    except SecretError:
+        key = ""                                                  # ключ не расшифровать: адаптер сообщит «подключите заново», а не упадёт
+    if not key:
+        trade_log("key_undecryptable", "error", user=user_id, note="сохранённый ключ не расшифровать (сменился SECRET_KEY / потерян secret.key)")
+    a = HyperliquidAdapter(acc["wallet"], key, acc["testnet"])
+    a.user_id = user_id
+    _cache[user_id] = (sig, a)
+    return a
+
+
+def forget_adapter(user_id):
+    _cache.pop(user_id, None)
