@@ -5,7 +5,7 @@ from datetime import datetime
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import GetFile, GetMe, SendDocument, SendMessage
+from aiogram.methods import AnswerCallbackQuery, DeleteMessage, EditMessageText, GetFile, GetMe, SendDocument, SendMessage
 from aiogram.types import Chat, File, Message, Update, User
 
 from sigbot.transport import AiogramTransport, build_dispatcher
@@ -26,6 +26,13 @@ class FakeSession(BaseSession):
             return Message(message_id=len(self.calls), date=datetime.now(), chat=Chat(id=method.chat_id, type="private"), text=method.text)
         if isinstance(method, GetFile):
             return File(file_id=method.file_id, file_unique_id="u", file_size=len(self.files[method.file_id]), file_path=f"docs/{method.file_id}")
+        if isinstance(method, EditMessageText):
+            if getattr(self, "not_modified", False):
+                from aiogram.exceptions import TelegramBadRequest
+                raise TelegramBadRequest(method=method, message="Bad Request: message is not modified")
+            return Message(message_id=method.message_id, date=datetime.now(), chat=Chat(id=method.chat_id, type="private"), text=method.text)
+        if isinstance(method, (AnswerCallbackQuery, DeleteMessage)):
+            return True
         if isinstance(method, SendDocument):
             return Message(message_id=len(self.calls), date=datetime.now(), chat=Chat(id=method.chat_id, type="private"))
         raise AssertionError(f"неожиданный вызов {method}")
@@ -105,3 +112,42 @@ def test_signal_notification_is_sent_to_owner_via_aiogram(env):  # noqa: F811
     msgs = [c for c in session.calls if isinstance(c, SendMessage) and "исполнение —" not in c.text]
     assert len(msgs) == 2 and all(m.chat_id == CHAT for m in msgs)
     assert "принят" in msgs[0].text and "ЛОНГ" in msgs[1].text and "Статистика конфига" in msgs[1].text
+
+
+def callback_update(data, uid=CHAT, mid=50, upd_id=5):
+    return Update.model_validate({"update_id": upd_id, "callback_query": {
+        "id": "cq1", "chat_instance": "ci", "data": data, "from": {"id": uid, "is_bot": False, "first_name": "T", "username": f"u{uid}"},
+        "message": {"message_id": mid, "date": 1700000000, "chat": {"id": uid, "type": "private"}, "text": "экран"}}})
+
+
+def test_callback_buttons_edit_message_in_place_with_keyboard_and_answer(env):  # noqa: F811
+    from aiogram.types import InlineKeyboardMarkup
+    sess = run(env, [callback_update("m")])
+    edits = [c for c in sess.calls if isinstance(c, EditMessageText)]
+    answers = [c for c in sess.calls if isinstance(c, AnswerCallbackQuery)]
+    assert len(edits) == 1 and edits[0].message_id == 50 and edits[0].chat_id == CHAT and "Мониторинг" in edits[0].text
+    assert isinstance(edits[0].reply_markup, InlineKeyboardMarkup) and answers and answers[0].callback_query_id == "cq1"
+    # чужой (непривязанный) пользователь: никаких правок, только предупреждение
+    sess2 = run(env, [callback_update("m", uid=999)])
+    assert not [c for c in sess2.calls if isinstance(c, EditMessageText)] and [c for c in sess2.calls if isinstance(c, AnswerCallbackQuery)][0].show_alert is True
+
+
+def test_connect_flow_messages_are_deleted_through_bot_api(env):  # noqa: F811
+    import time as _t
+    env._hl[env.alice["id"]] = {"step": "wallet", "testnet": True, "until": _t.time() + 60, "tries": 0}
+    sess = run(env, [update("0x" + "ab" * 20, upd_id=60)])
+    deletes = [c for c in sess.calls if isinstance(c, DeleteMessage)]
+    assert len(deletes) == 1 and deletes[0].chat_id == CHAT and deletes[0].message_id == 60
+    msgs = [c for c in sess.calls if isinstance(c, SendMessage)]
+    assert msgs and "Шаг 2 из 2" in msgs[-1].text and msgs[-1].reply_markup is not None
+
+
+def test_edit_not_modified_is_not_an_error(env):  # noqa: F811
+    session = FakeSession()
+    session.not_modified = True
+    bot = Bot("123456:TESTTOKEN", session=session)
+
+    async def go():
+        tr = AiogramTransport(bot, asyncio.get_running_loop())
+        return await asyncio.to_thread(tr.edit_message, CHAT, 5, "текст", [[("ok", "x")]])
+    assert asyncio.run(go()) is False
