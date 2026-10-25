@@ -286,14 +286,26 @@ def _verify(wallet, key, testnet, exchange, user_id):
         raise ValueError(str(e))
     except Exception as e:
         raise ValueError(f"Не удалось разобрать ключ: {e}")
-    if agent.lower() == wallet.lower():
-        raise ValueError("Это ключ ОСНОВНОГО кошелька — он позволяет выводить средства. Создайте API-кошелёк (Hyperliquid → More → API), подтвердите его и пришлите ключ API-кошелька.")
-    if os.getenv("HL_SKIP_AGENT_CHECK", "").strip().lower() != "true":
+    same = agent.lower() == wallet.lower()
+    skip = os.getenv("HL_SKIP_AGENT_CHECK", "").strip().lower() == "true"
+    role = None
+    if same or not skip:
         try:
             role = ex.public_post_info({"type": "userRole", "user": agent})
         except Exception as e:
-            raise ValueError(f"Не удалось проверить API-кошелёк на Hyperliquid: {e}")
-        master = ((role or {}).get("data") or {}).get("user") if isinstance(role, dict) else None
+            if not same:
+                raise ValueError(f"Не удалось проверить API-кошелёк на Hyperliquid: {e}")
+        trade_log("verify_role", user=user_id, wallet=wallet, agent=agent, same_address=same, testnet=testnet, role=str(role)[:300])
+    master = ((role or {}).get("data") or {}).get("user") if isinstance(role, dict) else None
+    if same:
+        if isinstance(role, dict) and role.get("role") == "agent" and master:
+            raise ValueError(f"Вы прислали адрес самого API-кошелька ({mask_address(agent)}), а нужен адрес ОСНОВНОГО аккаунта ({mask_address(master)}), "
+                             "на котором лежат средства. Начните заново: /hl, отправьте адрес основного аккаунта, затем ключ API-кошелька.")
+        raise ValueError(f"Адрес {mask_address(wallet)} совпадает с адресом, полученным из ключа, и биржа не считает его API-кошельком "
+                         f"(роль: {(role or {}).get('role') if isinstance(role, dict) else role}). Если это ключ основного кошелька — он позволяет выводить средства: "
+                         "создайте API-кошелёк (Hyperliquid → More → API), подтвердите его и пришлите его ключ. "
+                         "Если вы прислали ключ API-кошелька — проверьте, что в первом сообщении указан адрес основного аккаунта (а не API-кошелька), и сеть (тестовая/боевая).")
+    if not skip:
         if not isinstance(role, dict) or role.get("role") != "agent" or not master or master.lower() != wallet.lower():
             raise ValueError("Этот ключ не принадлежит API-кошельку, подтверждённому для указанного адреса "
                              f"(ответ биржи: {str(role)[:120]}). Проверьте адрес основного кошелька, сеть (тестовая/боевая) и что API-кошелёк создан и не истёк.")
