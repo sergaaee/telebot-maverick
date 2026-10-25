@@ -1,5 +1,6 @@
 """Запуск бэктеста и подготовка данных для интерфейса (сделки, сигналы, статистика)."""
 import heapq
+import logging
 import math
 from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
@@ -11,10 +12,12 @@ from .core import equity as equity_mod
 from .core import tradingweek
 from .core.entries import entries
 
+from . import runcache
 from .data import DataStore
 from .schemas import BacktestParams
 
 INF = float("inf")
+log = logging.getLogger("service")
 
 
 class ParamError(ValueError):
@@ -384,6 +387,25 @@ def _max_dd_pct(pn, deposit):
     return 100 * dd
 
 
+def _closed_prefix(sim):
+    """Из снимка прошлого расчёта берёт позиции, результат которых уже не изменится от новых данных: закрыты (не OPEN) строго раньше последних данных, по которым считали
+    (safe_ts = меньшее из времени последней свечи и последнего отчёта: отчёт мог бы прийти «задним числом» внутри уже посчитанных свечей).
+    -> (сделки, пропущенные сигналы, resume для run_events, с какого момента подавать события); пусто — считать с начала."""
+    safe_ts, trades = sim["safe_ts"], sim["trades"]
+    bad = next((t for t in trades if t["reason"] == "OPEN" or t["exit_ts"] >= safe_ts), None)
+    if bad is not None:
+        first = min(t["signal_ts"] for t in trades if t["group"] == bad["group"])
+        kept = [t for t in trades if t["group"] < bad["group"]]
+        cut = min(safe_ts, first)
+    else:
+        kept, cut = list(trades), safe_ts
+    if not kept:
+        return [], [], None, None
+    last = [t for t in kept if t["group"] == kept[-1]["group"]]
+    resume = {"group": kept[-1]["group"], "last_group": last, "last_open_ts": min(t["entry_ts"] for t in last)}
+    return kept, [x for x in sim["skipped"] if x[0] < cut], resume, cut
+
+
 def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None) -> dict:
     eff = effective_params(defaults, params)
     source_id = eff.get("source") or store.s.default_source
@@ -445,15 +467,22 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         backtest.normalize_tps(tps)
     except ValueError as e:
         raise ParamError(str(e))
-    common = dict(tp_pct=tps[0][0], tps=tps, be_after_tp1=bool(eff.get("be_after_tp1")), sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"],
-                  confirm=eff["confirm"], only=eff["only"], global_min=glob_min, short_global_max=short_glob)
 
+    # снимок прошлого расчёта этой стратегии: если данные только дописались, считаем только новые отчёты и свечи (см. runcache.py)
+    rc = runcache.for_dir(store.s.cache_dir) if runcache.enabled() else None
+    ckey = runcache.make_key(eff, source_id, liq_id, symbol) if rc else None
+    snap = rc.get(ckey) if rc else None
+    if snap and not (snap["n_sigs"] <= len(sigs) and runcache.matches(snap["sig_probe"], sigs, snap["n_sigs"])
+                     and snap["n_candles"] <= len(candles_all) and runcache.matches(snap["c_probe"], candles_all, snap["n_candles"])):
+        snap = None
+    est = dict(snap["ent"]) if snap else {}
+    tst = dict(snap["trend"]) if snap and snap.get("trend") else {}
     allow = None
     if eff.get("trend_enabled"):
         emas = sorted(set(eff.get("trend_emas") or []))
         if not emas:
             raise ParamError("Фильтр тренда: выберите хотя бы одну EMA")
-        allow = trend.build_trend(candles_all, eff["trend_tf"], emas)       # EMA считается по всей истории свечей (прогрев), а не только по периоду
+        allow = trend.build_trend(candles_all, eff["trend_tf"], emas, state=tst)       # EMA считается по всей истории свечей (прогрев), а не только по периоду; докладываются только новые свечи
     lev = eff["leverage"]
     lev_add = eff.get("pyramid_leverage") or lev                  # плечо доборов; не задано — как у первой ноги
     mmr = eff["maint_margin_pct"] / 100 if eff.get("liquidation_sim") else None
@@ -467,11 +496,30 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "move_pct": eff.get("pyramid_move_pct") or 0.0, "move_dir": eff.get("pyramid_move_dir") or "any", "avg": bool(eff.get("pyramid_avg")),
                             "w0": eff["trade_pct"] * lev, "w": eff["pyramid_pct"] * lev_add}, eff["pyramid_pct"]      # веса усреднения — объём (доля × плечо)
     week = {"before_min": eff.get("friday_close_before_min") or 0.0} if eff.get("weekdays_only") else None
-    skipped = []
-    trades = backtest.simulate(sigs, candles, long_min, scalp_min, short=short, liq=liq, cool=cool, event_filter=allow, pyramid=pyramid,
-                               signal_gap_h=eff.get("signal_gap_h") or 0.0, sl_hold_strong=bool(eff.get("sl_hold_strong")), skipped=skipped,
-                               leverage=lev, add_leverage=lev_add, mmr=mmr, week=week,
-                               **common, **extra)
+    lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
+    pend = []
+    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est)     # все подтверждённые сигналы (с пропущенными)
+    events = [e for e in confirmed if allow(*e)] if allow else confirmed
+    levels = backtest.normalize_tps(tps)
+    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm) if eff.get("sl_hold_strong") else None
+    run_kw = dict(sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"], cooldown_h=extra.get("cooldown_h", 0.0), be_after_tp1=bool(eff.get("be_after_tp1")), pyramid=pyramid,
+                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=hold, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week)
+    kept, kept_skipped, resume, from_ts = [], [], None, None
+    if snap and snap.get("sim"):
+        kept, kept_skipped, resume, from_ts = _closed_prefix(snap["sim"])
+    skipped = list(kept_skipped)
+    new_trades = backtest.run_events([e for e in events if from_ts is None or e[0] >= from_ts] if kept else events, candles, levels, skipped=skipped, resume=resume, **run_kw)
+    raw_trades = kept + new_trades
+    trades = [dict(t) for t in raw_trades]           # размер позиции дописывается в копии: снимок хранит сделки без него
+    if rc:
+        try:
+            changed = not snap or snap["n_sigs"] != len(sigs) or snap["n_candles"] != len(candles_all)
+            if changed:
+                rc.put(ckey, {"n_sigs": len(sigs), "sig_probe": runcache.probe(sigs), "n_candles": len(candles_all), "c_probe": runcache.probe(candles_all),
+                              "ent": est, "trend": tst or None,
+                              "sim": {"trades": raw_trades, "skipped": skipped, "safe_ts": min(candles[-1][0], sigs[-1][0])}})
+        except Exception as e:
+            log.warning("runcache: снимок не сохранён: %s", e)
 
     apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True), pyr_pct, eff.get("pyramid_leverage"))
     if not mmr:
@@ -480,9 +528,6 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
                 warnings.append(f"Плечо{who} {lv:g}× при стопе {eff['sl_pct']:g}%: стоп находится за ценой ликвидации — на бирже позицию ликвидируют раньше стопа; включите «моделировать ликвидацию», чтобы учесть это в расчёте")
 
     # все подтверждённые сигналы (в том числе пропущенные: позиция открыта, пауза после стопа)
-    lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
-    pend = []
-    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend)
     trend_blocked = 0
     if allow:
         passed = [e for e in confirmed if allow(*e)]
