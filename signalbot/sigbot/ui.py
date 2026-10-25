@@ -264,7 +264,7 @@ class MonitorUI:
 
     def _s_test(self, user, live=False):
         d = self._ad(user).describe()
-        body = ("🧪 <b>Тестовая позиция по BTC</b>\nМаржа 1 $" + (f" × {int(-(-d['min_notional'] // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
+        body = ("🧪 <b>Тестовая позиция по BTC</b>\nМаржа 1 $" + (f" × {int(-(-(d['min_notional'] * 1.1) // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
                 + ".\n" + ("Это <b>реальный</b> ордер на " + esc(d["name"]) + (" (тестовая сеть)" if d["testnet"] else " (БОЕВАЯ сеть)") + "." if d["real"] else "Биржа не подключена — будет симуляция (запись в журнал).")
                 + "\nПозиция без стопа и тейков; закрывается кнопкой ниже.")
         return body, [[("🧪 Лонг", "cty:long"), ("🧪 Шорт", "cty:short")], [("❌ Закрыть тестовую", "ctc")], [("← К списку", "m")]]

@@ -63,10 +63,10 @@ def _fail(db, uid, kind, side, e):
 
 
 def test_open(db, adapter, uid, side="long", margin=1.0):
-    """Тестовая позиция по BTC: маржа 1 $ (потолок TEST_MAX_USD), плечо подбирается так, чтобы объём прошёл минимум биржи (Hyperliquid: ордер от 10 $ → 10×)."""
+    """Тестовая позиция по BTC: маржа 1 $ (потолок TEST_MAX_USD), плечо подбирается так, чтобы объём прошёл минимум биржи (Hyperliquid: ордер от 10 $ с запасом → 11×)."""
     if side not in ("long", "short") or not (0 < margin <= TEST_MAX_USD):
         raise ManageError(f"Сторона long/short и маржа от 0 до {TEST_MAX_USD:g} $")
-    lev = max(1, math.ceil(adapter.min_notional / margin)) if adapter.min_notional else 1
+    lev = max(1, math.ceil(adapter.min_notional * 1.1 / margin)) if adapter.min_notional else 1      # +10%: размер округляется вниз, а биржа проверяет объём по цене с проскальзыванием
     notional = margin * lev
     try:
         res = adapter.open_market(TEST_SYMBOL, side, notional, float(lev))

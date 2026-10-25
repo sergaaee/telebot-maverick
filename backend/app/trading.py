@@ -145,6 +145,11 @@ class HyperliquidAdapter(ExchangeAdapter):
             raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера Hyperliquid ({self.min_notional:g} $).")
         price = self._price(ex, sym)
         amount = float(ex.amount_to_precision(sym, notional / price))
+        if amount * price < self.min_notional * 1.01:         # округление вниз (и проскальзывание рыночной цены) увело бы ордер под минимум биржи — берём с небольшим запасом
+            amount = float(ex.amount_to_precision(sym, self.min_notional * 1.03 / price))
+            notional = max(notional, amount * price)
+            if notional > self.max_usd + 1e-9:
+                raise ExchangeError(f"Объём {notional:.2f} $ с учётом минимума биржи больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if amount <= 0:
             raise ExchangeError("Размер позиции после округления равен нулю.")
         buy = side == "long"
