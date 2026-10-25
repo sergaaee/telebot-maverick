@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { UNAUTH_EVENT, getAuthStatus, getMe, type Me, type MeResponse } from './api';
 import App from './App';
+import MonitorApp from './MonitorApp';
 import Login from './components/Login';
 
 /** Корень: проверяет сессию. Без входа показывает форму логина, после входа — приложение с данными именно этого пользователя. */
-export default function Root() {
+export default function Root({ page = 'backtest' }: { page?: 'backtest' | 'monitor' }) {
   const [state, setState] = useState<'loading' | 'login' | 'app'>('loading');
   const [me, setMe] = useState<MeResponse | null>(null);
   const [usersExist, setUsersExist] = useState(true);
@@ -35,6 +36,14 @@ export default function Root() {
   if (error) return <div className="login-page"><div className="banner error">{error}</div></div>;
   if (state === 'loading') return <div className="login-page"><div className="empty">Загрузка…</div></div>;
   if (state === 'login') return <Login usersExist={usersExist} onLoggedIn={(_u: Me) => void refresh()} />;
+  const common = {
+    me: me!.user,
+    onLogout: () => { setMe(null); setState('login'); },
+    onProfileChanged: () => void refresh(),
+    authEnabled: me!.auth_enabled,
+    botUsername: me!.bot_username,
+  };
+  if (page === 'monitor') return <MonitorApp key={me!.user.login} {...common} />;
   return (
     <App
       key={me!.user.login}

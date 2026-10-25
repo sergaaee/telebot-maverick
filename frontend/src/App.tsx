@@ -4,7 +4,6 @@ import { addAsset, downloadTop, getConfig, getLatest, getSync, runSync, getUiSta
 import EquityChart from './components/EquityChart';
 import Help from './components/Help';
 import MetricsBar from './components/MetricsBar';
-import MonitorPage from './components/MonitorPage';
 import MonteCarloPanel from './components/MonteCarloPanel';
 import RunsPanel from './components/RunsPanel';
 import ParamsPanel from './components/ParamsPanel';
@@ -87,7 +86,6 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
   const [showLevels, setShowLevels] = useState(true);
   const [showSkipped, setShowSkipped] = useState(false);
   const [showPending, setShowPending] = useState(true);
-  const [page, setPage] = useState<'backtest' | 'monitor'>('backtest');
   const [reloadKey, setReloadKey] = useState(0);
   const [tfMode, setTfMode] = useState<TfMode>('auto');
   const [effTf, setEffTf] = useState<{ tf: number; truncated: boolean } | null>(null);
@@ -507,7 +505,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
             <Help text={HELP.refresh} />
           </div>
         )}
-        <button type="button" className={`ghost nav-mon ${page === 'monitor' ? 'on' : ''}`} onClick={() => setPage(page === 'monitor' ? 'backtest' : 'monitor')} data-testid="nav-monitor">📡 Мониторинг</button>
+        <a className="ghost nav-mon" href="/monitor.html" data-testid="nav-monitor" title="Открытые позиции и автомод — отдельная страница">📡 Мониторинг</a>
         <UserMenu me={me} authEnabled={authEnabled} botUsername={botUsername} onChanged={onProfileChanged} onLogout={onLogout} />
       </header>
 
@@ -526,8 +524,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
         </div>
       )}
 
-      {page === 'monitor' && <MonitorPage params={params} onClose={() => setPage('backtest')} />}
-      <main className={loading ? 'calc' : ''} hidden={page === 'monitor'}>
+      <main className={loading ? 'calc' : ''}>
         {loading && <div className="calc-badge" role="status"><span className="spinner" /> Считаю… {elapsed > 0 ? `${elapsed} с` : ''}</div>}
         {params && config ? (
           <ParamsPanel

@@ -206,3 +206,11 @@ main[hidden] { display: none; }
 .mon-legs.table-wrap { min-height: 0; flex: none; }
 .mon-log.table-wrap { min-height: 0; }
 .mc-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; align-items: end; } .mc-controls .field { min-width: 0; } .mc-controls select { width: 100%; min-width: 0; } .mc-controls button { grid-column: 1 / -1; }
+/* отдельная страница мониторинга */
+.mon-app { display: flex; flex-direction: column; min-height: 100%; padding: 10px 16px 24px; gap: 10px; max-width: 1500px; margin: 0 auto; }
+.mon-header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.mon-header h1 { margin: 0; font-size: 16px; } .mon-header h1 span { color: var(--muted); font-weight: 400; }
+.mon-nav { display: inline-flex; gap: 4px; } .mon-nav a { color: var(--muted); text-decoration: none; padding: 4px 12px; border-radius: 6px; border: 1px solid transparent; }
+.mon-nav a:hover { color: var(--text); } .mon-nav a.on { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
+.mon-app .monitor { padding: 0; overflow: visible; }

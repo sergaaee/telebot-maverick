@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { autoOffAll, getMonitor, openTestPosition, setAuto } from '../api';
 import { fmtPct, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { HELP } from '../helpTexts';
-import type { AutoLogItem, MonitorEntry, MonitorLeg, MonitorResponse, Params } from '../types';
+import type { AutoLogItem, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
 import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
@@ -59,7 +59,7 @@ function Card({ e, exchange, onToggle }: { e: MonitorEntry; exchange: MonitorRes
           </span>
         )}
       </div>
-      {e.config_id == null && <div className="muted small">Автомод включается только у конфигов бота (по параметрам интерфейса действия не выполняются).</div>}
+      {e.config_id == null && <div className="muted small">Сохранённый прогон: автомод включается только у конфигов бота.</div>}
       {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
       {stale != null && stale > 20 && <div className="warn-text small">Свечи не обновлялись {ago(e.candle_ts)} — цена и уровни могут отставать.</div>}
       {pos && e.price && pos.legs.some((l) => l.liq_price != null && (pos.side === 'long' ? e.price! <= l.liq_price : e.price! >= l.liq_price)) && (
@@ -119,18 +119,18 @@ function Journal({ log }: { log: AutoLogItem[] }) {
 }
 
 /** Страница мониторинга: открытые позиции стратегий (расчёт по свечам Binance), автомод по конфигам, тестовая позиция $1, журнал действий. */
-export default function MonitorPage({ params, onClose }: { params: Params | null; onClose: () => void }) {
+export default function MonitorPage() {
   const [data, setData] = useState<MonitorResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testSide, setTestSide] = useState<'long' | 'short'>('long');
-  const [withUi, setWithUi] = useState(false);
+  const [withRuns, setWithRuns] = useState(false);
   const alive = useRef(true);
 
   const load = useCallback(async () => {
     try {
-      const r = await getMonitor(withUi ? params : null);
+      const r = await getMonitor(withRuns);
       if (alive.current) {
         setData(r);
         setErr(null);
@@ -138,7 +138,7 @@ export default function MonitorPage({ params, onClose }: { params: Params | null
     } catch (e) {
       if (alive.current) setErr(e instanceof Error ? e.message : String(e));
     }
-  }, [params, withUi]);
+  }, [withRuns]);
 
   useEffect(() => {
     alive.current = true;
@@ -189,16 +189,18 @@ export default function MonitorPage({ params, onClose }: { params: Params | null
   return (
     <div className="monitor" data-testid="monitor-page">
       <div className="mon-top">
-        <button type="button" className="ghost" onClick={onClose}>← К бэктесту</button>
         <h2>Мониторинг позиций <Help text={HELP.monitor_page} /></h2>
         <button type="button" className="ghost" onClick={() => void load()}>Обновить</button>
-        <label className="muted small"><input type="checkbox" checked={withUi} onChange={(e) => setWithUi(e.target.checked)} /> показать и текущие параметры интерфейса</label>
+        <label className="muted small"><input type="checkbox" checked={withRuns} onChange={(e) => setWithRuns(e.target.checked)} /> показать и сохранённые прогоны</label>
         <span className="mon-spacer" />
         <button type="button" className="ghost" disabled={!anyAuto} onClick={() => void offAll()}>⛔ Выключить автомод везде</button><Help text={HELP.auto_off_all} />
       </div>
       <div className="banner warn" data-testid="mon-banner">
+        <span>
         Данные — расчёт стратегий по свечам и отчётам Binance, а не позиции на бирже. Биржа для торговли — Arcus: коннектор ещё не подключён, автомод работает как{' '}
         <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются){data?.exchange.real ? ' — НО выбран реальный адаптер.' : '.'}
+
+        </span>
       </div>
       {err && <div className="banner error">{err}</div>}
       <div className="mon-test">
@@ -210,7 +212,7 @@ export default function MonitorPage({ params, onClose }: { params: Params | null
         {msg && <span className="muted small" data-testid="mon-msg"> {msg}</span>}
       </div>
       {!data && !err && <div className="empty">Загрузка…</div>}
-      {data && data.entries.length === 0 && <div className="empty">Нет конфигов бота. Добавьте конфиг боту в Telegram или отметьте «показать и текущие параметры интерфейса».</div>}
+      {data && data.entries.length === 0 && <div className="empty">Нет конфигов бота. Добавьте конфиг боту в Telegram или отметьте «показать и сохранённые прогоны» (их можно сохранить на странице бэктеста).</div>}
       {data?.entries.map((e) => <Card key={e.name} e={e} exchange={data.exchange} onToggle={(id, patch) => void toggle(id, patch)} />)}
       {data && (
         <>
