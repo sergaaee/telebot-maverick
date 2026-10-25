@@ -246,3 +246,60 @@ def test_saved_runs_limit(tmp_path):
     with pytest.raises(DbError, match="Не больше"):
         db.save_run(u["id"], "r3", {}, "auto", {})
     db.save_run(u["id"], "R0", {}, "auto", {"x": 1})                                                                 # перезапись существующего лимит не затрагивает
+
+
+def _open_cfg():
+    return {"symbol": "BTC/USDT:USDT", "side": "long", "confirm": 2, "tps": [{"pct": 50, "share": 50}, {"pct": 80, "share": 50}], "sl_pct": 50, "deposit": 10000, "trade_pct": 10, "leverage": 5}
+
+
+def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
+    db = auth_env
+    alice = db.check_login("alice", "alice-password")
+    db.add_config(alice["id"], "Открытая", _open_cfg())
+    db.add_config(alice["id"], "Сломанная", {"symbol": "BTC/USDT:USDT", "source": "нет-такого"})
+    app = create_app(load_settings())
+    a, b = client(app), client(app)
+    assert login(a, "alice", "alice-password").status_code == 200 and login(b, "bob", "bob-password-1").status_code == 200
+    assert client(app).post("/api/monitor", json={}, headers=H_).status_code == 401
+    r = a.post("/api/monitor", json={"params": {"side": "long", "confirm": 2}}, headers=H_).json()
+    assert [e["name"] for e in r["entries"]][:2] == ["#1 Открытая", "#2 Сломанная"] and r["entries"][2]["name"] == "Текущие параметры интерфейса"
+    e = r["entries"][0]
+    pos = e["position"]
+    assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False}                 # автомод выключен, пока явно не включён
+    leg = pos["legs"][0]
+    assert leg["stop_kind"] == "SL" and leg["to_stop_pct"] > 0 and leg["to_next_tp_pct"] > 0 and leg["liq_price"] < leg["entry"] and leg["leverage"] == 5
+    assert [t["n"] for t in leg["tps"]] == [1, 2] and not any(t["hit"] for t in leg["tps"]) and pos["notional"] == pos["margin"] * 5
+    assert abs(pos["pnl_usd"] - sum(x["pnl_usd"] for x in pos["legs"])) < 1e-9 and leg["metrics_at_entry"]["dl"] is not None
+    assert r["entries"][1]["error"] and r["entries"][1]["position"] is None                                                   # сломанный конфиг не роняет страницу
+    assert r["exchange"] == {"name": "dry-run", "real": False}
+    assert b.post("/api/monitor", json={}, headers=H_).json()["entries"] == []                                              # у другого пользователя своих конфигов нет
+    # автомод
+    cid = e["config_id"]
+    s = a.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).json()
+    assert s["auto"] == {"open": True, "manage": False}
+    assert a.put(f"/api/monitor/configs/{cid}/auto", json={"manage": True}, headers=H_).json()["auto"] == {"open": True, "manage": True}
+    assert b.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).status_code == 404                     # чужой конфиг
+    r2 = a.post("/api/monitor", json={}, headers=H_).json()
+    assert r2["entries"][0]["auto"] == {"open": True, "manage": True} and any(x["kind"] == "auto_toggle" for x in r2["log"])
+    assert a.post("/api/monitor/auto/off", headers=H_).json()["disabled"] == 1
+    assert a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]["auto"] == {"open": False, "manage": False}
+
+
+def test_test_position_requires_confirmation_limits_amount_and_is_dry_run(auth_env, monkeypatch):
+    app = create_app(load_settings())
+    a = client(app)
+    login(a, "alice", "alice-password")
+    assert a.post("/api/trading/test-position", json={}, headers=H_).status_code == 422                                      # без подтверждения — нельзя
+    assert a.post("/api/trading/test-position", json={"confirm": True, "usd": 1000}, headers=H_).status_code == 422          # потолок суммы
+    assert a.post("/api/trading/test-position", json={"confirm": True, "side": "x"}, headers=H_).status_code == 422
+    r = a.post("/api/trading/test-position", json={"confirm": True}, headers=H_).json()
+    assert r["status"] == "dry_run" and r["exchange"]["real"] is False and r["result"]["usd"] == 1.0 and r["result"]["symbol"] == "BTC/USDT:USDT"
+    log = a.post("/api/monitor", json={}, headers=H_).json()["log"]
+    assert log[0]["kind"] == "test_position" and log[0]["status"] == "dry_run"
+    # Arcus без коннектора: честная ошибка, а не «успех»
+    monkeypatch.setenv("TRADE_EXCHANGE", "arcus")
+    app2 = create_app(load_settings())
+    c2 = client(app2)
+    login(c2, "alice", "alice-password")
+    r2 = c2.post("/api/trading/test-position", json={"confirm": True}, headers=H_)
+    assert r2.status_code == 503 and "Arcus" in r2.json()["detail"]

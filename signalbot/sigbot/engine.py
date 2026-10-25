@@ -8,11 +8,7 @@ from app.schemas import BacktestParams
 from app.service import ParamError
 
 
-# Конфиги, сохранённые до появления этих возможностей, не содержат полей: считаем их выключенными (а не берём умолчания из .env),
-# чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно.
-LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False, "pyramid_move_pct": 0.0, "pyramid_move_dir": "any",
-              "pyramid_leverage": None, "liquidation_sim": False, "weekdays_only": False, "friday_close_before_min": 0.0,
-              "global_min": None, "short_global_max": None}
+from app.legacy_off import LEGACY_OFF  # noqa: E402  (общий список «выключено по умолчанию» для старых конфигов)
 
 
 class EvalError(RuntimeError):
@@ -193,6 +189,20 @@ class Engine:
                             "hold_h": t["hold_h"] if closed else None, "be": t["be"], "tp1_be": t["be"] and f["label"] == "TP1"})
         out.sort(key=lambda e: e["ts"])
         return out
+
+    @staticmethod
+    def order_size(result, add=False):
+        """(объём, маржа) в $ нового входа / добора — как в sizing_line: доля от баланса (сложный процент) или от начального депозита, умноженная на плечо."""
+        p, t = result["params"], result["stats"]["total"]
+        compound = p.get("compound", True)
+        bal = p["deposit"] + (t["total_usd"] if compound else 0)
+        base = bal if compound else p["deposit"]
+        if bal <= 0:
+            return 0.0, 0.0
+        pct = p["pyramid_pct"] if add and p.get("pyramid_pct") else p["trade_pct"]
+        lev = (p.get("pyramid_leverage") or p["leverage"]) if add else p["leverage"]
+        margin = base * pct / 100
+        return margin * lev, margin
 
     # ---------- план сделки ----------
     def plan(self, side, entry, tps, sl_pct):

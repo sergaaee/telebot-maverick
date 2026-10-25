@@ -1,4 +1,4 @@
-import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
+import type { AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorResponse, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -124,3 +124,16 @@ export const saveRun = (name: string, params: Params, tf: TfMode, summary: RunSu
   });
 
 export const deleteRun = (id: number) => request<{ ok: boolean }>(`/api/runs/${id}`, { method: 'DELETE' });
+
+export const getMonitor = (params: Params | null) =>
+  request<MonitorResponse>('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ params }) });
+
+export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean }) =>
+  request<{ auto: { open: boolean; manage: boolean } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+
+export const autoOffAll = () => request<{ disabled: number }>('/api/monitor/auto/off', { method: 'POST' });
+
+export const openTestPosition = (side: 'long' | 'short') =>
+  request<{ status: string; result: Record<string, unknown>; exchange: { name: string; real: boolean } }>('/api/trading/test-position', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true, side, usd: 1 }),
+  });
