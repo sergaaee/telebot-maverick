@@ -275,9 +275,12 @@ class Database:
                       (user_id, config_id, time.time(), kind, symbol, side, status, json.dumps(details, ensure_ascii=False)))
             c.execute("DELETE FROM auto_log WHERE user_id=? AND id NOT IN (SELECT id FROM auto_log WHERE user_id=? ORDER BY id DESC LIMIT 500)", (user_id, user_id))
 
-    def list_auto_log(self, user_id, limit=50):
+    def list_auto_log(self, user_id, limit=50, config_id=None):
         with self.conn() as c:
-            rows = c.execute("SELECT * FROM auto_log WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+            if config_id is None:
+                rows = c.execute("SELECT * FROM auto_log WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+            else:
+                rows = c.execute("SELECT * FROM auto_log WHERE user_id=? AND config_id=? ORDER BY id DESC LIMIT ?", (user_id, config_id, limit)).fetchall()
         return [{**dict(r), "details": json.loads(r["details"])} for r in rows]
 
     # ---------------- сохранённые прогоны (у каждого пользователя свои) ----------------

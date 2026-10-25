@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, getMonitor, openTestPosition, setAuto } from '../api';
-import { fmtPct, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
+import { autoOffAll, closeTestPosition, deleteConfig, exportBotConfig, getExchangeState, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
+import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
+import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
-import type { AutoLogItem, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
+import type { AutoLogItem, ExchangeInfo, ExchangeState, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
+import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
   open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту',
-  test_position: 'тестовая позиция', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде',
+  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
-const REASON_NAMES: Record<string, string> = { TP: 'тейк', SL: 'стоп', BE: 'БУ', REV: 'разворот', LIQ: 'ликвидация', WKND: 'закрытие пт', OPEN: 'открыта' };
 
 const ago = (ms: number | null | undefined) => {
   if (!ms) return '–';
@@ -41,60 +42,209 @@ function Leg({ l, side }: { l: MonitorLeg; side: 'long' | 'short' }) {
   );
 }
 
-function Card({ e, exchange, onToggle }: { e: MonitorEntry; exchange: MonitorResponse['exchange']; onToggle: (id: number, patch: { open?: boolean; manage?: boolean }) => void }) {
+const PAGE = 20;
+type Tab = 'pos' | 'hist' | 'stats' | 'params' | 'log';
+const TABS: [Tab, string][] = [['pos', 'Позиция'], ['hist', 'История'], ['stats', 'Статистика'], ['params', 'Параметры'], ['log', 'Журнал']];
+
+function PositionTab({ e }: { e: MonitorEntry }) {
+  const pos = e.position;
+  if (!pos) {
+    return (
+      <div>
+        <p className="note">Позиции сейчас нет.</p>
+        {e.ready_now && e.ready_now.length > 0 && <div className="ready-info">{e.ready_now.map((r) => <div key={r.side}><b>⏳ Готов к {r.side === 'long' ? 'ЛОНГУ' : 'ШОРТУ'}, ждёт:</b><ul>{r.lines.map((l, i) => <li key={i}>{l}</li>)}</ul></div>)}</div>}
+        {e.report && <p className="muted small">Метрики сейчас: DG {e.report.dg?.toFixed(2) ?? '–'} · DL {e.report.dl.toFixed(2)} · DS {e.report.ds.toFixed(2)} ({ago(e.report.ts)})</p>}
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="mon-grid">
+        <Row label="Открыта">{fmtTs(pos.opened_ts)} · {held(pos.hold_h)}</Row>
+        <Row label="Цена сейчас">{e.price ? fmtPrice(e.price) : '–'} <span className="muted">({ago(e.candle_ts)})</span></Row>
+        <Row label="Средний вход">{fmtPrice(pos.avg_entry)} <span className={signClass(pos.side === 'long' ? (e.price ?? 0) - pos.avg_entry : pos.avg_entry - (e.price ?? 0))}>{e.price ? fmtPct(((e.price / pos.avg_entry - 1) * (pos.side === 'long' ? 1 : -1)) * 100, 2) : ''}</span></Row>
+        <Row label="Объём / маржа">{fmtUsd(pos.notional)} / {fmtUsd(pos.margin)}</Row>
+        <Row label="Результат"><b className={signClass(pos.pnl_usd)}>{fmtUsd(pos.pnl_usd)}</b> <span className="muted">{pos.pnl_pct_deposit != null ? `${fmtPct(pos.pnl_pct_deposit, 2)} депозита` : ''}{pos.pnl_pct_margin != null ? ` · ${fmtPct(pos.pnl_pct_margin, 1)} маржи` : ''}</span></Row>
+        {pos.deadline_ts && <Row label="Закрытие к концу недели">{fmtTs(pos.deadline_ts)} UTC</Row>}
+        {e.report && <Row label="Метрики сейчас">DG {e.report.dg?.toFixed(2) ?? '–'} · DL {e.report.dl.toFixed(2)} · DS {e.report.ds.toFixed(2)} <span className="muted">({ago(e.report.ts)})</span></Row>}
+      </div>
+      <div className="table-wrap mon-legs">
+        <table className="trades">
+          <thead><tr><th>нога</th><th>вход</th><th>объём</th><th>стоп (запас)</th><th>тейки</th><th>ликвид.</th><th>результат</th><th>метрики на входе</th></tr></thead>
+          <tbody>{(pos.legs ?? []).map((l, i) => <Leg key={i} l={l} side={pos.side} />)}</tbody>
+        </table>
+      </div>
+      {e.settings && <div className="muted small">План: SL {e.settings.sl_pct}% · TP {e.settings.tps.map((t) => `${t.pct}%×${t.share}`).join(' / ')}{e.settings.be_after_tp1 ? ' · БУ после TP1' : ''} · плечо {e.settings.leverage}×{e.settings.pyramid_leverage ? ` (доборы ${e.settings.pyramid_leverage}×)` : ''} · {e.settings.trade_pct}% депозита {fmtUsd(e.settings.deposit)}</div>}
+    </>
+  );
+}
+
+function HistoryTab({ e }: { e: MonitorEntry }) {
+  const [page, setPage] = useState(0);
+  const h = e.history ?? [];
+  if (!h.length) return <p className="note">Закрытых сделок пока нет.</p>;
+  const pages = Math.ceil(h.length / PAGE);
+  return (
+    <div data-testid="mon-history">
+      <div className="table-wrap mon-log">
+        <table className="trades">
+          <thead><tr><th>#</th><th>сторона</th><th>вход (UTC)</th><th>цена</th><th>выход</th><th>цена</th><th>причина</th><th>тейки</th><th>держал</th><th>PnL</th><th>PnL $</th></tr></thead>
+          <tbody>
+            {h.slice(page * PAGE, (page + 1) * PAGE).map((t) => (
+              <tr key={t.n} title={t.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${fmtPrice(f.price)}`).join(' → ')}>
+                <td>{t.n}</td><td className={t.side === 'long' ? 'pos' : 'neg'}>{t.side === 'long' ? 'лонг' : 'шорт'}{t.leg > 1 ? ` +${t.leg - 1}` : ''}</td>
+                <td>{fmtTs(t.entry_ts)}</td><td>{fmtPrice(t.entry)}</td><td>{fmtTs(t.exit_ts)}</td><td>{fmtPrice(t.exit)}</td>
+                <td><span className={`tag tag-${t.reason}`}>{t.reason}</span></td><td>{t.tp_hits || '–'}</td><td>{held(t.hold_h)}</td>
+                <td className={signClass(t.pnl_pct)}>{fmtPct(t.pnl_pct, 2)}</td><td className={signClass(t.pnl_usd)}>{fmtUsd(t.pnl_usd)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mon-pager">
+        <button type="button" className="ghost" disabled={page === 0} onClick={() => setPage(page - 1)}>←</button>
+        <span className="muted small">{page + 1} / {pages} · последние {h.length} закрытых</span>
+        <button type="button" className="ghost" disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>→</button>
+      </div>
+    </div>
+  );
+}
+
+function StatsTab({ e }: { e: MonitorEntry }) {
+  const t = e.stats;
+  if (!t || !t.trades) return <p className="note">Сделок по этому конфигу в истории пока нет.</p>;
+  const n = (k: string) => (t[k] ?? 0) as number;
+  return (
+    <div className="cards mon-cards" data-testid="mon-stats">
+      <StatCard label="Итого" value={fmtUsd(n('total_usd'))} cls={signClass(n('total_usd'))} sub={t.return_pct != null ? `${fmtPct(t.return_pct as number, 1)} от депозита` : undefined} />
+      <StatCard label="Сделок" value={String(n('trades'))} sub={`TP ${n('tp')} · БУ ${n('be')} · SL ${n('sl')} · разворот ${n('rev')}${n('liq') ? ` · ликвид. ${n('liq')}` : ''}${n('wknd') ? ` · пятница ${n('wknd')}` : ''}`} />
+      <StatCard label="Winrate" value={`${n('winrate').toFixed(1)}%`} />
+      <StatCard label="Profit factor" value={fmtPf((t.profit_factor as number | null) ?? null)} />
+      <StatCard label="Коэф. Шарпа" value={t.sharpe == null ? '–' : (t.sharpe as number).toFixed(2)} cls={t.sharpe == null ? '' : signClass(t.sharpe as number)} />
+      <StatCard label="Макс. просадка" value={fmtUsd(-n('max_dd_usd'))} cls="neg" sub={t.max_dd_pct != null ? `${(t.max_dd_pct as number).toFixed(1)}% по закрытым` : undefined} />
+      {t.max_dd_real_usd != null && <StatCard label="Реальная просадка" value={fmtUsd(-n('max_dd_real_usd'))} cls="neg" sub={`${n('max_dd_real_pct').toFixed(1)}% с открытыми позициями`} />}
+      <StatCard label="Серия убытков" value={String(n('max_loss_streak'))} sub="макс. подряд" />
+      <StatCard label="В позиции" value={`${n('exposure_pct').toFixed(0)}%`} sub="доля времени" />
+    </div>
+  );
+}
+
+function ParamsTab({ e }: { e: MonitorEntry }) {
+  const p = e.params as Record<string, unknown> | undefined;
+  if (!p) return null;
+  const on = (k: string) => (p[k] ? 'да' : 'нет');
+  const rows: [string, string][] = [
+    ['Источник · актив · ТФ графика', `${p.source} · ${p.symbol} · ${e.tf ?? 'auto'}`], ['Сторона', String(p.side)], ['Метрика', p.only ? String(p.only) : 'Local + Scalp'],
+    ['Пороги лонга', `DL ≥ ${p.local_min} · DS ≥ ${p.scalp_min}${p.global_min != null ? ` · DG ≥ ${p.global_min}` : ''}`], ['Пороги шорта', `DL ≤ ${p.short_local_max} · DS ≤ ${p.short_scalp_max}${p.short_global_max != null ? ` · DG ≤ ${p.short_global_max}` : ''}`],
+    ['Подтверждение', `${p.confirm} отчётов подряд`], ['Остывание', p.cool_drop != null ? `откат ${p.cool_drop} (${p.cool_metric})` : p.cool_declines != null ? `${p.cool_declines} отчётов подряд (${p.cool_metric})` : 'выключено'],
+    ['Ликвидации (фильтр)', p.liq_hours != null ? `окно ${p.liq_hours} ч, ≤ ${p.liq_frac} пика, перцентиль ${p.liq_pct}` : 'выключено'], ['Тренд', p.trend_enabled ? `EMA ${(p.trend_emas as number[]).join('/')} на ${p.trend_tf}` : 'выключен'],
+    ['Выход', `SL ${p.sl_pct}% · TP ${(p.tps as { pct: number; share: number }[]).map((t) => `${t.pct}%×${t.share}`).join(' / ')}${p.be_after_tp1 ? ' · БУ после TP1' : ''}`],
+    ['Размер', `депозит ${fmtUsd(p.deposit as number)} · ${p.trade_pct}% · плечо ${p.leverage}× · ${p.compound ? 'сложный %' : 'фикс. сумма'}`],
+    ['Пирамидинг', p.pyramid_enabled ? `до ${p.pyramid_max} × ${p.pyramid_pct}%${p.pyramid_avg ? ' с усреднением' : ''}${p.pyramid_leverage ? `, плечо ${p.pyramid_leverage}×` : ''}${p.pyramid_move_pct ? `, движение ≥ ${p.pyramid_move_pct}%` : ''}` : 'выключен'],
+    ['Только будни', on('weekdays_only')], ['Моделировать ликвидацию', on('liquidation_sim')], ['Не ставить SL, пока метрики сильны', on('sl_hold_strong')],
+    ['Пауза после стопа / между сигналами', `${p.cooldown_h} ч / ${p.signal_gap_h} ч`], ['Топ-коины', on('top_enabled')], ['Создан', e.created ? fmtTs(e.created * 1000) : '–'], ['Уведомлений', String(e.alerts ?? 0)],
+  ];
+  return <div className="mon-params" data-testid="mon-params">{rows.map(([k, v]) => <Row key={k} label={k}>{v}</Row>)}</div>;
+}
+
+/** Подробности стратегии под её строкой: вкладки позиция / история / статистика / параметры / журнал и действия управления. */
+function Details({ id, onChanged, exchange }: { id: number; onChanged: () => void; exchange: MonitorResponse['exchange'] }) {
+  const [e, setE] = useState<MonitorEntry | null>(null);
+  const [tab, setTab] = useState<Tab>('pos');
+  const [err, setErr] = useState<string | null>(null);
+  const alive = useRef(true);
+  const load = useCallback(async () => {
+    try {
+      const d = await getMonitorDetail(id);
+      if (alive.current) {
+        setE(d);
+        setErr(null);
+      }
+    } catch (x) {
+      if (alive.current) setErr(x instanceof Error ? x.message : String(x));
+    }
+  }, [id]);
+  useEffect(() => {
+    alive.current = true;
+    void load();
+    const t = setInterval(() => void load(), 30000);
+    return () => {
+      alive.current = false;
+      clearInterval(t);
+    };
+  }, [load]);
+
+  const act = async (fn: () => Promise<unknown>, gone = false) => {
+    try {
+      await fn();
+      if (!gone) await load();                                  // после удаления конфига подробности перечитывать нельзя (404): строка исчезнет после обновления списка
+      onChanged();
+    } catch (x) {
+      setErr(x instanceof Error ? x.message : String(x));
+    }
+  };
+  if (err && !e) return <div className="bad-text small">{err}</div>;
+  if (!e) return <div className="muted small">Загрузка подробностей…</div>;
+  return (
+    <div className="mon-details" data-testid="mon-details">
+      <div className="mon-actions">
+        <button type="button" className="ghost" onClick={() => { const n = window.prompt('Новое имя конфига', e.title ?? ''); if (n && n.trim()) void act(() => renameConfig(id, n.trim())); }}>Переименовать</button>
+        <button type="button" className="ghost" onClick={() => void exportBotConfig(id).then((c) => downloadText(`maverick-config_${id}.json`, JSON.stringify(c, null, 2), 'application/json')).catch((x) => setErr(String(x)))}>⬇ Скачать конфиг</button>
+        <button type="button" className="ghost bad-text" onClick={() => { if (window.confirm(`Удалить конфиг «${e.title}»? Бот перестанет по нему считать и присылать сигналы. Открытые на бирже позиции это не закрывает.`)) void act(() => deleteConfig(id), true); }}>Удалить</button>
+        {exchange.real === false && <span className="muted small">автомод — симуляция</span>}
+        {err && <span className="bad-text small"> {err}</span>}
+      </div>
+      <div className="seg-mini mon-tabs" role="tablist">
+        {TABS.map(([k, name]) => <button key={k} type="button" role="tab" aria-selected={tab === k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{name}</button>)}
+      </div>
+      {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
+      {tab === 'pos' && <PositionTab e={e} />}
+      {tab === 'hist' && <HistoryTab e={e} />}
+      {tab === 'stats' && <StatsTab e={e} />}
+      {tab === 'params' && <ParamsTab e={e} />}
+      {tab === 'log' && <Journal log={e.log ?? []} />}
+    </div>
+  );
+}
+
+function statusOf(e: MonitorEntry): { cls: string; text: string } {
+  if (e.error) return { cls: 'bad', text: 'ошибка расчёта' };
+  if (e.paused) return { cls: 'paused', text: 'на паузе' };
+  if (e.position) return { cls: 'open', text: e.position.side === 'long' ? 'в лонге' : 'в шорте' };
+  if (e.ready_now && e.ready_now.length) return { cls: 'ready', text: 'ждёт подтверждения' };
+  return { cls: 'idle', text: 'позиции нет' };
+}
+
+/** Строка стратегии в списке: статус, позиция, автомод, пауза и «Подробнее». */
+function Row2({ e, open, exchange, onToggleOpen, onAuto, onPause }: {
+  e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange'];
+  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean }) => void; onPause: () => void;
+}) {
+  const st = statusOf(e);
   const pos = e.position;
   const stale = e.candle_ts ? (Date.now() - e.candle_ts) / 60000 : null;
   return (
-    <section className="mon-card" data-testid="mon-card" data-name={e.name}>
-      <div className="mon-head">
-        <b>{e.name}</b>
-        <span className="muted"> · {e.symbol?.split('/')[0] ?? '–'}{e.source ? ` · ${e.source}` : ''}{e.paused ? ' · на паузе' : ''}</span>
-        {pos && <span className={pos.side === 'long' ? 'pos' : 'neg'}> · {pos.side === 'long' ? 'ЛОНГ' : 'ШОРТ'}</span>}
-        {!pos && !e.error && <span className="muted"> · позиции нет</span>}
-        {e.config_id != null && e.auto && (
-          <span className="mon-auto" data-testid="mon-auto">
-            <label title={HELP.auto_open}><input type="checkbox" checked={e.auto.open} onChange={(ev) => onToggle(e.config_id!, { open: ev.target.checked })} /> открывать по сигналу<Help text={HELP.auto_open} /></label>
-            <label title={HELP.auto_manage}><input type="checkbox" checked={e.auto.manage} onChange={(ev) => onToggle(e.config_id!, { manage: ev.target.checked })} /> управлять позицией<Help text={HELP.auto_manage} /></label>
-            {(e.auto.open || e.auto.manage) && <span className={exchange.real ? 'neg' : 'muted'}>{exchange.real ? ' ● торгует на бирже' : ' ● симуляция'}</span>}
-          </span>
-        )}
+    <div className="mon-row" data-status={st.cls}>
+      <span className={`mon-dot ${st.cls}`} title={st.text} />
+      <div className="mon-name"><b>{e.title ?? e.name}</b><span className="muted small"> #{e.config_id} · {e.symbol?.split('/')[0] ?? '–'}{e.source ? ` · ${e.source}` : ''}</span></div>
+      <div className="mon-state">
+        <span className={st.cls === 'open' ? (pos?.side === 'long' ? 'pos' : 'neg') : 'muted'}>{st.text}</span>
+        {pos && <> · <b className={signClass(pos.pnl_usd)}>{fmtUsd(pos.pnl_usd)}</b> <span className="muted small">{pos.pnl_pct_deposit != null ? fmtPct(pos.pnl_pct_deposit, 2) : ''} · {held(pos.hold_h)}{pos.legs_n && pos.legs_n > 1 ? ` · ног ${pos.legs_n}` : ''}</span></>}
+        {pos?.danger && <span className="bad-text small" title="цена за оценочной ценой ликвидации"> ⚠ ликвидация</span>}
+        {!pos && e.ready_now && e.ready_now[0] && <span className="muted small"> · {e.ready_now[0].waiting.map((w) => ({ cool: 'откат', liq: 'ликвидации', trend: 'тренд' })[w]).join(' + ')}</span>}
+        {e.baseline === false && !e.paused && <span className="muted small" title="Бот ещё не обработал этот конфиг (первый расчёт идёт или бот не запущен)"> · бот ещё не посчитал</span>}
+        {stale != null && stale > 20 && <span className="warn-text small"> · свечи {ago(e.candle_ts)}</span>}
       </div>
-      {e.config_id == null && <div className="muted small">Сохранённый прогон: автомод включается только у конфигов бота.</div>}
-      {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
-      {stale != null && stale > 20 && <div className="warn-text small">Свечи не обновлялись {ago(e.candle_ts)} — цена и уровни могут отставать.</div>}
-      {pos && e.price && pos.legs.some((l) => l.liq_price != null && (pos.side === 'long' ? e.price! <= l.liq_price : e.price! >= l.liq_price)) && (
-        <div className="bad-text small">⚠ Цена за оценочной ценой ликвидации — при таком плече и изолированной марже позицию на бирже уже ликвидировали бы (в расчёте стратегии ликвидация учитывается, только если включена «моделировать ликвидацию»).</div>
-      )}
-      {pos && (
-        <>
-          <div className="mon-grid">
-            <Row label="Открыта">{fmtTs(pos.opened_ts)} · {held(pos.hold_h)}</Row>
-            <Row label="Цена сейчас">{e.price ? fmtPrice(e.price) : '–'} <span className="muted">({ago(e.candle_ts)})</span></Row>
-            <Row label="Средний вход">{fmtPrice(pos.avg_entry)} <span className={signClass(pos.side === 'long' ? (e.price ?? 0) - pos.avg_entry : pos.avg_entry - (e.price ?? 0))}>{e.price ? fmtPct(((e.price / pos.avg_entry - 1) * (pos.side === 'long' ? 1 : -1)) * 100, 2) : ''}</span></Row>
-            <Row label="Объём / маржа">{fmtUsd(pos.notional)} / {fmtUsd(pos.margin)}</Row>
-            <Row label="Результат"><b className={signClass(pos.pnl_usd)}>{fmtUsd(pos.pnl_usd)}</b> <span className="muted">{pos.pnl_pct_deposit != null ? `${fmtPct(pos.pnl_pct_deposit, 2)} депозита` : ''}{pos.pnl_pct_margin != null ? ` · ${fmtPct(pos.pnl_pct_margin, 1)} маржи` : ''}</span></Row>
-            {pos.deadline_ts && <Row label="Закрытие к концу недели">{fmtTs(pos.deadline_ts)} UTC</Row>}
-            {e.report && <Row label="Метрики сейчас">DG {e.report.dg?.toFixed(2) ?? '–'} · DL {e.report.dl.toFixed(2)} · DS {e.report.ds.toFixed(2)} <span className="muted">({ago(e.report.ts)})</span></Row>}
-          </div>
-          <div className="table-wrap mon-legs">
-            <table className="trades">
-              <thead><tr><th>нога</th><th>вход</th><th>объём</th><th>стоп (запас)</th><th>тейки</th><th>ликвид.</th><th>результат</th><th>метрики на входе</th></tr></thead>
-              <tbody>{pos.legs.map((l, i) => <Leg key={i} l={l} side={pos.side} />)}</tbody>
-            </table>
-          </div>
-        </>
-      )}
-      {!pos && e.ready_now && e.ready_now.length > 0 && (
-        <div className="ready-info">{e.ready_now.map((r) => <div key={r.side}><b>⏳ Готов к {r.side === 'long' ? 'ЛОНГУ' : 'ШОРТУ'}, ждёт:</b><ul>{r.lines.map((l, i) => <li key={i}>{l}</li>)}</ul></div>)}</div>
-      )}
-      {!pos && e.report && !e.error && <div className="muted small">Метрики сейчас: DG {e.report.dg?.toFixed(2) ?? '–'} · DL {e.report.dl.toFixed(2)} · DS {e.report.ds.toFixed(2)} ({ago(e.report.ts)})</div>}
-      {e.settings && <div className="muted small">План: SL {e.settings.sl_pct}% · TP {e.settings.tps.map((t) => `${t.pct}%×${t.share}`).join(' / ')}{e.settings.be_after_tp1 ? ' · БУ после TP1' : ''} · плечо {e.settings.leverage}×{e.settings.pyramid_leverage ? ` (доборы ${e.settings.pyramid_leverage}×)` : ''} · {e.settings.trade_pct}% депозита {fmtUsd(e.settings.deposit)}</div>}
-      {e.recent && e.recent.length > 0 && (
-        <details className="mon-recent"><summary>Последние закрытые ({e.recent.length})</summary>
-          <ul>{e.recent.map((t, i) => <li key={i}><span className={t.side === 'long' ? 'pos' : 'neg'}>{t.side === 'long' ? 'лонг' : 'шорт'}</span> {fmtTs(t.entry_ts)} → {fmtTs(t.exit_ts)} · {REASON_NAMES[t.reason] ?? t.reason} · {held(t.hold_h)} · <span className={signClass(t.pnl_usd)}>{fmtUsd(t.pnl_usd)}</span></li>)}</ul>
-        </details>
-      )}
-    </section>
+      <span className="mon-auto" data-testid="mon-auto">
+        <label title={HELP.auto_open}><input type="checkbox" checked={e.auto?.open ?? false} disabled={e.paused} onChange={(ev) => onAuto({ open: ev.target.checked })} /> открывать<Help text={HELP.auto_open} /></label>
+        <label title={HELP.auto_manage}><input type="checkbox" checked={e.auto?.manage ?? false} disabled={e.paused} onChange={(ev) => onAuto({ manage: ev.target.checked })} /> управлять<Help text={HELP.auto_manage} /></label>
+        {(e.auto?.open || e.auto?.manage) && <span className={exchange.real ? 'neg small' : 'muted small'}>{exchange.real ? '● биржа' : '● симуляция'}</span>}
+      </span>
+      <span className="mon-btns">
+        <button type="button" className="ghost" onClick={onPause} data-testid="mon-pause">{e.paused ? '▶ Возобновить' : '⏸ Пауза'}</button>
+        <button type="button" className="ghost" onClick={onToggleOpen} aria-expanded={open} data-testid="mon-more">{open ? 'Свернуть ▴' : 'Подробнее ▾'}</button>
+      </span>
+    </div>
   );
 }
 
@@ -109,7 +259,7 @@ function Journal({ log }: { log: AutoLogItem[] }) {
             <tr key={x.id}>
               <td>{fmtTs(x.ts * 1000)}</td><td>{KIND_NAMES[x.kind] ?? x.kind}</td><td>{x.symbol?.split('/')[0] ?? ''} {x.side === 'long' ? 'лонг' : x.side === 'short' ? 'шорт' : ''}</td>
               <td className={x.status === 'error' ? 'neg' : x.status === 'dry_run' ? 'muted' : ''}>{STATUS_NAMES[x.status] ?? x.status}</td>
-              <td className="muted small">{x.details.error ? String(x.details.error) : x.details.note ? String(x.details.note) : x.details.usd != null ? `${x.details.usd} $` : x.details.notional != null ? `объём ${fmtUsd(Number(x.details.notional))}` : x.details.auto ? `открывать: ${(x.details.auto as { open: boolean }).open ? 'да' : 'нет'}, управлять: ${(x.details.auto as { manage: boolean }).manage ? 'да' : 'нет'}` : ''}</td>
+              <td className="muted small">{x.details.error ? String(x.details.error) : x.details.note ? String(x.details.note) : x.details.margin != null && x.kind === 'test_position' ? `маржа ${x.details.margin} $ · объём ${fmtUsd(Number(x.details.notional ?? 0))}` : x.details.notional != null ? `объём ${fmtUsd(Number(x.details.notional))}` : x.details.auto ? `открывать: ${(x.details.auto as { open: boolean }).open ? 'да' : 'нет'}, управлять: ${(x.details.auto as { manage: boolean }).manage ? 'да' : 'нет'}` : ''}</td>
             </tr>
           ))}
         </tbody>
@@ -118,27 +268,78 @@ function Journal({ log }: { log: AutoLogItem[] }) {
   );
 }
 
-/** Страница мониторинга: открытые позиции стратегий (расчёт по свечам Binance), автомод по конфигам, тестовая позиция $1, журнал действий. */
+const exchangeLabel = (x: ExchangeInfo) => (x.name === 'hyperliquid' ? `Hyperliquid (${x.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть'})` : x.name);
+
+/** Что именно сейчас происходит с ордерами: симуляция, тестовая сеть или боевая. */
+function ExchangeBanner({ info }: { info?: ExchangeInfo }) {
+  const live = info?.real && !info.testnet;
+  return (
+    <div className={`banner ${live ? 'error' : 'warn'}`} data-testid="mon-banner">
+      <span>
+        {info?.real ? (
+          <>Торговля: <b>{exchangeLabel(info)}</b> — автомод {live ? <b>отправляет реальные ордера на настоящие деньги</b> : 'отправляет ордера в тестовую сеть'}. </>
+        ) : (
+          <>Биржа для торговли не подключена — автомод работает как <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются; чтобы торговать, задайте TRADE_EXCHANGE=hyperliquid и ключи в .env). </>
+        )}
+        Позиции в списке ниже — расчёт стратегий по свечам и отчётам Binance, а не позиции на бирже{info?.real ? ': реальные позиции биржи — в отдельном блоке' : ''}.
+      </span>
+    </div>
+  );
+}
+
+/** Реальные позиции и баланс с биржи (не расчёт стратегий). */
+function ExchangeBlock({ info, state, error }: { info: ExchangeInfo; state: ExchangeState | null; error: string | null }) {
+  return (
+    <section className="mon-card" data-testid="mon-exchange">
+      <div className="mon-head"><b>Биржа: {exchangeLabel(info)}</b><Help text={HELP.exchange_block} />
+        {state?.account.equity != null && <span className="muted small"> · капитал {fmtUsd(Number(state.account.equity), 2)} · свободно {fmtUsd(Number(state.account.free ?? 0), 2)}</span>}</div>
+      {error && <div className="bad-text small">Биржа: {error}</div>}
+      {state && state.positions.length === 0 && !error && <div className="muted small">Открытых позиций на бирже нет.</div>}
+      {state && state.positions.length > 0 && (
+        <div className="table-wrap mon-legs">
+          <table className="trades">
+            <thead><tr><th>контракт</th><th>сторона</th><th>размер</th><th>вход</th><th>цена</th><th>ликвид.</th><th>плечо</th><th>маржа</th><th>PnL</th></tr></thead>
+            <tbody>{state.positions.map((p, i) => (
+              <tr key={i}><td>{p.symbol}</td><td className={p.side === 'long' ? 'pos' : 'neg'}>{p.side === 'long' ? 'лонг' : 'шорт'}</td><td>{p.size}</td>
+                <td>{p.entry != null ? fmtPrice(p.entry) : '–'}</td><td>{p.mark != null ? fmtPrice(p.mark) : '–'}</td><td>{p.liq != null ? fmtPrice(p.liq) : '–'}</td>
+                <td>{p.leverage ?? '–'}×</td><td>{p.margin != null ? fmtUsd(p.margin, 2) : '–'}</td><td className={signClass(p.pnl_usd ?? 0)}>{p.pnl_usd != null ? fmtUsd(p.pnl_usd, 2) : '–'}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Страница мониторинга: ВСЕ стратегии пользователя (конфиги, отправленные боту), по клику «Подробнее» — позиция, история, статистика, параметры и журнал; управление (автомод, пауза, имя, удаление). От бэктеста не зависит. */
 export default function MonitorPage() {
   const [data, setData] = useState<MonitorResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testSide, setTestSide] = useState<'long' | 'short'>('long');
-  const [withRuns, setWithRuns] = useState(false);
+  const [openIds, setOpenIds] = useState<Set<number>>(new Set());
+  const [ex, setEx] = useState<ExchangeState | null>(null);
+  const [exErr, setExErr] = useState<string | null>(null);
   const alive = useRef(true);
 
   const load = useCallback(async () => {
     try {
-      const r = await getMonitor(withRuns);
+      const r = await getMonitor();
       if (alive.current) {
         setData(r);
         setErr(null);
       }
+      if (r.exchange.real) {                                        // реальные позиции и баланс с биржи; сбой биржи не мешает остальной странице
+        getExchangeState().then((x) => alive.current && (setEx(x), setExErr(null))).catch((e) => alive.current && setExErr(e instanceof Error ? e.message : String(e)));
+      } else if (alive.current) {
+        setEx(null);
+        setExErr(null);
+      }
     } catch (e) {
       if (alive.current) setErr(e instanceof Error ? e.message : String(e));
     }
-  }, [withRuns]);
+  }, []);
 
   useEffect(() => {
     alive.current = true;
@@ -150,16 +351,34 @@ export default function MonitorPage() {
     };
   }, [load]);
 
-  const toggle = async (id: number, patch: { open?: boolean; manage?: boolean }) => {
+  const toggleOpen = (id: number) => setOpenIds((s) => {
+    const n = new Set(s);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
+    return n;
+  });
+
+  const auto = async (id: number, patch: { open?: boolean; manage?: boolean }) => {
     const turningOn = patch.open === true || patch.manage === true;
     if (turningOn && !window.confirm(data?.exchange.real
-      ? 'Включить автомод? Бот будет сам отправлять ордера на бирже по этому конфигу.'
+      ? `Включить автомод? Бот будет сам отправлять ордера на ${exchangeLabel(data.exchange)} по этому конфигу.`
       : 'Включить автомод? Биржа для торговли не подключена — действия будут только записываться в журнал (симуляция).')) return;
     try {
       await setAuto(id, patch);
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const pause = async (e: MonitorEntry) => {
+    if (e.config_id == null) return;
+    if (!e.paused && !window.confirm('Поставить конфиг на паузу? Бот перестанет по нему считать и присылать сигналы, автомод будет выключен.')) return;
+    try {
+      await pauseConfig(e.config_id, !e.paused);
+      await load();
+    } catch (x) {
+      setErr(x instanceof Error ? x.message : String(x));
     }
   };
 
@@ -171,12 +390,14 @@ export default function MonitorPage() {
   };
 
   const testPos = async () => {
-    if (!window.confirm(`Открыть тестовую позицию $1 по BTC (${testSide === 'long' ? 'лонг' : 'шорт'})?${data?.exchange.real ? ' Это реальный ордер на бирже.' : ' Биржа не подключена — будет симуляция.'}`)) return;
+    const mn = data?.exchange.min_notional ?? 0;
+    const lev = mn ? Math.ceil(mn / 1) : 1;
+    if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): маржа 1 $ × ${lev}× = объём ${lev} $?${data?.exchange.real ? ` Это реальный ордер на ${exchangeLabel(data.exchange)}.` : ' Биржа не подключена — будет симуляция.'}`)) return;
     setBusy(true);
     setMsg(null);
     try {
       const r = await openTestPosition(testSide);
-      setMsg(r.status === 'dry_run' ? 'Симуляция: ордер не отправлялся (биржа не подключена). Запись добавлена в журнал.' : `Ордер отправлен: ${r.status}`);
+      setMsg(r.status === 'dry_run' ? 'Симуляция: ордер не отправлялся (биржа не подключена). Запись добавлена в журнал.' : `Открыта: маржа ${r.margin} $ × ${r.leverage}× = объём ${r.notional} $. Закрыть — кнопкой «Закрыть тестовую».`);
     } catch (e) {
       setMsg(`Не удалось: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -185,23 +406,35 @@ export default function MonitorPage() {
     }
   };
 
-  const anyAuto = (data?.entries ?? []).some((e) => e.auto && (e.auto.open || e.auto.manage));
+  const closeTest = async () => {
+    if (!window.confirm('Закрыть позицию по BTC на бирже целиком (рыночным ордером) и снять висящие ордера?')) return;
+    setBusy(true);
+    try {
+      const r = await closeTestPosition();
+      setMsg(r.status === 'dry_run' ? 'Симуляция: закрывать нечего.' : r.status === 'skipped' ? 'На бирже нет позиции по BTC — закрывать нечего.' : 'Позиция по BTC закрыта.');
+    } catch (e) {
+      setMsg(`Не удалось: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+      await load();
+    }
+  };
+
+  const entries = data?.entries ?? [];
+  const anyAuto = entries.some((e) => e.auto && (e.auto.open || e.auto.manage));
+  const live = entries.filter((e) => e.position && !e.paused);                 // позиции конфигов на паузе в сводку не входят
+  const open = live.length;
+  const total = live.reduce((a, e) => a + (e.position?.pnl_usd ?? 0), 0);
   return (
     <div className="monitor" data-testid="monitor-page">
       <div className="mon-top">
-        <h2>Мониторинг позиций <Help text={HELP.monitor_page} /></h2>
+        <h2>Стратегии и позиции <Help text={HELP.monitor_page} /></h2>
         <button type="button" className="ghost" onClick={() => void load()}>Обновить</button>
-        <label className="muted small"><input type="checkbox" checked={withRuns} onChange={(e) => setWithRuns(e.target.checked)} /> показать и сохранённые прогоны</label>
+        {data && <span className="muted small" data-testid="mon-summary">Стратегий: {entries.length} · с позицией: {open}{open > 0 && <> · открытый результат <b className={signClass(total)}>{fmtUsd(total)}</b></>}</span>}
         <span className="mon-spacer" />
         <button type="button" className="ghost" disabled={!anyAuto} onClick={() => void offAll()}>⛔ Выключить автомод везде</button><Help text={HELP.auto_off_all} />
       </div>
-      <div className="banner warn" data-testid="mon-banner">
-        <span>
-        Данные — расчёт стратегий по свечам и отчётам Binance, а не позиции на бирже. Биржа для торговли — Arcus: коннектор ещё не подключён, автомод работает как{' '}
-        <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются){data?.exchange.real ? ' — НО выбран реальный адаптер.' : '.'}
-
-        </span>
-      </div>
+      <ExchangeBanner info={data?.exchange} />
       {err && <div className="banner error">{err}</div>}
       <div className="mon-test">
         <b>Тестовая позиция $1 по BTC</b><Help text={HELP.test_position} />
@@ -209,14 +442,25 @@ export default function MonitorPage() {
           <option value="long">лонг</option><option value="short">шорт</option>
         </select>
         <button type="button" className="ghost" disabled={busy} onClick={() => void testPos()}>{busy ? 'Открываю…' : 'Открыть'}</button>
+        {data?.exchange.real && <button type="button" className="ghost" disabled={busy} onClick={() => void closeTest()}>Закрыть тестовую</button>}
         {msg && <span className="muted small" data-testid="mon-msg"> {msg}</span>}
       </div>
+      {data?.exchange.real && <ExchangeBlock info={data.exchange} state={ex} error={exErr} />}
       {!data && !err && <div className="empty">Загрузка…</div>}
-      {data && data.entries.length === 0 && <div className="empty">Нет конфигов бота. Добавьте конфиг боту в Telegram или отметьте «показать и сохранённые прогоны» (их можно сохранить на странице бэктеста).</div>}
-      {data?.entries.map((e) => <Card key={e.name} e={e} exchange={data.exchange} onToggle={(id, patch) => void toggle(id, patch)} />)}
+      {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Отправьте конфиг боту в Telegram (файлом или текстом) — он появится здесь.</div>}
+      <div className="mon-list">
+        {entries.map((e) => (
+          <section key={e.config_id ?? e.name} className="mon-card" data-testid="mon-card" data-name={e.title ?? e.name}>
+            <Row2 e={e} open={e.config_id != null && openIds.has(e.config_id)} exchange={data!.exchange}
+              onToggleOpen={() => e.config_id != null && toggleOpen(e.config_id)} onAuto={(p) => e.config_id != null && void auto(e.config_id, p)} onPause={() => void pause(e)} />
+            {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
+            {e.config_id != null && openIds.has(e.config_id) && <Details id={e.config_id} exchange={data!.exchange} onChanged={() => void load()} />}
+          </section>
+        ))}
+      </div>
       {data && (
         <>
-          <h3>Журнал действий</h3>
+          <h3>Общий журнал действий</h3>
           <Journal log={data.log} />
         </>
       )}

@@ -1,5 +1,6 @@
 """FastAPI-бэкенд интерактивного просмотра бэктеста. Запуск: python cli.py serve (из папки backend/)."""
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,7 @@ from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_sy
 from .schemas import BacktestParams, MonteCarloRequest
 from .monitor import evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
-from .trading import NotConfigured, TEST_MAX_USD, get_adapter
+from .trading import ExchangeError, NotConfigured, TEST_MAX_USD, get_adapter
 
 
 class LoginIn(BaseModel):
@@ -317,11 +318,62 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         """Открытые позиции по конфигам бота пользователя (и, если runs=true, по его сохранённым прогонам) со всеми уровнями и цифрами.
         Это расчёт стратегии по свечам, а не позиции на бирже."""
         uid = request.state.user["id"]
-        entries = [evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn) for c in db.list_configs(uid)]
+        entries = [{**evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn),
+                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"]} for c in db.list_configs(uid)]
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
-        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": {"name": adapter.name, "real": adapter.real},
+        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": adapter.describe(),
                 "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
+
+    def _own(request, config_id):
+        c = db.find_config(request.state.user["id"], str(config_id))
+        if not c:
+            raise HTTPException(404, "Конфиг не найден")
+        return c
+
+    @app.get("/api/monitor/configs/{config_id}")
+    def monitor_detail(config_id: int, request: Request):
+        """Подробности по одной стратегии: позиция по ногам, статистика, история закрытых сделок, параметры и её журнал действий."""
+        c = _own(request, config_id)
+        e = evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn, detail=True)
+        return {**e, "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "created": c["created"],
+                "log": db.list_auto_log(request.state.user["id"], 30, config_id)}
+
+    @app.post("/api/monitor/configs/{config_id}/pause")
+    def monitor_pause(config_id: int, request: Request, body: dict = Body(...)):
+        """Пауза / возобновление конфига бота (как /pause и /resume): на паузе бот не считает и не шлёт сигналы; при возобновлении сигналы, пропущенные на паузе, не накапливаются."""
+        c = _own(request, config_id)
+        if body.get("paused"):
+            db.update_config(c["id"], paused=True)
+            db.set_auto(request.state.user["id"], c["id"], False, False)             # на паузе автомод выключается: нельзя случайно торговать по замороженному конфигу
+        else:
+            db.update_config(c["id"], paused=False, baseline=False, last_ts=0)
+        db.add_auto_log(request.state.user["id"], c["id"], "pause" if body.get("paused") else "resume", None, None, "info", {})
+        return {"paused": bool(body.get("paused"))}
+
+    @app.put("/api/monitor/configs/{config_id}/name")
+    def monitor_rename(config_id: int, request: Request, body: dict = Body(...)):
+        c = _own(request, config_id)
+        name = str(body.get("name") or "").strip()[:60]
+        if not name:
+            raise HTTPException(422, "Пустое имя")
+        try:
+            db.update_config(c["id"], name=name)
+        except DbError as e:
+            raise HTTPException(409, str(e))
+        return {"name": name}
+
+    @app.delete("/api/monitor/configs/{config_id}")
+    def monitor_delete(config_id: int, request: Request):
+        c = _own(request, config_id)
+        db.remove_config(c["id"])
+        db.add_auto_log(request.state.user["id"], None, "config_removed", None, None, "info", {"name": c["name"]})
+        return {"ok": True}
+
+    @app.get("/api/monitor/configs/{config_id}/export")
+    def monitor_export(config_id: int, request: Request):
+        c = _own(request, config_id)
+        return {"format": "maverick-config", "version": 1, "name": c["name"], "tf": c["tf"], "params": c["params"]}
 
     @app.put("/api/monitor/configs/{config_id}/auto")
     def set_auto(config_id: int, request: Request, body: dict = Body(...)):
@@ -330,7 +382,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         if new is None:
             raise HTTPException(404, "Конфиг не найден")
         db.add_auto_log(request.state.user["id"], config_id, "auto_toggle", None, None, "info", {"auto": new, "exchange": adapter.name})
-        return {"auto": new, "exchange": {"name": adapter.name, "real": adapter.real}}
+        return {"auto": new, "exchange": adapter.describe()}
 
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
@@ -338,24 +390,52 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         db.add_auto_log(request.state.user["id"], None, "auto_off_all", None, None, "info", {"configs": n})
         return {"disabled": n}
 
+    def _exchange_error(request, kind, symbol, side, e):
+        db.add_auto_log(request.state.user["id"], None, kind, symbol, side, "error", {"error": str(e)})
+        raise HTTPException(503 if isinstance(e, NotConfigured) else 502, str(e))
+
     @app.post("/api/trading/test-position")
     def test_position(request: Request, body: dict = Body(...)):
-        """Тестовая позиция на $1 по BTC (проверка связи и исполнения). Нужно явное подтверждение; сумма жёстко ограничена. Без реального коннектора — симуляция."""
+        """Тестовая позиция по BTC: маржа 1 $ (потолок 5 $), плечо подбирается так, чтобы объём прошёл минимум биржи (на Hyperliquid ордер от 10 $ объёма → плечо 10×).
+        Нужно явное подтверждение; без реального адаптера — симуляция. Закрывается кнопкой «Закрыть тестовую»."""
         if body.get("confirm") is not True:
             raise HTTPException(422, "Нужно подтверждение (confirm: true)")
         side = body.get("side", "long")
-        usd = float(body.get("usd", 1.0))
-        if side not in ("long", "short") or not (0 < usd <= TEST_MAX_USD):
-            raise HTTPException(422, f"Сторона long/short и сумма от 0 до {TEST_MAX_USD:g} $")
+        margin = float(body.get("usd", 1.0))
+        if side not in ("long", "short") or not (0 < margin <= TEST_MAX_USD):
+            raise HTTPException(422, f"Сторона long/short и маржа от 0 до {TEST_MAX_USD:g} $")
+        lev = max(1, math.ceil(adapter.min_notional / margin)) if adapter.min_notional else 1
+        notional = margin * lev
         sym = "BTC/USDT:USDT"
         try:
-            res = adapter.open_market(sym, side, usd, 1.0)
-            status = res.get("status", "sent")
-        except NotConfigured as e:
-            db.add_auto_log(request.state.user["id"], None, "test_position", sym, side, "error", {"usd": usd, "error": str(e)})
-            raise HTTPException(503, str(e))
-        db.add_auto_log(request.state.user["id"], None, "test_position", sym, side, status, {"usd": usd, **res})
-        return {"status": status, "result": res, "exchange": {"name": adapter.name, "real": adapter.real}}
+            res = adapter.open_market(sym, side, notional, float(lev))
+        except (NotConfigured, ExchangeError) as e:
+            _exchange_error(request, "test_position", sym, side, e)
+        status = res.get("status", "sent")
+        db.add_auto_log(request.state.user["id"], None, "test_position", sym, side, status, {"margin": margin, **res})
+        return {"status": status, "result": res, "margin": margin, "leverage": lev, "notional": notional, "exchange": adapter.describe()}
+
+    @app.post("/api/trading/test-position/close")
+    def test_position_close(request: Request, body: dict = Body(default={})):
+        """Закрыть позицию по BTC на бирже целиком (reduce-only по рынку) и снять висящие ордера."""
+        sym = "BTC/USDT:USDT"
+        try:
+            res = adapter.close_market(sym, "long", 1.0)
+        except (NotConfigured, ExchangeError) as e:
+            _exchange_error(request, "test_close", sym, None, e)
+        db.add_auto_log(request.state.user["id"], None, "test_close", sym, None, res.get("status", "sent"), res)
+        return {"status": res.get("status", "sent"), "result": res, "exchange": adapter.describe()}
+
+    @app.get("/api/exchange/positions")
+    def exchange_positions(request: Request):
+        """Реальные позиции и баланс на бирже (для адаптера hyperliquid). В симуляции — пусто."""
+        d = adapter.describe()
+        if not adapter.real:
+            return {"exchange": d, "positions": [], "account": {}}
+        try:
+            return {"exchange": d, "positions": adapter.positions(), "account": adapter.account()}
+        except (NotConfigured, ExchangeError) as e:
+            raise HTTPException(503 if isinstance(e, NotConfigured) else 502, str(e))
 
     # ---- сохранённые прогоны: именованные снимки «параметры + ключевые цифры», у каждого пользователя свои ----
     @app.get("/api/runs")

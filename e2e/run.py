@@ -746,33 +746,71 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
     check("старый конфиг без этих полей: режим «только будни» выключен", not field(pg, "торговать только в будни").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() == 0)
 
-    # --- страница мониторинга позиций, автомод и тестовая позиция $1
+    # --- страница мониторинга: все стратегии пользователя, подробности по клику, управление, автомод и тестовая позиция $1
     pg.wait_for_timeout(1500)                                         # состояние интерфейса сохраняется с задержкой 600 мс
     pg.get_by_test_id("nav-monitor").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=15000)
-    check("мониторинг — отдельная страница (свой адрес, своя шапка), бэктест на ней не загружен", pg.url.endswith("/monitor.html") and pg.locator("aside.params").count() == 0 and pg.locator("table.trades tbody tr").count() == 0
-          and "мониторинг" in pg.locator(".mon-header h1").inner_text() and pg.get_by_test_id("nav-backtest").count() == 1 and pg.title() == "Maverick · мониторинг", pg.url)
     pg.locator("[data-testid=mon-card]").first.wait_for(timeout=30000)
+    check("мониторинг — отдельная страница (свой адрес, своя шапка), бэктест на ней не загружен", pg.url.endswith("/monitor.html") and pg.locator("aside.params").count() == 0 and pg.locator("table.trades").count() == 0
+          and "мониторинг" in pg.locator(".mon-header h1").inner_text() and pg.get_by_test_id("nav-backtest").count() == 1 and pg.title() == "Maverick · мониторинг", pg.url)
     check("мониторинг: баннер честно говорит, что это расчёт и симуляция", "расчёт" in pg.get_by_test_id("mon-banner").inner_text() and "симуляция" in pg.get_by_test_id("mon-banner").inner_text())
-    card = pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест")
-    check("мониторинг: карточка конфига бота с открытой позицией, уровнями и результатом", card.count() == 1 and "ЛОНГ" in card.inner_text() and card.locator("table.trades tbody tr").count() >= 1
-          and "TP1" in card.inner_text() and "Средний вход" in card.inner_text() and "Цена сейчас" in card.inner_text() and "Метрики сейчас" in card.inner_text(), card.inner_text()[:200])
-    check("автомод выключен по умолчанию, у переключателей есть «?»", card.get_by_test_id("mon-auto").locator("input").nth(0).is_checked() is False and card.get_by_test_id("mon-auto").locator("input").nth(1).is_checked() is False
-          and card.get_by_test_id("mon-auto").locator(".help").count() == 2)
+    names = [c.get_attribute("data-name") for c in pg.locator("[data-testid=mon-card]").all()]
+    check("в списке ВСЕ конфиги пользователя из бота, независимо от того, что введено в бэктесте", names == ["Мониторинг-тест", "Скальп-ждёт", "Пауза-тест", "Удалить-меня"], str(names))
+    n_open = sum(1 for c in pg.locator("[data-testid=mon-card]").all() if "в лонге" in c.inner_text() or "в шорте" in c.inner_text())
+    check("сводка: число стратегий и стратегий с позицией совпадает со списком", "Стратегий: 4" in pg.get_by_test_id("mon-summary").inner_text() and f"с позицией: {n_open}" in pg.get_by_test_id("mon-summary").inner_text() and n_open >= 1, pg.get_by_test_id("mon-summary").inner_text())
+    card = lambda n: pg.locator("[data-testid=mon-card]", has=pg.locator(f"b:text-is('{n}')"))
+    check("статусы: в лонге / ждёт подтверждения / на паузе", "в лонге" in card("Мониторинг-тест").inner_text() and "ждёт подтверждения" in card("Скальп-ждёт").inner_text() and "на паузе" in card("Пауза-тест").inner_text())
+    check("в списке нет подробностей (ноги, история) — они раскрываются по клику", pg.locator("[data-testid=mon-details]").count() == 0 and pg.locator("[data-testid=mon-card] table.trades").count() == 0)
+    check("автомод выключен по умолчанию, у переключателей есть «?»", card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_checked() is False
+          and card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(1).is_checked() is False and card("Мониторинг-тест").get_by_test_id("mon-auto").locator(".help").count() == 2)
+    check("у конфига на паузе автомод заблокирован", card("Пауза-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_disabled())
+    # подробности
+    card("Мониторинг-тест").get_by_test_id("mon-more").click(); card("Мониторинг-тест").get_by_test_id("mon-details").wait_for(timeout=15000)
+    det = card("Мониторинг-тест").get_by_test_id("mon-details")
+    check("подробности: вкладки и позиция с уровнями и результатом", all(t in det.inner_text() for t in ("Позиция", "История", "Статистика", "Параметры", "Журнал")) and det.locator("table.trades tbody tr").count() >= 1
+          and all(w in det.inner_text() for w in ("TP1", "Средний вход", "Цена сейчас", "Метрики сейчас", "SL 60%")), det.inner_text()[:200])
+    det.get_by_role("tab", name="История").click()
+    check("вкладка «История»: закрытые сделки или явное «пока нет»", det.get_by_test_id("mon-history").count() == 1 or "Закрытых сделок пока нет" in det.inner_text())
+    det.get_by_role("tab", name="Статистика").click()
+    check("вкладка «Статистика»: итог, winrate, просадка", det.get_by_test_id("mon-stats").count() == 1 or "пока нет" in det.inner_text())
+    det.get_by_role("tab", name="Параметры").click()
+    check("вкладка «Параметры» показывает параметры самого конфига, а не бэктеста (плечо 5×, SL 60%)", "плечо 10%".replace("10%", "") != "" and "5×" in det.get_by_test_id("mon-params").inner_text() and "SL 60%" in det.get_by_test_id("mon-params").inner_text(), det.get_by_test_id("mon-params").inner_text()[:160])
+    det.get_by_role("tab", name="Журнал").click()
+    # автомод
     pg.once("dialog", lambda d: d.accept())
-    card.get_by_test_id("mon-auto").locator("input").nth(0).click(); pg.wait_for_timeout(1500)
-    card = pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест")
-    check("включённый автомод сохраняется на сервере и показывает «симуляция»", card.get_by_test_id("mon-auto").locator("input").nth(0).is_checked() and "симуляция" in card.get_by_test_id("mon-auto").inner_text())
-    check("переключение попало в журнал", "переключение автомода" in pg.get_by_test_id("mon-log").inner_text())
+    card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).click(); pg.wait_for_timeout(1500)
+    check("включённый автомод сохраняется на сервере и показывает «симуляция»", card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_checked() and "симуляция" in card("Мониторинг-тест").get_by_test_id("mon-auto").inner_text())
+    check("переключение попало в журнал (вкладка «Журнал» и общий журнал)", "переключение автомода" in pg.get_by_test_id("mon-log").last.inner_text())
     pg.once("dialog", lambda d: d.dismiss())
-    card.get_by_test_id("mon-auto").locator("input").nth(1).click(); pg.wait_for_timeout(800)
-    check("если не подтвердить, автомод управления не включается", not pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(1).is_checked())
+    card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(1).click(); pg.wait_for_timeout(800)
+    check("если не подтвердить, автомод управления не включается", not card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(1).is_checked())
+    # пауза / возобновление
+    pg.once("dialog", lambda d: d.accept())
+    card("Мониторинг-тест").get_by_test_id("mon-pause").click(); pg.wait_for_timeout(1500)
+    check("пауза: статус «на паузе», автомод выключен и заблокирован", "на паузе" in card("Мониторинг-тест").inner_text() and card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_disabled()
+          and not card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_checked())
+    card("Мониторинг-тест").get_by_test_id("mon-pause").click(); pg.wait_for_timeout(1500)
+    check("возобновление: конфиг снова активен", "на паузе" not in card("Мониторинг-тест").inner_text() and not card("Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_disabled())
+    # переименование, экспорт, удаление
+    pg.once("dialog", lambda d: d.accept("Переименован"))
+    det = card("Мониторинг-тест").get_by_test_id("mon-details")
+    det.get_by_role("button", name="Переименовать").click(); pg.wait_for_timeout(1500)
+    check("переименование видно в списке", pg.locator("[data-testid=mon-card] b:text-is('Переименован')").count() == 1 and pg.locator("[data-testid=mon-card] b:text-is('Мониторинг-тест')").count() == 0)
+    with pg.expect_download() as dl7:
+        card("Переименован").get_by_role("button", name="⬇ Скачать конфиг").click()
+    cfg7 = _json.loads(Path(dl7.value.path()).read_text(encoding="utf-8"))
+    check("экспорт конфига бота: тот же формат, что у бэктеста", cfg7["format"] == "maverick-config" and cfg7["name"] == "Переименован" and cfg7["params"]["leverage"] == 5)
+    card("Удалить-меня").get_by_test_id("mon-more").click(); card("Удалить-меня").get_by_test_id("mon-details").wait_for(timeout=15000)
+    pg.once("dialog", lambda d: d.accept())
+    card("Удалить-меня").get_by_role("button", name="Удалить").click(); pg.wait_for_timeout(1500)
+    check("удаление убирает стратегию из списка", pg.locator("[data-testid=mon-card] b:text-is('Удалить-меня')").count() == 0 and pg.locator("[data-testid=mon-card]").count() == 3)
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_role("button", name="Открыть", exact=True).click(); pg.get_by_test_id("mon-msg").wait_for(timeout=10000)
-    check("тестовая позиция $1: симуляция, запись в журнале", "Симуляция" in pg.get_by_test_id("mon-msg").inner_text() and "тестовая позиция" in pg.get_by_test_id("mon-log").inner_text()
-          and "симуляция" in pg.get_by_test_id("mon-log").inner_text())
+    check("тестовая позиция $1: симуляция, запись в журнале", "Симуляция" in pg.get_by_test_id("mon-msg").inner_text() and "тестовая позиция" in pg.get_by_test_id("mon-log").last.inner_text())
+    pg.once("dialog", lambda d: d.accept())
+    card("Переименован").get_by_test_id("mon-auto").locator("input").nth(0).click(); pg.wait_for_timeout(1200)           # после паузы автомод был выключен — включаем снова, чтобы было что гасить
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_role("button", name="⛔ Выключить автомод везде").click(); pg.wait_for_timeout(1500)
-    check("«Выключить автомод везде» выключает всё", not pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_checked())
+    check("«Выключить автомод везде» выключает всё", all(not c.get_by_test_id("mon-auto").locator("input").nth(0).is_checked() for c in pg.locator("[data-testid=mon-card]").all()))
     pg.get_by_test_id("nav-backtest").click(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(500)
     check("возврат к бэктесту: параметры на месте, мониторинг не загружен", pg.locator("aside.params").is_visible() and pg.get_by_test_id("monitor-page").count() == 0 and not pg.url.endswith("monitor.html"))
 
@@ -852,6 +890,10 @@ def main():
         # конфиг бота с далёкими тейками/стопом: позиция остаётся открытой до конца данных — есть что мониторить
         db.add_config(tester["id"], "Мониторинг-тест", {"source": "binance", "symbol": "BTC/USDT:USDT", "side": "long", "confirm": 2, "tps": [{"pct": 80, "share": 50}, {"pct": 90, "share": 50}],
                                                          "sl_pct": 60, "deposit": 10000, "trade_pct": 10, "leverage": 5})
+        db.add_config(tester["id"], "Скальп-ждёт", {"source": "binance", "symbol": "BTC/USDT:USDT", "side": "long", "confirm": 2, "cool_drop": 5.0, "tps": [{"pct": 4, "share": 100}], "sl_pct": 2})
+        pz, _ = db.add_config(tester["id"], "Пауза-тест", {"source": "binance", "symbol": "BTC/USDT:USDT", "side": "both", "confirm": 4, "tps": [{"pct": 6, "share": 100}], "sl_pct": 2})
+        db.update_config(pz["id"], paused=True, baseline=True)
+        db.add_config(tester["id"], "Удалить-меня", {"source": "binance", "symbol": "BTC/USDT:USDT", "side": "short", "confirm": 4, "tps": [{"pct": 6, "share": 100}], "sl_pct": 2})
         if not (ROOT / "frontend" / "dist" / "index.html").exists():
             sys.exit("Сначала соберите фронтенд: (cd frontend && npm ci && npm run build)")
         bp, fp = free_port(), free_port()

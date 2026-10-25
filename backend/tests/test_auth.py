@@ -266,12 +266,17 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     e = r["entries"][0]
     pos = e["position"]
     assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False}                 # автомод выключен, пока явно не включён
-    leg = pos["legs"][0]
+    assert pos["legs_n"] == 1 and "legs" not in pos and pos["notional"] == pos["margin"] * 5 and pos["danger"] is False                     # в списке — краткая сводка, ноги в подробностях
+    cid0 = e["config_id"]
+    det = a.get(f"/api/monitor/configs/{cid0}").json()
+    leg = det["position"]["legs"][0]
     assert leg["stop_kind"] == "SL" and leg["to_stop_pct"] > 0 and leg["to_next_tp_pct"] > 0 and leg["liq_price"] < leg["entry"] and leg["leverage"] == 5
-    assert [t["n"] for t in leg["tps"]] == [1, 2] and not any(t["hit"] for t in leg["tps"]) and pos["notional"] == pos["margin"] * 5
-    assert abs(pos["pnl_usd"] - sum(x["pnl_usd"] for x in pos["legs"])) < 1e-9 and leg["metrics_at_entry"]["dl"] is not None
+    assert [t["n"] for t in leg["tps"]] == [1, 2] and not any(t["hit"] for t in leg["tps"])
+    assert abs(det["position"]["pnl_usd"] - sum(x["pnl_usd"] for x in det["position"]["legs"])) < 1e-9 and leg["metrics_at_entry"]["dl"] is not None
+    assert det["stats"]["trades"] >= 1 and det["params"]["leverage"] == 5 and isinstance(det["history"], list) and det["title"] == "Открытая" and det["log"] == []
+    assert b.get(f"/api/monitor/configs/{cid0}").status_code == 404                                                                        # чужую стратегию не открыть
     assert r["entries"][1]["error"] and r["entries"][1]["position"] is None                                                   # сломанный конфиг не роняет страницу
-    assert r["exchange"] == {"name": "dry-run", "real": False}
+    assert r["exchange"] == {"name": "dry-run", "real": False, "testnet": False, "min_notional": 0.0}
     assert b.post("/api/monitor", json={}, headers=H_).json()["entries"] == []                                              # у другого пользователя своих конфигов нет
     db.save_run(alice["id"], "Мой прогон", _open_cfg(), "auto", {"trades": 1})
     runs_r = a.post("/api/monitor", json={"runs": True}, headers=H_).json()["entries"]
@@ -297,13 +302,52 @@ def test_test_position_requires_confirmation_limits_amount_and_is_dry_run(auth_e
     assert a.post("/api/trading/test-position", json={"confirm": True, "usd": 1000}, headers=H_).status_code == 422          # потолок суммы
     assert a.post("/api/trading/test-position", json={"confirm": True, "side": "x"}, headers=H_).status_code == 422
     r = a.post("/api/trading/test-position", json={"confirm": True}, headers=H_).json()
-    assert r["status"] == "dry_run" and r["exchange"]["real"] is False and r["result"]["usd"] == 1.0 and r["result"]["symbol"] == "BTC/USDT:USDT"
+    assert r["status"] == "dry_run" and r["exchange"]["real"] is False and r["result"]["notional"] == 1.0 and r["leverage"] == 1 and r["margin"] == 1.0 and r["result"]["symbol"] == "BTC/USDT:USDT"
     log = a.post("/api/monitor", json={}, headers=H_).json()["log"]
     assert log[0]["kind"] == "test_position" and log[0]["status"] == "dry_run"
-    # Arcus без коннектора: честная ошибка, а не «успех»
-    monkeypatch.setenv("TRADE_EXCHANGE", "arcus")
+    # Hyperliquid без ключей: честная ошибка, а не «успех»
+    monkeypatch.setenv("TRADE_EXCHANGE", "hyperliquid")
+    monkeypatch.setenv("HL_WALLET_ADDRESS", "")
+    monkeypatch.setenv("HL_PRIVATE_KEY", "")
     app2 = create_app(load_settings())
     c2 = client(app2)
     login(c2, "alice", "alice-password")
     r2 = c2.post("/api/trading/test-position", json={"confirm": True}, headers=H_)
-    assert r2.status_code == 503 and "Arcus" in r2.json()["detail"]
+    assert r2.status_code == 503 and "HL_WALLET_ADDRESS" in r2.json()["detail"]
+    assert c2.get("/api/exchange/positions").status_code == 503
+    assert a.get("/api/exchange/positions").json() == {"exchange": {"name": "dry-run", "real": False, "testnet": False, "min_notional": 0.0}, "positions": [], "account": {}}
+
+
+def test_monitor_config_management_is_per_user(auth_env):
+    db = auth_env
+    alice = db.check_login("alice", "alice-password")
+    c1, _ = db.add_config(alice["id"], "Первая", _open_cfg())
+    c2, _ = db.add_config(alice["id"], "Вторая", _open_cfg())
+    app = create_app(load_settings())
+    a, b = client(app), client(app)
+    login(a, "alice", "alice-password"); login(b, "bob", "bob-password-1")
+    db.set_auto(alice["id"], c1["id"], True, True)
+    # пауза: автомод выключается, возобновление — пересчёт с нуля
+    assert a.post(f"/api/monitor/configs/{c1['id']}/pause", json={"paused": True}, headers=H_).json() == {"paused": True}
+    got = db.get_config(c1["id"])
+    assert got["paused"] and got["auto"] == {"open": False, "manage": False}
+    db.update_config(c1["id"], baseline=True, last_ts=123)
+    assert a.post(f"/api/monitor/configs/{c1['id']}/pause", json={"paused": False}, headers=H_).json() == {"paused": False}
+    got = db.get_config(c1["id"])
+    assert not got["paused"] and not got["baseline"] and got["last_ts"] == 0
+    # переименование: пустое и занятое имя — ошибки
+    assert a.put(f"/api/monitor/configs/{c1['id']}/name", json={"name": "Новое имя"}, headers=H_).json() == {"name": "Новое имя"}
+    assert a.put(f"/api/monitor/configs/{c1['id']}/name", json={"name": "  "}, headers=H_).status_code == 422
+    assert a.put(f"/api/monitor/configs/{c1['id']}/name", json={"name": "вторая"}, headers=H_).status_code == 409
+    # экспорт
+    ex = a.get(f"/api/monitor/configs/{c1['id']}/export").json()
+    assert ex["format"] == "maverick-config" and ex["name"] == "Новое имя" and ex["params"]["leverage"] == 5
+    # чужой пользователь ничего из этого не может
+    for method, path, body in (("post", "pause", {"paused": True}), ("put", "name", {"name": "x"}), ("delete", "", None), ("get", "export", None)):
+        url = f"/api/monitor/configs/{c1['id']}" + (f"/{path}" if path else "")
+        r = getattr(b, method)(url, headers=H_, **({"json": body} if body is not None else {}))
+        assert r.status_code == 404, (method, path)
+    # удаление
+    assert a.delete(f"/api/monitor/configs/{c2['id']}", headers=H_).json() == {"ok": True}
+    assert [c["name"] for c in db.list_configs(alice["id"])] == ["Новое имя"]
+    assert a.delete(f"/api/monitor/configs/{c2['id']}", headers=H_).status_code == 404
