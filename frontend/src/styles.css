@@ -193,3 +193,13 @@ table.mini tr.dim td { color: var(--muted); opacity: .6; }
 
 /* распределение срока удержания */
 .hold-table td.hold-bar { width: 70px; padding: 0 4px; } .hold-bar span { display: block; height: 8px; border-radius: 2px; background: var(--accent); opacity: .7; min-width: 1px; }
+/* страница мониторинга */
+.monitor { padding: 10px 14px; overflow: auto; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.mon-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } .mon-top h2 { margin: 0; font-size: 16px; display: flex; align-items: center; gap: 6px; } .mon-spacer { flex: 1; }
+.mon-test { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.mon-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.mon-head { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; } .mon-auto { margin-left: auto; display: inline-flex; gap: 12px; align-items: center; font-size: 12px; flex-wrap: wrap; }
+.mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 18px; font-size: 12px; } .mon-kv { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted var(--line); padding: 1px 0; }
+.mon-legs { flex: none; max-height: 260px; } .mon-recent { font-size: 12px; } .mon-recent ul { margin: 2px 0 0 18px; padding: 0; }
+.mon-log { flex: none; max-height: 260px; } .small { font-size: 11px; } .warn-text { color: var(--warn); }
+main[hidden] { display: none; }

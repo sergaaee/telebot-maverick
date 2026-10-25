@@ -13,6 +13,8 @@ from app.db import DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
+from app.trading import get_adapter
+
 from .engine import Cancelled, EvalError, fingerprint
 from .transport import TelegramError
 
@@ -33,6 +35,7 @@ class SignalService:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self.last_cycle = None
+        self.adapter = get_adapter()        # исполнение действий автомода; без настроенной биржи — симуляция (ордера не отправляются)
 
     # ---------------- отправка ----------------
     def send(self, chat, text):
@@ -375,6 +378,7 @@ class SignalService:
                 plan = self.engine.plan(sig["side"], entry, p["tps"], p["sl_pct"]) if entry else None
                 top = self.engine.top_plan(res, sig, report) if p.get("top_enabled") else None
                 self.send(chat, fm.signal_message(cfg, res, sig, report, plan, entry, top, label, stale_note=warn))
+                self._auto_open(cfg, res, sig, plan)
                 sent += 1
             if sent:
                 upd["alerts"] = cfg["alerts"] + sent
@@ -408,6 +412,40 @@ class SignalService:
         elif prev and not entered:
             self.send(chat, fm.ready_cancelled_message(cfg, res, prev))
 
+    # ---------------- автомод: действия ----------------
+    def _do(self, cfg, kind, symbol, side, fn, details):
+        """Выполняет действие через адаптер биржи и пишет результат в журнал; ошибка адаптера не ломает цикл бота."""
+        try:
+            res = fn()
+            status = res.get("status", "sent")
+        except Exception as e:                                  # NotConfigured и ошибки биржи
+            res, status = {"error": str(e)}, "error"
+            log.warning("автомод %s по %s: %s", kind, cfg["name"], e)
+        self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter.name})
+
+    def _auto_open(self, cfg, res, sig, plan):
+        """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига)."""
+        if not cfg["auto"]["open"]:
+            return
+        p = res["params"]
+        add = bool(sig.get("pyramid"))
+        notional, margin = self.engine.order_size(res, add)
+        self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
+                 lambda: self.adapter.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
+                                                  plan["sl"] if plan else None, [l["price"] for l in plan["levels"]] if plan else None),
+                 {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1)})
+
+    def _auto_fill(self, cfg, res, ev):
+        """Автомод «управлять позицией»: после TP1 стоп в безубыток, закрытие к концу недели / по развороту (TP и SL исполняет сама биржа через стоп и лимитки)."""
+        if not cfg["auto"]["manage"]:
+            return
+        sym, side = res["params"]["symbol"], ev["side"]
+        if ev.get("tp1_be"):
+            self._do(cfg, "move_stop", sym, side, lambda: self.adapter.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]})
+        if ev["label"] in ("WKND", "REV"):
+            self._do(cfg, "close_weekend" if ev["label"] == "WKND" else "close_reverse", sym, side,
+                     lambda: self.adapter.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]})
+
     def _send_fills(self, cfg, res, chat, label, upd):
         """Уведомления об исполнениях (TP / SL / БУ / разворот) после отметки fill_ts. У конфига без отметки (создан до этой функции) прошлое не присылаем:
         фиксируем текущее состояние. Слишком старые (дольше SIGNALBOT_MAX_AGE_MIN) пропускаются, как и сигналы."""
@@ -423,6 +461,7 @@ class SignalService:
                 log.info("исполнение %s %s по %s устарело — пропущено", ev["label"], ev["ts"], cfg["name"])
                 continue
             self.send(chat, fm.fill_message(cfg, res, ev, label))
+            self._auto_fill(cfg, res, ev)
             sent += 1
         upd["fill_ts"] = max(mark, newest)
         return sent

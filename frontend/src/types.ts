@@ -466,3 +466,75 @@ export interface SavedRun {
   summary: RunSummary;
   created: number;
 }
+
+/** Мониторинг: расчётная открытая позиция стратегии (по свечам Binance), не позиция на бирже. */
+export interface MonitorLeg {
+  leg: number;
+  kind: string;
+  adds_n: number;
+  entry_ts: number;
+  entry: number;
+  notional: number;
+  margin: number;
+  leverage: number;
+  tps: { n: number; price: number; hit: boolean; share: number }[];
+  stop: number;
+  stop_kind: 'SL' | 'БУ';
+  tp_hits: number;
+  liq_price: number | null;
+  to_stop_pct: number | null;
+  to_next_tp_pct: number | null;
+  move_pct: number | null;
+  pnl_usd: number;
+  pnl_pct: number;
+  signal_ts: number;
+  fills: Fill[];
+  metrics_at_entry: { dg: number | null; dl: number | null; ds: number | null };
+}
+
+export interface MonitorEntry {
+  name: string;
+  config_id: number | null;
+  symbol: string | null;
+  source?: string;
+  auto: { open: boolean; manage: boolean } | null;
+  paused: boolean;
+  error?: string | null;
+  price?: number | null;
+  candle_ts?: number | null;
+  report?: { ts: number; dg: number | null; dl: number; ds: number } | null;
+  ready_now?: PendingSignal[];
+  recent?: { side: 'long' | 'short'; entry_ts: number; exit_ts: number; reason: Reason; pnl_usd: number; pnl_pct: number; hold_h: number }[];
+  settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side };
+  position: null | {
+    side: 'long' | 'short';
+    opened_ts: number;
+    hold_h: number;
+    legs: MonitorLeg[];
+    notional: number;
+    margin: number;
+    avg_entry: number;
+    pnl_usd: number;
+    pnl_pct_deposit: number | null;
+    pnl_pct_margin: number | null;
+    deadline_ts: number | null;
+  };
+}
+
+export interface AutoLogItem {
+  id: number;
+  config_id: number | null;
+  ts: number;
+  kind: string;
+  symbol: string | null;
+  side: string | null;
+  status: string;
+  details: Record<string, unknown>;
+}
+
+export interface MonitorResponse {
+  entries: MonitorEntry[];
+  log: AutoLogItem[];
+  exchange: { name: string; real: boolean };
+  data: { source: string; now: number };
+}

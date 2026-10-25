@@ -767,3 +767,58 @@ def test_weekend_close_fill_message_and_summary():
     t = fm.fill_message({"name": "x"}, {"params": {"symbol": "BTC/USDT:USDT"}}, ev, "Coinbase")
     assert "Закрытие к концу недели" in t and "3.3 сут" in t
     assert "только будни" in fm.config_summary({"params": {"source": "a", "symbol": "b", "side": "both", "confirm": 2, "weekdays_only": True}})
+
+
+# ---------------- автомод (симуляция действий) ----------------
+def test_auto_mode_is_off_by_default_and_logs_dry_run_actions_when_enabled(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    assert cfg["auto"] == {"open": False, "manage": False}
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.cycle()
+    assert env.db.list_auto_log(env.alice["id"]) == []                                  # автомод выключен — действий нет, только уведомления
+    # включаем и даём новый сигнал
+    env.db.set_auto(env.alice["id"], cfg["id"], True, True)
+    nxt = start + 3 * H // 2
+    append_reports(env.hist, NEUTRAL(2, nxt), 14)
+    append_reports(env.hist, LONG(nxt + 2 * H // 2, 3), 16)
+    env.now["t"] = (nxt + 5 * H // 2) / 1000
+    env.cycle()
+    log = env.db.list_auto_log(env.alice["id"])
+    kinds = {x["kind"] for x in log}
+    assert "open" in kinds and all(x["status"] == "dry_run" for x in log)
+    op = next(x for x in log if x["kind"] == "open")
+    assert op["symbol"] == "BTC/USDT:USDT" and op["side"] == "long" and op["details"]["notional"] > 0 and op["details"]["exchange"] == "dry-run"
+    assert op["details"]["stop"] is not None or op["details"]["takes"] is None        # план со стопом и тейками, если известна цена
+
+
+def test_auto_only_open_does_not_manage(env):
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    env.db.set_auto(env.alice["id"], cfg["id"], True, False)
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.cycle()
+    kinds = {x["kind"] for x in env.db.list_auto_log(env.alice["id"])}
+    assert "open" in kinds and not (kinds & {"move_stop", "close_weekend", "close_reverse"})
+
+
+def test_auto_adapter_errors_are_logged_not_raised(env):
+    from app.trading import ArcusAdapter
+    env.adapter = ArcusAdapter()                                                       # коннектор не реализован — ошибка в журнале, цикл бота жив
+    env.handle_update(msg(json.dumps(UI_CONFIG)))
+    env.cycle()
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    env.db.set_auto(env.alice["id"], cfg["id"], True, True)
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.cycle()
+    log = env.db.list_auto_log(env.alice["id"])
+    assert log and log[0]["status"] == "error" and "Arcus" in log[0]["details"]["error"]
+    assert any("ЛОНГ" in t for t in env.tg.texts(CHAT))                                # уведомление пришло несмотря на ошибку исполнения

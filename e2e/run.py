@@ -746,6 +746,33 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
     check("старый конфиг без этих полей: режим «только будни» выключен", not field(pg, "торговать только в будни").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() == 0)
 
+    # --- страница мониторинга позиций, автомод и тестовая позиция $1
+    pg.get_by_test_id("nav-monitor").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=10000)
+    pg.locator("[data-testid=mon-card]").first.wait_for(timeout=30000)
+    check("мониторинг: баннер честно говорит, что это расчёт и симуляция", "расчёт" in pg.get_by_test_id("mon-banner").inner_text() and "симуляция" in pg.get_by_test_id("mon-banner").inner_text())
+    card = pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест")
+    check("мониторинг: карточка конфига бота с открытой позицией, уровнями и результатом", card.count() == 1 and "ЛОНГ" in card.inner_text() and card.locator("table.trades tbody tr").count() >= 1
+          and "TP1" in card.inner_text() and "Средний вход" in card.inner_text() and "Цена сейчас" in card.inner_text() and "Метрики сейчас" in card.inner_text(), card.inner_text()[:200])
+    check("автомод выключен по умолчанию, у переключателей есть «?»", card.get_by_test_id("mon-auto").locator("input").nth(0).is_checked() is False and card.get_by_test_id("mon-auto").locator("input").nth(1).is_checked() is False
+          and card.get_by_test_id("mon-auto").locator(".help").count() == 2)
+    pg.once("dialog", lambda d: d.accept())
+    card.get_by_test_id("mon-auto").locator("input").nth(0).click(); pg.wait_for_timeout(1500)
+    card = pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест")
+    check("включённый автомод сохраняется на сервере и показывает «симуляция»", card.get_by_test_id("mon-auto").locator("input").nth(0).is_checked() and "симуляция" in card.get_by_test_id("mon-auto").inner_text())
+    check("переключение попало в журнал", "переключение автомода" in pg.get_by_test_id("mon-log").inner_text())
+    pg.once("dialog", lambda d: d.dismiss())
+    card.get_by_test_id("mon-auto").locator("input").nth(1).click(); pg.wait_for_timeout(800)
+    check("если не подтвердить, автомод управления не включается", not pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(1).is_checked())
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_role("button", name="Открыть", exact=True).click(); pg.get_by_test_id("mon-msg").wait_for(timeout=10000)
+    check("тестовая позиция $1: симуляция, запись в журнале", "Симуляция" in pg.get_by_test_id("mon-msg").inner_text() and "тестовая позиция" in pg.get_by_test_id("mon-log").inner_text()
+          and "симуляция" in pg.get_by_test_id("mon-log").inner_text())
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_role("button", name="⛔ Выключить автомод везде").click(); pg.wait_for_timeout(1500)
+    check("«Выключить автомод везде» выключает всё", not pg.locator("[data-testid=mon-card]", has_text="Мониторинг-тест").get_by_test_id("mon-auto").locator("input").nth(0).is_checked())
+    pg.get_by_role("button", name="← К бэктесту").click(); pg.wait_for_timeout(500)
+    check("возврат к бэктесту", pg.locator("aside.params").is_visible() and pg.get_by_test_id("monitor-page").count() == 0)
+
     # --- подсказки «?»
     # раскрываем свёрнутые секции и включаем фильтры, чтобы увидеть все поля
     for title in ("Фильтр: остывание метрик", "Фильтр: ликвидации закончились", "Период"):
@@ -817,8 +844,11 @@ def main():
         sys.path.insert(0, str(ROOT / "backend"))
         from app.db import Database
         db = Database(tmp / "e2e.db")
-        db.add_user("tester", USER_PASS)
+        tester = db.add_user("tester", USER_PASS)
         db.add_user("second", USER_PASS)
+        # конфиг бота с далёкими тейками/стопом: позиция остаётся открытой до конца данных — есть что мониторить
+        db.add_config(tester["id"], "Мониторинг-тест", {"source": "binance", "symbol": "BTC/USDT:USDT", "side": "long", "confirm": 2, "tps": [{"pct": 80, "share": 50}, {"pct": 90, "share": 50}],
+                                                         "sl_pct": 60, "deposit": 10000, "trade_pct": 10, "leverage": 5})
         if not (ROOT / "frontend" / "dist" / "index.html").exists():
             sys.exit("Сначала соберите фронтенд: (cd frontend && npm ci && npm run build)")
         bp, fp = free_port(), free_port()

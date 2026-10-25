@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS configs (
     alerts INTEGER NOT NULL DEFAULT 0,
     fill_ts INTEGER,
     ready TEXT,
+    auto TEXT,
     error TEXT,
     created REAL NOT NULL,
     updated REAL NOT NULL,
@@ -66,6 +67,18 @@ CREATE TABLE IF NOT EXISTS saved_runs (
     summary TEXT NOT NULL,
     created REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS auto_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    config_id INTEGER,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    symbol TEXT,
+    side TEXT,
+    status TEXT NOT NULL,
+    details TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_autolog_user ON auto_log(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
@@ -113,6 +126,8 @@ class Database:
         with self.conn() as c:
             c.executescript(SCHEMA)
             cols = {r["name"] for r in c.execute("PRAGMA table_info(configs)")}
+            if "auto" not in cols:           # автомод: JSON {"open": bool, "manage": bool}; NULL = выключен
+                c.execute("ALTER TABLE configs ADD COLUMN auto TEXT")
             if "ready" not in cols:          # состояние «ждёт подтверждения»: NULL = ещё не фиксировали (первое сообщение не шлём)
                 c.execute("ALTER TABLE configs ADD COLUMN ready TEXT")
             if "fill_ts" not in cols:        # база от версии до уведомлений об исполнениях: NULL = «ещё не фиксировали», прошлые исполнения не присылаем
@@ -239,6 +254,32 @@ class Database:
             c.execute("INSERT INTO ui_state(user_id, data, updated) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated=excluded.updated",
                       (user_id, json.dumps(state, ensure_ascii=False), time.time()))
 
+    # ---------------- автомод: действия (журнал) ----------------
+    def set_auto(self, user_id, cfg_id, open_=None, manage=None):
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM configs WHERE id=? AND user_id=?", (cfg_id, user_id)).fetchone()
+            if not row:
+                return None
+            cur = self._cfg(row)["auto"]
+            new = {"open": cur["open"] if open_ is None else bool(open_), "manage": cur["manage"] if manage is None else bool(manage)}
+            c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps(new), cfg_id))
+            return new
+
+    def disable_all_auto(self, user_id):
+        with self.conn() as c:
+            return c.execute("UPDATE configs SET auto=NULL WHERE user_id=? AND auto IS NOT NULL", (user_id,)).rowcount
+
+    def add_auto_log(self, user_id, config_id, kind, symbol, side, status, details):
+        with self.conn() as c:
+            c.execute("INSERT INTO auto_log(user_id, config_id, ts, kind, symbol, side, status, details) VALUES (?,?,?,?,?,?,?,?)",
+                      (user_id, config_id, time.time(), kind, symbol, side, status, json.dumps(details, ensure_ascii=False)))
+            c.execute("DELETE FROM auto_log WHERE user_id=? AND id NOT IN (SELECT id FROM auto_log WHERE user_id=? ORDER BY id DESC LIMIT 500)", (user_id, user_id))
+
+    def list_auto_log(self, user_id, limit=50):
+        with self.conn() as c:
+            rows = c.execute("SELECT * FROM auto_log WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+        return [{**dict(r), "details": json.loads(r["details"])} for r in rows]
+
     # ---------------- сохранённые прогоны (у каждого пользователя свои) ----------------
     MAX_RUNS = 200
 
@@ -325,6 +366,11 @@ class Database:
         d = dict(row)
         d["params"] = json.loads(d["params"])
         d["paused"], d["baseline"] = bool(d["paused"]), bool(d["baseline"])
+        try:
+            a = json.loads(d.get("auto") or "{}")
+        except ValueError:
+            a = {}
+        d["auto"] = {"open": bool(a.get("open")), "manage": bool(a.get("manage"))}          # автомод выключен, пока явно не включён
         return d
 
     def list_configs(self, user_id=None):
@@ -360,7 +406,7 @@ class Database:
         with self.conn() as c:
             old = self._by_name(c, user_id, name)
             if old:
-                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, error=NULL, updated=? WHERE id=?",
+                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, auto=NULL, error=NULL, updated=? WHERE id=?",
                           (json.dumps(params, ensure_ascii=False), str(tf), now, old["id"]))
                 cid, created = old["id"], False
             else:
@@ -370,7 +416,7 @@ class Database:
             return self._cfg(c.execute("SELECT * FROM configs WHERE id=?", (cid,)).fetchone()), created
 
     def update_config(self, cfg_id, **fields):
-        allowed = {"name", "paused", "baseline", "last_ts", "alerts", "error", "fill_ts", "ready"}
+        allowed = {"name", "paused", "baseline", "last_ts", "alerts", "error", "fill_ts", "ready", "auto"}
         sets = {k: (int(v) if isinstance(v, bool) else v) for k, v in fields.items() if k in allowed}
         if not sets:
             return

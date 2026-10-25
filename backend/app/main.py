@@ -1,5 +1,6 @@
 """FastAPI-бэкенд интерактивного просмотра бэктеста. Запуск: python cli.py serve (из папки backend/)."""
 import json
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -16,7 +17,9 @@ from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
 from .schemas import BacktestParams, MonteCarloRequest
+from .monitor import evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
+from .trading import NotConfigured, TEST_MAX_USD, get_adapter
 
 
 class LoginIn(BaseModel):
@@ -305,6 +308,55 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             raise HTTPException(413, "Слишком большое состояние")
         db.put_ui_state(request.state.user["id"], state)
         return {"ok": True}
+
+    # ---- мониторинг открытых позиций и автомод ----
+    adapter = get_adapter()
+
+    @app.post("/api/monitor")
+    def monitor(request: Request, body: dict = Body(default={})):
+        """Открытые позиции по конфигам бота пользователя (и, если передан, по текущим параметрам интерфейса) со всеми уровнями и цифрами.
+        Это расчёт стратегии по свечам, а не позиции на бирже."""
+        uid = request.state.user["id"]
+        entries = [evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn) for c in db.list_configs(uid)]
+        ui = body.get("params")
+        if isinstance(ui, dict):
+            entries.append(evaluate_entry(store, s.defaults, "Текущие параметры интерфейса", None, ui, None, False, available_fn))
+        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": {"name": adapter.name, "real": adapter.real},
+                "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
+
+    @app.put("/api/monitor/configs/{config_id}/auto")
+    def set_auto(config_id: int, request: Request, body: dict = Body(...)):
+        """Автомод конфига: open — открывать позиции и доборы по сигналу, manage — переставлять стоп (БУ), закрывать и т.д. Выключен, пока явно не включён."""
+        new = db.set_auto(request.state.user["id"], config_id, body.get("open"), body.get("manage"))
+        if new is None:
+            raise HTTPException(404, "Конфиг не найден")
+        db.add_auto_log(request.state.user["id"], config_id, "auto_toggle", None, None, "info", {"auto": new, "exchange": adapter.name})
+        return {"auto": new, "exchange": {"name": adapter.name, "real": adapter.real}}
+
+    @app.post("/api/monitor/auto/off")
+    def auto_off(request: Request):
+        n = db.disable_all_auto(request.state.user["id"])
+        db.add_auto_log(request.state.user["id"], None, "auto_off_all", None, None, "info", {"configs": n})
+        return {"disabled": n}
+
+    @app.post("/api/trading/test-position")
+    def test_position(request: Request, body: dict = Body(...)):
+        """Тестовая позиция на $1 по BTC (проверка связи и исполнения). Нужно явное подтверждение; сумма жёстко ограничена. Без реального коннектора — симуляция."""
+        if body.get("confirm") is not True:
+            raise HTTPException(422, "Нужно подтверждение (confirm: true)")
+        side = body.get("side", "long")
+        usd = float(body.get("usd", 1.0))
+        if side not in ("long", "short") or not (0 < usd <= TEST_MAX_USD):
+            raise HTTPException(422, f"Сторона long/short и сумма от 0 до {TEST_MAX_USD:g} $")
+        sym = "BTC/USDT:USDT"
+        try:
+            res = adapter.open_market(sym, side, usd, 1.0)
+            status = res.get("status", "sent")
+        except NotConfigured as e:
+            db.add_auto_log(request.state.user["id"], None, "test_position", sym, side, "error", {"usd": usd, "error": str(e)})
+            raise HTTPException(503, str(e))
+        db.add_auto_log(request.state.user["id"], None, "test_position", sym, side, status, {"usd": usd, **res})
+        return {"status": status, "result": res, "exchange": {"name": adapter.name, "real": adapter.real}}
 
     # ---- сохранённые прогоны: именованные снимки «параметры + ключевые цифры», у каждого пользователя свои ----
     @app.get("/api/runs")
