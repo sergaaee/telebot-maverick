@@ -129,6 +129,7 @@ export default function PriceChart(props: Props) {
         if (sec > hi && sec - hi < 2 * 3600) sec = hi;           // свежий отчёт может быть позже последней загруженной свечи
         if (!inWin(sec)) continue;
         const now = p.ts === lastTs;
+        if (!now && p.run_start === false) continue;                  // непрерывное ожидание — одна точка в начале, а не сотни
         markers.push({ time: sec as UTCTimestamp, position: p.side === 'long' ? 'belowBar' : 'aboveBar', shape: 'circle', color: '#a78bfa', size: now ? 1.1 : 0.45,
           text: now ? `ждёт ${p.side === 'long' ? 'L' : 'S'}` : '' });
       }

@@ -501,7 +501,9 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     for ts_, d_ in confirmed:
         if ts_ in blocked_ts:
             pend_items.setdefault((ts_, d_), {})["trend"] = trend_info
-    pending_out = [{"ts": ts_, "side": "long" if d_ == 1 else "short", "waiting": [k for k in WAIT_ORDER if k in w_], "lines": waiting_lines(d_, w_)}
+    prev_ts = {sigs[i][0]: sigs[i - 1][0] for i in range(1, len(sigs))}
+    pending_out = [{"ts": ts_, "side": "long" if d_ == 1 else "short", "waiting": [k for k in WAIT_ORDER if k in w_], "lines": waiting_lines(d_, w_),
+                    "run_start": (prev_ts.get(ts_), d_) not in pend_items}                       # первый отчёт непрерывного ожидания: на графике отмечается он, а не каждый
                    for (ts_, d_), w_ in sorted(pend_items.items())]
     last_report_ts = sigs[-1][0]
     ready_now = []

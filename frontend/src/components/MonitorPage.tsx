@@ -62,6 +62,9 @@ function Card({ e, exchange, onToggle }: { e: MonitorEntry; exchange: MonitorRes
       {e.config_id == null && <div className="muted small">Автомод включается только у конфигов бота (по параметрам интерфейса действия не выполняются).</div>}
       {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
       {stale != null && stale > 20 && <div className="warn-text small">Свечи не обновлялись {ago(e.candle_ts)} — цена и уровни могут отставать.</div>}
+      {pos && e.price && pos.legs.some((l) => l.liq_price != null && (pos.side === 'long' ? e.price! <= l.liq_price : e.price! >= l.liq_price)) && (
+        <div className="bad-text small">⚠ Цена за оценочной ценой ликвидации — при таком плече и изолированной марже позицию на бирже уже ликвидировали бы (в расчёте стратегии ликвидация учитывается, только если включена «моделировать ликвидацию»).</div>
+      )}
       {pos && (
         <>
           <div className="mon-grid">

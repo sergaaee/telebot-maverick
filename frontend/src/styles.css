@@ -203,3 +203,6 @@ table.mini tr.dim td { color: var(--muted); opacity: .6; }
 .mon-legs { flex: none; max-height: 260px; } .mon-recent { font-size: 12px; } .mon-recent ul { margin: 2px 0 0 18px; padding: 0; }
 .mon-log { flex: none; max-height: 260px; } .small { font-size: 11px; } .warn-text { color: var(--warn); }
 main[hidden] { display: none; }
+.mon-legs.table-wrap { min-height: 0; flex: none; }
+.mon-log.table-wrap { min-height: 0; }
+.mc-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; align-items: end; } .mc-controls .field { min-width: 0; } .mc-controls select { width: 100%; min-width: 0; } .mc-controls button { grid-column: 1 / -1; }
