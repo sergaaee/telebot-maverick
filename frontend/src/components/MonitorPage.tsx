@@ -427,7 +427,7 @@ export default function MonitorPage() {
 
   const testPos = async () => {
     const mn = data?.exchange.min_notional ?? 0;
-    const lev = mn ? Math.ceil(mn / 1) : 1;
+    const lev = mn ? Math.ceil(mn * 1.1) : 1;
     if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): маржа 1 $ × ${lev}× = объём ${lev} $?${data?.exchange.real ? ` Это реальный ордер на ${exchangeLabel(data.exchange)}.` : ' Биржа не подключена — будет симуляция.'}`)) return;
     setBusy(true);
     setMsg(null);
