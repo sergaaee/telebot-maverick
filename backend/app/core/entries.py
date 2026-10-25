@@ -79,10 +79,13 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     return out, hit
 
 
-def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None):
+def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None):
     """global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует.
     pending — список, в который добавляются (ts, d, waiting): отчёты, где серия УЖЕ подтверждена, но вход ждёт фильтр; waiting = {"cool": …, "liq": …} с цифрами:
-    чего не хватает (откат метрики / ликвидации). Фильтр тренда применяется снаружи (service), здесь его нет."""
+    чего не хватает (откат метрики / ликвидации). Фильтр тренда применяется снаружи (service), здесь его нет.
+    state — необязательный словарь для докладывания новых отчётов: на выходе в нём лежит снимок состояния после последнего отчёта (state["n"] — сколько отчётов
+    обработано); если на входе в нём уже есть снимок (и первые state["n"] отчётов не изменились — это проверяет вызывающий), обрабатываются только отчёты после него,
+    а результат тот же, что при расчёте с нуля: каждый отчёт зависит только от предыдущих."""
     sides = [(1, lambda s: should_long(s, local_min, scalp_min, global_min))]
     if short is not None:
         sides.append((-1, lambda s: should_short(s, *short, short_global_max)))
@@ -90,8 +93,16 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
     window = {1: deque(), -1: deque()}   # монотонная очередь для скользящего максимума
     past = {1: [], -1: []}               # отсортированные прошлые значения ликвидаций
     metric = (cool or {}).get("metric", "scalp")
-    out = []
-    for row in signals:
+    out, pend_all, start = [], [], 0
+    if state and state.get("n"):                  # продолжаем со снимка (копии, чтобы не испортить сохранённый)
+        start = state["n"]
+        st = {d: dict(v) for d, v in state["st"].items()}
+        window = {d: deque(v) for d, v in state["window"].items()}
+        past = {d: list(v) for d, v in state["past"].items()}
+        out, pend_all = list(state["out"]), list(state["pending"])
+        if pending is not None:
+            pending.extend(pend_all)
+    for row in signals[start:]:
         sts, loc, scalp = row[:3]
         liqv = {1: row[3] if len(row) > 3 else None, -1: row[4] if len(row) > 4 else None}
         sig = {"local": loc, "scalp": scalp, "global": row[7] if len(row) > 7 else None}
@@ -138,8 +149,10 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
                     waiting["liq"] = {"reason": "no_spike", "hours": liq["hours"], "max": mx[d], "thr": None if thr[d] == float("inf") else thr[d]}
                 elif liqv[d] > liq["frac"] * mx[d]:
                     waiting["liq"] = {"reason": "not_calmed", "now": liqv[d], "max": mx[d], "limit": liq["frac"] * mx[d], "frac": liq["frac"]}
-            if ok and waiting and pending is not None:
-                pending.append((sts, d, waiting))
+            if ok and waiting:
+                pend_all.append((sts, d, waiting))
+                if pending is not None:
+                    pending.append((sts, d, waiting))
             ok = ok and not waiting
             if ok and not chosen:
                 chosen = d
@@ -149,4 +162,7 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
                     insort(past[d], liqv[d])
         if chosen:
             out.append((sts, chosen))
+    if state is not None:
+        state.clear()
+        state.update(n=len(signals), st=st, window=window, past=past, out=list(out), pending=pend_all)
     return out

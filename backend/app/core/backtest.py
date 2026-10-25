@@ -490,7 +490,7 @@ class AvgPosition:
 
 
 def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None,
-               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None, week=None):
+               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None, week=None, resume=None):
     """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам. levels — результат normalize_tps. notional (USD) задаёт размер
     позиции в долларах вместо size (в единицах актива).
 
@@ -507,13 +507,17 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
       week={"before_min": X} — режим «только будни»: вход (и добор, и разворот) разрешён с открытия Токио в понедельник до закрытия Нью-Йорка в пятницу (core/tradingweek.py),
         остальные сигналы пропускаются; позиция, оставшаяся открытой, закрывается по open свечи закрытия пятницы (метка WKND), раньше на X минут;
       hold(d, ts_мс) -> bool — «стоп-лосс не ставить, пока метрики сильны» (см. _scan);
-      skipped — список, в который дописываются (ts, сторона, причина) пропущенных сигналов."""
+      skipped — список, в который дописываются (ts, сторона, причина) пропущенных сигналов;
+      resume={"group": номер последней уже закрытой позиции, "last_group": её сделки, "last_open_ts": время её открытия} — продолжение после закрытых позиций: events
+        должны начинаться с первого события после них, возвращаются только новые сделки (паузы после стопа и между сигналами учитывают сохранённую позицию)."""
     ts = [c[0] for c in candles]
     n = len(candles)
     trades, open_legs = [], []
     group, last_group, last_open_ts, last_leg_ts, last_leg_px, adds = 0, [], None, None, None, 0
     avg = bool(pyramid and pyramid.get("avg"))             # доборы усредняют одну позицию (AvgPosition), а не живут отдельными ногами
     avg_pos = avg_trade = None
+    if resume:
+        group, last_group, last_open_ts = resume["group"], list(resume["last_group"]), resume["last_open_ts"]
     levels_shares = [s for _, s in levels]
     be = bool(be_after_tp1 and len(levels) > 1)
 
