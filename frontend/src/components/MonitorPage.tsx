@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, closeTestPosition, deleteConfig, exportBotConfig, getExchangeState, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
+import { autoOffAll, closeTestPosition, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
 import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
-import type { AutoLogItem, ExchangeInfo, ExchangeState, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
+import type { AutoLogItem, ExchangeAccount, ExchangeInfo, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
 import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
 
@@ -279,7 +279,7 @@ function ExchangeBanner({ info }: { info?: ExchangeInfo }) {
         {info?.real ? (
           <>Торговля: <b>{exchangeLabel(info)}</b> — автомод {live ? <b>отправляет реальные ордера на настоящие деньги</b> : 'отправляет ордера в тестовую сеть'}. </>
         ) : (
-          <>Биржа для торговли не подключена — автомод работает как <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются; чтобы торговать, задайте TRADE_EXCHANGE=hyperliquid и ключи в .env). </>
+          <>Биржа для торговли не подключена — автомод работает как <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются; чтобы торговать, подключите счёт Hyperliquid в Telegram-боте: /hl). </>
         )}
         Позиции в списке ниже — расчёт стратегий по свечам и отчётам Binance, а не позиции на бирже{info?.real ? ': реальные позиции биржи — в отдельном блоке' : ''}.
       </span>
@@ -287,25 +287,65 @@ function ExchangeBanner({ info }: { info?: ExchangeInfo }) {
   );
 }
 
-/** Реальные позиции и баланс с биржи (не расчёт стратегий). */
-function ExchangeBlock({ info, state, error }: { info: ExchangeInfo; state: ExchangeState | null; error: string | null }) {
+/** Подключённый счёт на бирже: подключение, баланс, позиции, открытые ордера, последние исполнения (реальные данные биржи, не расчёт стратегий). */
+function ExchangeBlock({ state, error, onDisconnect }: { state: ExchangeAccount | null; error: string | null; onDisconnect: () => void }) {
+  if (!state) return error ? <section className="mon-card"><div className="bad-text small">Биржа: {error}</div></section> : null;
+  if (!state.connected) {
+    return (
+      <section className="mon-card" data-testid="mon-exchange">
+        <div className="mon-head"><b>Биржа</b><Help text={HELP.exchange_block} /></div>
+        <div className="muted small">Счёт Hyperliquid не подключён — автомод работает как симуляция. Подключить: в Telegram-боте команда <b>/hl</b> (адрес кошелька и ключ API-кошелька присылаются боту, который проверит их, сохранит зашифрованными и удалит ваши сообщения). Работает только после привязки Telegram к этому аккаунту.</div>
+      </section>
+    );
+  }
+  const net = state.exchange.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть';
+  const acc = state.account;
   return (
     <section className="mon-card" data-testid="mon-exchange">
-      <div className="mon-head"><b>Биржа: {exchangeLabel(info)}</b><Help text={HELP.exchange_block} />
-        {state?.account.equity != null && <span className="muted small"> · капитал {fmtUsd(Number(state.account.equity), 2)} · свободно {fmtUsd(Number(state.account.free ?? 0), 2)}</span>}</div>
-      {error && <div className="bad-text small">Биржа: {error}</div>}
-      {state && state.positions.length === 0 && !error && <div className="muted small">Открытых позиций на бирже нет.</div>}
-      {state && state.positions.length > 0 && (
-        <div className="table-wrap mon-legs">
-          <table className="trades">
-            <thead><tr><th>контракт</th><th>сторона</th><th>размер</th><th>вход</th><th>цена</th><th>ликвид.</th><th>плечо</th><th>маржа</th><th>PnL</th></tr></thead>
-            <tbody>{state.positions.map((p, i) => (
-              <tr key={i}><td>{p.symbol}</td><td className={p.side === 'long' ? 'pos' : 'neg'}>{p.side === 'long' ? 'лонг' : 'шорт'}</td><td>{p.size}</td>
-                <td>{p.entry != null ? fmtPrice(p.entry) : '–'}</td><td>{p.mark != null ? fmtPrice(p.mark) : '–'}</td><td>{p.liq != null ? fmtPrice(p.liq) : '–'}</td>
-                <td>{p.leverage ?? '–'}×</td><td>{p.margin != null ? fmtUsd(p.margin, 2) : '–'}</td><td className={signClass(p.pnl_usd ?? 0)}>{p.pnl_usd != null ? fmtUsd(p.pnl_usd, 2) : '–'}</td></tr>
-            ))}</tbody>
-          </table>
-        </div>
+      <div className="mon-head">
+        <b>Биржа: {exchangeLabel(state.exchange)}</b><Help text={HELP.exchange_block} />
+        <span className="muted small"> · кошелёк {state.wallet} · API-кошелёк {state.agent ?? '–'} · {net} · проверен {state.verified ? fmtTs(state.verified * 1000) : '–'}</span>
+        <span className="mon-spacer" />
+        <button type="button" className="ghost bad-text" onClick={onDisconnect} data-testid="exchange-disconnect">Отключить счёт</button>
+      </div>
+      {state.error && <div className="bad-text small">Биржа: {state.error}</div>}
+      {!state.error && (
+        <>
+          <div className="mon-grid" data-testid="exchange-account">
+            <Row label="Капитал">{acc.equity != null ? fmtUsd(Number(acc.equity), 2) : '–'}</Row>
+            <Row label="Свободно">{acc.free != null ? fmtUsd(Number(acc.free), 2) : '–'}</Row>
+            <Row label="В марже">{acc.used != null ? fmtUsd(Number(acc.used), 2) : '–'}</Row>
+            <Row label="Позиций / ордеров">{state.positions.length} / {state.orders.length}</Row>
+          </div>
+          {state.positions.length === 0 ? <div className="muted small">Открытых позиций на бирже нет.</div> : (
+            <div className="table-wrap mon-legs">
+              <table className="trades">
+                <thead><tr><th>контракт</th><th>сторона</th><th>размер</th><th>вход</th><th>цена</th><th>ликвид.</th><th>плечо</th><th>маржа</th><th>PnL</th></tr></thead>
+                <tbody>{state.positions.map((p, i) => (
+                  <tr key={i}><td>{p.symbol}</td><td className={p.side === 'long' ? 'pos' : 'neg'}>{p.side === 'long' ? 'лонг' : 'шорт'}</td><td>{p.size}</td>
+                    <td>{p.entry != null ? fmtPrice(p.entry) : '–'}</td><td>{p.mark != null ? fmtPrice(p.mark) : '–'}</td><td>{p.liq != null ? fmtPrice(p.liq) : '–'}</td>
+                    <td>{p.leverage ?? '–'}×</td><td>{p.margin != null ? fmtUsd(p.margin, 2) : '–'}</td><td className={signClass(p.pnl_usd ?? 0)}>{p.pnl_usd != null ? fmtUsd(p.pnl_usd, 2) : '–'}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+          {state.orders.length > 0 && (
+            <details open><summary>Открытые ордера ({state.orders.length})</summary>
+              <div className="table-wrap mon-legs"><table className="trades">
+                <thead><tr><th>контракт</th><th>сторона</th><th>тип</th><th>размер</th><th>цена</th><th>триггер</th><th>reduce-only</th></tr></thead>
+                <tbody>{state.orders.map((o, i) => <tr key={i}><td>{o.symbol}</td><td>{o.side}</td><td>{o.type}</td><td>{o.amount ?? '–'}</td><td>{o.price != null ? fmtPrice(o.price) : '–'}</td><td>{o.trigger != null ? fmtPrice(o.trigger) : '–'}</td><td>{o.reduce_only ? 'да' : 'нет'}</td></tr>)}</tbody>
+              </table></div>
+            </details>
+          )}
+          {state.fills.length > 0 && (
+            <details><summary>Последние исполнения ({state.fills.length})</summary>
+              <div className="table-wrap mon-legs"><table className="trades">
+                <thead><tr><th>время</th><th>контракт</th><th>сторона</th><th>размер</th><th>цена</th><th>комиссия</th><th>закрытый PnL</th></tr></thead>
+                <tbody>{state.fills.map((f, i) => <tr key={i}><td>{f.ts ? fmtTs(f.ts) : '–'}</td><td>{f.symbol}</td><td>{f.side}</td><td>{f.amount ?? '–'}</td><td>{f.price != null ? fmtPrice(f.price) : '–'}</td><td>{f.fee ?? '–'}</td><td>{f.pnl ?? '–'}</td></tr>)}</tbody>
+              </table></div>
+            </details>
+          )}
+        </>
       )}
     </section>
   );
@@ -319,7 +359,7 @@ export default function MonitorPage() {
   const [busy, setBusy] = useState(false);
   const [testSide, setTestSide] = useState<'long' | 'short'>('long');
   const [openIds, setOpenIds] = useState<Set<number>>(new Set());
-  const [ex, setEx] = useState<ExchangeState | null>(null);
+  const [ex, setEx] = useState<ExchangeAccount | null>(null);
   const [exErr, setExErr] = useState<string | null>(null);
   const alive = useRef(true);
 
@@ -330,12 +370,8 @@ export default function MonitorPage() {
         setData(r);
         setErr(null);
       }
-      if (r.exchange.real) {                                        // реальные позиции и баланс с биржи; сбой биржи не мешает остальной странице
-        getExchangeState().then((x) => alive.current && (setEx(x), setExErr(null))).catch((e) => alive.current && setExErr(e instanceof Error ? e.message : String(e)));
-      } else if (alive.current) {
-        setEx(null);
-        setExErr(null);
-      }
+      // подключённый счёт на бирже (реальные позиции, баланс, ордера, исполнения); сбой биржи не мешает остальной странице
+      getExchangeAccount().then((x) => alive.current && (setEx(x), setExErr(null))).catch((e) => alive.current && setExErr(e instanceof Error ? e.message : String(e)));
     } catch (e) {
       if (alive.current) setErr(e instanceof Error ? e.message : String(e));
     }
@@ -406,6 +442,17 @@ export default function MonitorPage() {
     }
   };
 
+  const disconnect = async () => {
+    if (!window.confirm('Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод выключится у всех конфигов. Открытые на бирже позиции это не закрывает. Подключить заново можно через бота: /hl.')) return;
+    try {
+      await disconnectExchange();
+      setMsg('Счёт отключён, автомод выключен.');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+    await load();
+  };
+
   const closeTest = async () => {
     if (!window.confirm('Закрыть позицию по BTC на бирже целиком (рыночным ордером) и снять висящие ордера?')) return;
     setBusy(true);
@@ -445,7 +492,7 @@ export default function MonitorPage() {
         {data?.exchange.real && <button type="button" className="ghost" disabled={busy} onClick={() => void closeTest()}>Закрыть тестовую</button>}
         {msg && <span className="muted small" data-testid="mon-msg"> {msg}</span>}
       </div>
-      {data?.exchange.real && <ExchangeBlock info={data.exchange} state={ex} error={exErr} />}
+      <ExchangeBlock state={ex} error={exErr} onDisconnect={() => void disconnect()} />
       {!data && !err && <div className="empty">Загрузка…</div>}
       {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Отправьте конфиг боту в Telegram (файлом или текстом) — он появится здесь.</div>}
       <div className="mon-list">

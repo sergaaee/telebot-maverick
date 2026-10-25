@@ -305,17 +305,72 @@ def test_test_position_requires_confirmation_limits_amount_and_is_dry_run(auth_e
     assert r["status"] == "dry_run" and r["exchange"]["real"] is False and r["result"]["notional"] == 1.0 and r["leverage"] == 1 and r["margin"] == 1.0 and r["result"]["symbol"] == "BTC/USDT:USDT"
     log = a.post("/api/monitor", json={}, headers=H_).json()["log"]
     assert log[0]["kind"] == "test_position" and log[0]["status"] == "dry_run"
-    # Hyperliquid без ключей: честная ошибка, а не «успех»
-    monkeypatch.setenv("TRADE_EXCHANGE", "hyperliquid")
-    monkeypatch.setenv("HL_WALLET_ADDRESS", "")
-    monkeypatch.setenv("HL_PRIVATE_KEY", "")
-    app2 = create_app(load_settings())
-    c2 = client(app2)
-    login(c2, "alice", "alice-password")
-    r2 = c2.post("/api/trading/test-position", json={"confirm": True}, headers=H_)
-    assert r2.status_code == 503 and "HL_WALLET_ADDRESS" in r2.json()["detail"]
-    assert c2.get("/api/exchange/positions").status_code == 503
-    assert a.get("/api/exchange/positions").json() == {"exchange": {"name": "dry-run", "real": False, "testnet": False, "min_notional": 0.0}, "positions": [], "account": {}}
+    # счёт подключён, но ключ не расшифровать (потерян SECRET_KEY): честная ошибка, а не «успех»
+    alice = auth_env.check_login("alice", "alice-password")
+    auth_env.set_exchange_account(alice["id"], "hyperliquid", "0x" + "ab" * 20, "не-шифртекст", True, "0x" + "cd" * 20)
+    r2 = a.post("/api/trading/test-position", json={"confirm": True}, headers=H_)
+    assert r2.status_code == 503 and "/hl" in r2.json()["detail"]
+    info = a.get("/api/exchange/account").json()
+    assert info["connected"] is True and info["wallet"] == "0xabab…abab" and info["agent"] == "0xcdcd…cdcd" and info["error"]
+    assert info["exchange"]["real"] is True and info["exchange"]["testnet"] is True
+    assert "не-шифртекст" not in str(info)                                                                                  # ключ (даже зашифрованный) наружу не отдаётся никогда
+    assert a.post("/api/monitor", json={}, headers=H_).json()["exchange"]["real"] is True
+    b = client(app)
+    login(b, "bob", "bob-password-1")
+    assert b.get("/api/exchange/account").json()["connected"] is False and b.post("/api/monitor", json={}, headers=H_).json()["exchange"]["real"] is False     # у другого пользователя — симуляция
+    auth_env.add_config(alice["id"], "Для автомода", _open_cfg())
+    cfg_id = auth_env.list_configs(alice["id"])[-1]["id"]
+    auth_env.set_auto(alice["id"], cfg_id, True, True)
+    assert a.delete("/api/exchange/account", headers=H_).json() == {"removed": True}
+    assert auth_env.get_exchange_account(alice["id"]) is None and auth_env.get_config(cfg_id)["auto"] == {"open": False, "manage": False}              # автомод выключен вместе с отключением
+    assert a.get("/api/exchange/account").json()["connected"] is False
+    assert a.post("/api/trading/test-position", json={"confirm": True}, headers=H_).json()["status"] == "dry_run"
+
+
+def _open_cfg():
+    return {"symbol": "BTC/USDT:USDT", "side": "long", "confirm": 2, "tps": [{"pct": 50, "share": 50}, {"pct": 80, "share": 50}], "sl_pct": 50, "deposit": 10000, "trade_pct": 10, "leverage": 5}
+
+
+def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
+    db = auth_env
+    alice = db.check_login("alice", "alice-password")
+    db.add_config(alice["id"], "Открытая", _open_cfg())
+    db.add_config(alice["id"], "Сломанная", {"symbol": "BTC/USDT:USDT", "source": "нет-такого"})
+    app = create_app(load_settings())
+    a, b = client(app), client(app)
+    assert login(a, "alice", "alice-password").status_code == 200 and login(b, "bob", "bob-password-1").status_code == 200
+    assert client(app).post("/api/monitor", json={}, headers=H_).status_code == 401
+    r = a.post("/api/monitor", json={}, headers=H_).json()
+    assert [e["name"] for e in r["entries"]] == ["#1 Открытая", "#2 Сломанная"]
+    e = r["entries"][0]
+    pos = e["position"]
+    assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False}                 # автомод выключен, пока явно не включён
+    assert pos["legs_n"] == 1 and "legs" not in pos and pos["notional"] == pos["margin"] * 5 and pos["danger"] is False                     # в списке — краткая сводка, ноги в подробностях
+    cid0 = e["config_id"]
+    det = a.get(f"/api/monitor/configs/{cid0}").json()
+    leg = det["position"]["legs"][0]
+    assert leg["stop_kind"] == "SL" and leg["to_stop_pct"] > 0 and leg["to_next_tp_pct"] > 0 and leg["liq_price"] < leg["entry"] and leg["leverage"] == 5
+    assert [t["n"] for t in leg["tps"]] == [1, 2] and not any(t["hit"] for t in leg["tps"])
+    assert abs(det["position"]["pnl_usd"] - sum(x["pnl_usd"] for x in det["position"]["legs"])) < 1e-9 and leg["metrics_at_entry"]["dl"] is not None
+    assert det["stats"]["trades"] >= 1 and det["params"]["leverage"] == 5 and isinstance(det["history"], list) and det["title"] == "Открытая" and det["log"] == []
+    assert b.get(f"/api/monitor/configs/{cid0}").status_code == 404                                                                        # чужую стратегию не открыть
+    assert r["entries"][1]["error"] and r["entries"][1]["position"] is None                                                   # сломанный конфиг не роняет страницу
+    assert r["exchange"] == {"name": "dry-run", "real": False, "testnet": False, "min_notional": 0.0}
+    assert b.post("/api/monitor", json={}, headers=H_).json()["entries"] == []                                              # у другого пользователя своих конфигов нет
+    db.save_run(alice["id"], "Мой прогон", _open_cfg(), "auto", {"trades": 1})
+    runs_r = a.post("/api/monitor", json={"runs": True}, headers=H_).json()["entries"]
+    assert [x["name"] for x in runs_r][-1] == "Прогон: Мой прогон" and runs_r[-1]["config_id"] is None and runs_r[-1]["auto"] is None and runs_r[-1]["position"]      # прогон — без автомода
+    assert all(not x["name"].startswith("Прогон") for x in a.post("/api/monitor", json={}, headers=H_).json()["entries"])                                          # по умолчанию только конфиги бота
+    # автомод
+    cid = e["config_id"]
+    s = a.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).json()
+    assert s["auto"] == {"open": True, "manage": False}
+    assert a.put(f"/api/monitor/configs/{cid}/auto", json={"manage": True}, headers=H_).json()["auto"] == {"open": True, "manage": True}
+    assert b.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).status_code == 404                     # чужой конфиг
+    r2 = a.post("/api/monitor", json={}, headers=H_).json()
+    assert r2["entries"][0]["auto"] == {"open": True, "manage": True} and any(x["kind"] == "auto_toggle" for x in r2["log"])
+    assert a.post("/api/monitor/auto/off", headers=H_).json()["disabled"] == 1
+    assert a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]["auto"] == {"open": False, "manage": False}
 
 
 def test_monitor_config_management_is_per_user(auth_env):

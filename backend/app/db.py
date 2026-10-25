@@ -67,6 +67,16 @@ CREATE TABLE IF NOT EXISTS saved_runs (
     summary TEXT NOT NULL,
     created REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS exchange_accounts (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    exchange TEXT NOT NULL,
+    wallet TEXT NOT NULL,
+    key_enc TEXT NOT NULL,
+    testnet INTEGER NOT NULL,
+    agent_address TEXT,
+    created REAL NOT NULL,
+    verified REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS auto_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -253,6 +263,29 @@ class Database:
         with self.conn() as c:
             c.execute("INSERT INTO ui_state(user_id, data, updated) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated=excluded.updated",
                       (user_id, json.dumps(state, ensure_ascii=False), time.time()))
+
+    # ---------------- счёт на бирже (ключ API-кошелька хранится ЗАШИФРОВАННЫМ) ----------------
+    def set_exchange_account(self, user_id, exchange, wallet, key_enc, testnet, agent_address=None):
+        now = time.time()
+        with self.conn() as c:
+            old = c.execute("SELECT created FROM exchange_accounts WHERE user_id=?", (user_id,)).fetchone()
+            c.execute("INSERT INTO exchange_accounts(user_id, exchange, wallet, key_enc, testnet, agent_address, created, verified) VALUES (?,?,?,?,?,?,?,?) "
+                      "ON CONFLICT(user_id) DO UPDATE SET exchange=excluded.exchange, wallet=excluded.wallet, key_enc=excluded.key_enc, testnet=excluded.testnet, "
+                      "agent_address=excluded.agent_address, verified=excluded.verified",
+                      (user_id, exchange, wallet, key_enc, int(bool(testnet)), agent_address, old["created"] if old else now, now))
+
+    def get_exchange_account(self, user_id):
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM exchange_accounts WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["testnet"] = bool(d["testnet"])
+        return d
+
+    def delete_exchange_account(self, user_id):
+        with self.conn() as c:
+            return c.execute("DELETE FROM exchange_accounts WHERE user_id=?", (user_id,)).rowcount > 0
 
     # ---------------- автомод: действия (журнал) ----------------
     def set_auto(self, user_id, cfg_id, open_=None, manage=None):

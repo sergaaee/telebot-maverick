@@ -38,9 +38,24 @@ LONG = lambda t0, n: [(t0 + i * H // 2, 1.2, 2.0, 2.5) for i in range(n)]
 class FakeTG:
     def __init__(self):
         self.sent, self.fills, self.docs, self.files = [], [], [], {}
+        self.keyboards, self.edits, self.answers, self.deleted, self.next_id = [], [], [], [], 100
 
-    def send_message(self, chat, text, html=True):
+    def send_message(self, chat, text, html=True, keyboard=None):
         (self.fills if "Расчёт по свечам: исполнение" in text else self.sent).append((chat, text))       # уведомления об исполнениях — отдельно от остальных
+        self.keyboards.append((chat, keyboard))
+        self.next_id += 1
+        return self.next_id
+
+    def edit_message(self, chat, message_id, text, keyboard=None, html=True):
+        self.edits.append((chat, message_id, text, keyboard))
+        return True
+
+    def answer_callback(self, callback_id, text=None, alert=False):
+        self.answers.append((callback_id, text, alert))
+
+    def delete_message(self, chat, message_id):
+        self.deleted.append((chat, message_id))
+        return True
 
     def send_document(self, chat, name, content, caption=None):
         self.docs.append((chat, name, content, caption))
@@ -809,8 +824,7 @@ def test_auto_only_open_does_not_manage(env):
 
 
 def test_auto_adapter_errors_are_logged_not_raised(env):
-    from app.trading import HyperliquidAdapter
-    env.adapter = HyperliquidAdapter(wallet="", key="")                                 # ключей нет — ошибка в журнале, цикл бота жив
+    env.db.set_exchange_account(env.alice["id"], "hyperliquid", "0x" + "ab" * 20, "не-шифртекст", True)       # счёт подключён, ключ не расшифровать — ошибка в журнале, цикл бота жив
     env.handle_update(msg(json.dumps(UI_CONFIG)))
     env.cycle()
     cfg = env.db.list_configs(env.alice["id"])[0]
@@ -820,5 +834,5 @@ def test_auto_adapter_errors_are_logged_not_raised(env):
     env.now["t"] = (start + 3 * H // 2) / 1000
     env.cycle()
     log = env.db.list_auto_log(env.alice["id"])
-    assert log and log[0]["status"] == "error" and "HL_WALLET_ADDRESS" in log[0]["details"]["error"]
+    assert log and log[0]["status"] == "error" and "/hl" in log[0]["details"]["error"]
     assert any("ЛОНГ" in t for t in env.tg.texts(CHAT))                                # уведомление пришло несмотря на ошибку исполнения
