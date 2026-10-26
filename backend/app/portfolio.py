@@ -105,9 +105,10 @@ def peak_margin(trades):
     return best, when
 
 
-def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit=None, sizing=None):
+def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit=None, sizing=None, compound=None):
     """rows: [{id, name, symbol, paused, deposit, sizing, trades, stats, error}] — trades как в результате бэктеста (с notional/margin у открытых).
     exclude — id стратегий, отключённых из расчётов портфеля; total_deposit — общий депозит (None — у каждой свой).
+    compound — True / False: включить / выключить сложный процент сразу для ВСЕХ стратегий портфеля (None — как в конфигах).
     sizing — {id стратегии: {"trade_pct", "leverage"}}: размер входа ТОЛЬКО для расчётов портфеля («что если»), конфиги не меняются; сделки таких стратегий пересчитываются.
     real: {"equity", "positions": [{symbol, side, notional}]} с подключённой биржи или None."""
     exclude = set(exclude or ())
@@ -120,6 +121,9 @@ def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit
         o = sizing.get(r["id"]) or {}
         r["eff_sizing"] = {**r["sizing"], **{k: o[k] for k in ("trade_pct", "leverage") if o.get(k) is not None}}
         r["overridden"] = r["eff_sizing"]["trade_pct"] != r["sizing"]["trade_pct"] or r["eff_sizing"]["leverage"] != r["sizing"]["leverage"]
+        if compound is not None:
+            r["eff_sizing"]["compound"] = bool(compound)
+        r["recompute"] = r["overridden"] or bool(r["eff_sizing"].get("compound", True)) != bool(r["sizing"].get("compound", True))
     joint = bool(total_deposit) and bool(active)
     deposit = float(total_deposit) if joint else sum(r["deposit"] for r in active)
     if joint:
@@ -127,7 +131,7 @@ def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit
     else:                                                     # у каждой свой депозит: пересчитываем только стратегии с изменённым размером
         sized = {}
         for r in active:
-            sized[r["id"]] = joint_sizing([{**r, "sizing": r["eff_sizing"]}], r["deposit"])[r["id"]] if r["overridden"] else r["trades"]
+            sized[r["id"]] = joint_sizing([{**r, "sizing": r["eff_sizing"]}], r["deposit"])[r["id"]] if r["recompute"] else r["trades"]
 
     items = []
     for r in rows:
@@ -136,12 +140,13 @@ def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit
             items.append({**base, "included": False, "error": r["error"]})
             continue
         sz_info = {"cfg_trade_pct": r["sizing"]["trade_pct"], "cfg_leverage": r["sizing"]["leverage"], "trade_pct": r["eff_sizing"]["trade_pct"], "leverage": r["eff_sizing"]["leverage"],
-                   "overridden": bool(r["overridden"]), "liq_sim": bool(r["sizing"].get("liquidation_sim"))}
+                   "overridden": bool(r["overridden"]), "liq_sim": bool(r["sizing"].get("liquidation_sim")),
+                   "compound": bool(r["eff_sizing"].get("compound", True)), "cfg_compound": bool(r["sizing"].get("compound", True))}
         if r["id"] in sized:
             tr = sized[r["id"]]
             curve, dd = _curve(tr)
             dep_i = deposit if joint else r["deposit"]
-            if joint or r["overridden"]:
+            if joint or r["recompute"]:
                 st = backtest.stats(tr)
                 st = {**st, "sharpe": sharpe_ratio(tr, dep_i) if tr else None, "return_pct": 100 * st["total_usd"] / dep_i}
                 if r.get("candles"):
@@ -242,7 +247,7 @@ def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit
         exposure["real"] = {"equity": eq, "gross": real_gross, "leverage": real_gross / eq if eq else None}
         if eq and gross > eq * 10:
             warnings.append(f"Расчётный объём позиций ({gross:.0f} $) больше капитала на бирже ({eq:.0f} $) в {gross / eq:.1f} раз — проверьте плечи и размеры")
-    return _clean({"items": items, "portfolio": portfolio, "correlation": correlation, "exposure": exposure, "settings": {"exclude": sorted(exclude), "total_deposit": total_deposit if joint else None, "sizing": {str(k): v for k, v in sizing.items() if any(r["id"] == k and r.get("overridden") for r in rows)}}})
+    return _clean({"items": items, "portfolio": portfolio, "correlation": correlation, "exposure": exposure, "settings": {"exclude": sorted(exclude), "total_deposit": total_deposit if joint else None, "compound": compound, "sizing": {str(k): v for k, v in sizing.items() if any(r["id"] == k and r.get("overridden") for r in rows)}}})
 
 
 def collect(store, defaults, configs, available_fn=None):

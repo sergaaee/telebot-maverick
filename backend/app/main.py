@@ -422,7 +422,8 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                 e = {n: float(v[n]) for n in ("trade_pct", "leverage") if isinstance(v.get(n), (int, float)) and not isinstance(v.get(n), bool)}
                 if e:
                     sz[str(int(k))] = e
-        return {"exclude": ex, "total_deposit": float(td) if isinstance(td, (int, float)) and td > 0 else None, "sizing": sz}
+        return {"exclude": ex, "total_deposit": float(td) if isinstance(td, (int, float)) and td > 0 else None, "sizing": sz,
+                "compound": p.get("compound") if isinstance(p.get("compound"), bool) else None}
 
     @app.get("/api/portfolio/prefs")
     def portfolio_prefs(request: Request):
@@ -442,6 +443,10 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             if td is not None and (isinstance(td, bool) or not isinstance(td, (int, float)) or not 0 < td <= 1e9):
                 raise HTTPException(422, "Общий депозит — число больше 0 (или null, чтобы у каждой стратегии был свой)")
             cur["total_deposit"] = float(td) if td is not None else None
+        if "compound" in body:
+            if body["compound"] is not None and not isinstance(body["compound"], bool):
+                raise HTTPException(422, "compound: true (включить сложный процент для всех), false (выключить для всех) или null (как в конфигах)")
+            cur["compound"] = body["compound"]
         if "sizing" in body:
             raw = body["sizing"]
             if not isinstance(raw, dict):
@@ -478,7 +483,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                 real = {"equity": ad.account().get("equity"), "positions": ad.positions()}
             except Exception:                      # биржа недоступна — портфель показываем без блока «реальная биржа»
                 real = None
-        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"], sizing=prefs["sizing"])
+        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"], sizing=prefs["sizing"], compound=prefs["compound"])
 
     @app.get("/api/export/{kind}.csv")
     def export_csv(kind: str, request: Request, config_id: int | None = Query(None)):

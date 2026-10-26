@@ -64,7 +64,7 @@ export default function PortfolioPanel() {
     }
   };
 
-  const savePrefs = async (patch: { exclude?: number[]; total_deposit?: number | null; sizing?: Record<string, { trade_pct?: number; leverage?: number }> }) => {
+  const savePrefs = async (patch: { exclude?: number[]; total_deposit?: number | null; compound?: boolean | null; sizing?: Record<string, { trade_pct?: number; leverage?: number }> }) => {
     try {
       await savePortfolioPrefs(patch);
       setMsg(null);
@@ -139,6 +139,11 @@ export default function PortfolioPanel() {
           onKeyDown={(e) => { if (e.key === 'Enter') applyDeposit(); }} aria-label="Общий депозит на все стратегии, $" /> <span className="muted small">$</span>
         <button type="button" className="ghost" onClick={applyDeposit}>Применить</button>
         {pf?.settings.total_deposit != null && <button type="button" className="ghost" onClick={() => { setDepInput(''); void savePrefs({ total_deposit: null }); }}>У каждой свой</button>}
+        <span className="mon-sep" />
+        <b>Сложный процент</b><Help text={HELP.pf_compound} />
+        <select value={pf?.settings.compound == null ? 'cfg' : pf.settings.compound ? 'on' : 'off'} onChange={(e) => void savePrefs({ compound: e.target.value === 'cfg' ? null : e.target.value === 'on' })} aria-label="Сложный процент для всех стратегий" data-testid="pf-compound" disabled={!pf}>
+          <option value="cfg">как в конфигах</option><option value="on">включить для всех</option><option value="off">выключить для всех</option>
+        </select>
         <span className="muted small">{pf?.portfolio.joint ? `Все стратегии торгуют с одного счёта ${fmtUsd(pf.portfolio.deposit)}: размер каждой сделки считается от общего баланса` : 'Сейчас у каждой стратегии депозит из её конфига; в портфеле они складываются'}</span>
       </div>
       {err && <div className="banner error">{err}</div>}
