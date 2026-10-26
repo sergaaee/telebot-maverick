@@ -5,6 +5,7 @@
 свечи) общие: одинаковые расчёты в одном цикле выполняются один раз."""
 import json
 import logging
+import os
 import threading
 import time
 from html import escape as esc
@@ -13,7 +14,9 @@ from app.db import DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
-from app import manage
+from app import digest as digest_mod, exporter, manage
+from app.monitor import cached_result
+from app.service import ParamError
 from app.secrets_store import SecretError, encrypt
 from app.tradelog import read_tail, trade_error, trade_log
 from app.trading import adapter_for, forget_adapter, mask_address, verify_hyperliquid
@@ -211,6 +214,63 @@ class SignalService:
             self.send(chat, "Лог автоторговли по вашему аккаунту пока пуст.")
             return
         self.tg.send_document(chat, "trading-log.jsonl", ("\n".join(rows) + "\n").encode("utf-8"), caption=f"Лог автоторговли: последние {len(rows)} записей (JSON по строке)")
+
+    def cmd_digest(self, chat, user, arg):
+        """Регулярная сводка: /digest daily — каждый день, /digest weekly — по понедельникам, /digest off — выключить, /digest now — прислать сейчас."""
+        a = arg.strip().lower()
+        if a == "now":
+            mode = user.get("digest") if user.get("digest") in digest_mod.PERIOD_H else "daily"
+            self.send(chat, digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, user, self.adapter_for(user["id"]), self.engine.available, mode))
+            return
+        if a in ("off", "daily", "weekly"):
+            self.db.set_digest(user["id"], a)
+            hour = int(os.getenv("DIGEST_HOUR_UTC", "8") or 8)
+            self.send(chat, {"off": "Сводка выключена.", "daily": f"Сводка включена: каждый день в {hour:02d}:00 UTC.", "weekly": f"Сводка включена: по понедельникам в {hour:02d}:00 UTC."}[a])
+            return
+        cur = user.get("digest") or "off"
+        self.send(chat, f"Сводка сейчас: <b>{cur}</b>.\n/digest daily — каждый день\n/digest weekly — по понедельникам\n/digest off — выключить\n/digest now — прислать сейчас")
+
+    def cmd_export(self, chat, user, arg):
+        """Выгрузка в CSV: /export trades (сделки стратегий, расчёт), /export log (журнал автоторговли), /export fills (реальные исполнения на бирже)."""
+        kind = arg.strip().lower()
+        if kind == "trades":
+            items = []
+            for c in self.db.list_configs(user["id"]):
+                try:
+                    items.append((c["name"], cached_result(self.engine.store, self.s.defaults, c["params"], self.engine.available)))
+                except (ParamError, FileNotFoundError, KeyError, ValueError):
+                    continue
+            body, name = exporter.trades_csv(items), "maverick-trades.csv"
+        elif kind in ("log", "autolog"):
+            body, name = exporter.autolog_csv(self.db.list_auto_log(user["id"], 500)), "maverick-autolog.csv"
+        elif kind == "fills":
+            ad = self.adapter_for(user["id"])
+            if not ad.real:
+                self.send(chat, "Счёт биржи не подключён (/hl) — реальных исполнений нет.")
+                return
+            try:
+                body, name = exporter.fills_csv(ad.fills(500)), "maverick-fills.csv"
+            except Exception as e:
+                self.send(chat, f"⚠️ Не удалось получить исполнения: {esc(str(e)[:200])}")
+                return
+        else:
+            self.send(chat, "Что выгрузить?\n/export trades — сделки стратегий (расчёт)\n/export log — журнал автоторговли\n/export fills — реальные исполнения на бирже")
+            return
+        self.tg.send_document(chat, name, body.encode("utf-8"), caption=name)
+
+    def _send_digests(self):
+        """Раз в цикл: кому пора — присылаем сводку (daily / weekly, час — DIGEST_HOUR_UTC)."""
+        hour = int(os.getenv("DIGEST_HOUR_UTC", "8") or 8)
+        now = self.clock()
+        for u in self.db.list_users():
+            if u["disabled"] or not u["telegram_id"] or not digest_mod.due(u["digest"], u["digest_ts"], now, hour):
+                continue
+            try:
+                text = digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, u, self.adapter_for(u["id"]), self.engine.available, u["digest"], now)
+                self.send(u["telegram_id"], text)
+            except Exception:
+                log.exception("сводка для %s", u["login"])
+            self.db.mark_digest_sent(u["id"], now)                   # и при сбое: не пытаться каждую минуту
 
     def cmd_hl(self, chat, user, arg):
         """Подключение счёта Hyperliquid (адрес кошелька + ключ API-кошелька) и состояние счёта."""
@@ -459,6 +519,10 @@ class SignalService:
             self._cancel.clear()
         self.last_cycle = self.clock()
         self._beat("bot_cycle")
+        try:
+            self._send_digests()
+        except Exception:
+            log.exception("сводки")
 
     def _beat(self, key):
         """Пульс для сторожа (watchdog.py): время последнего цикла."""

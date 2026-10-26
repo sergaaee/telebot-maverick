@@ -17,11 +17,12 @@ from .candle_sync import CandleSync
 from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
-from .schemas import BacktestParams, MonteCarloRequest
-from . import watchdog
+from .schemas import BacktestParams, MonteCarloRequest, WalkForwardRequest
+from . import exporter, portfolio, watchdog
 from .watchdog import Watchdog
-from .monitor import evaluate_entry
+from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
+from .walkforward import run_walkforward
 from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, test_close, test_open)
 
 
@@ -294,6 +295,16 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         except ParamError as e:
             raise HTTPException(422, str(e))
 
+    @app.post("/api/walkforward")
+    def walkforward_run(req: WalkForwardRequest):
+        """Walk-forward: подбор параметров на окне и проверка на следующем, окна сдвигаются. Показывает, не подогнана ли стратегия под прошлое."""
+        try:
+            return run_walkforward(store, s.defaults, req, available_fn=available_fn)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        except ParamError as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/top/download")
     def top_download(params: BacktestParams, request: Request):
         """Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + TOP_DAYS) для текущих параметров."""
@@ -391,6 +402,65 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
         return {"disabled": auto_off_all(db, request.state.user["id"])}
+
+    @app.post("/api/portfolio")
+    def portfolio_ep(request: Request):
+        """Портфель всех стратегий пользователя: кривые капитала рядом, общая кривая, корреляция дневных результатов, суммарная экспозиция по активам и предупреждения о риске."""
+        uid = request.state.user["id"]
+        rows = portfolio.collect(store, s.defaults, db.list_configs(uid), available_fn)
+        real = None
+        ad = _adapter(request, db)
+        if ad.real:
+            try:
+                real = {"equity": ad.account().get("equity"), "positions": ad.positions()}
+            except Exception:                      # биржа недоступна — портфель показываем без блока «реальная биржа»
+                real = None
+        return portfolio.build_portfolio(rows, real)
+
+    @app.get("/api/export/{kind}.csv")
+    def export_csv(kind: str, request: Request, config_id: int | None = Query(None)):
+        """CSV-выгрузки: trades — сделки стратегий (расчёт; config_id — одной, иначе всех), autolog — журнал автоторговли, fills — реальные исполнения на бирже."""
+        uid = request.state.user["id"]
+        if kind == "trades":
+            cfgs = [_own(request, config_id)] if config_id is not None else db.list_configs(uid)
+            items = []
+            for c in cfgs:
+                try:
+                    items.append((c["name"], cached_result(store, s.defaults, c["params"], available_fn)))
+                except (ParamError, FileNotFoundError, KeyError, ValueError):
+                    continue
+            body = exporter.trades_csv(items)
+        elif kind == "autolog":
+            body = exporter.autolog_csv(db.list_auto_log(uid, 500, config_id))
+        elif kind == "fills":
+            ad = _adapter(request, db)
+            if not ad.real:
+                raise HTTPException(409, "Счёт биржи не подключён — реальных исполнений нет")
+            try:
+                body = exporter.fills_csv(ad.fills(500))
+            except Exception as e:
+                raise HTTPException(502, str(e))
+        else:
+            raise HTTPException(404, "Неизвестная выгрузка")
+        return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="maverick-{kind}.csv"'})
+
+    @app.get("/api/digest")
+    def digest_get(request: Request):
+        u = request.state.user
+        return {"mode": u.get("digest") or "off", "telegram": bool(u["telegram_id"]), "hour_utc": int(os.getenv("DIGEST_HOUR_UTC", "8") or 8)}
+
+    @app.put("/api/digest")
+    def digest_put(request: Request, body: dict = Body(...)):
+        """Регулярная сводка в Telegram: off / daily (каждый день) / weekly (по понедельникам). Нужен привязанный Telegram."""
+        mode = str(body.get("mode") or "")
+        u = request.state.user
+        if mode != "off" and not u["telegram_id"]:
+            raise HTTPException(409, "Сводка приходит в Telegram: сначала привяжите бота (/link)")
+        try:
+            db.set_digest(u["id"], mode)
+        except DbError as e:
+            raise HTTPException(422, str(e))
+        return {"mode": mode}
 
     @app.post("/api/panic")
     def panic_ep(request: Request, body: dict = Body(default={})):

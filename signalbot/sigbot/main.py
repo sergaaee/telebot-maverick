@@ -17,7 +17,7 @@ from .transport import AiogramTransport, build_dispatcher, make_bot
 
 log = logging.getLogger("signalbot")
 LIVE_SEC = 20
-COMMANDS = [("monitor", "мониторинг: стратегии, позиции, автомод, live"), ("positions", "открытые позиции"), ("panic", "СТОП ВСЁ: закрыть позиции и выключить автомод"), ("list", "ваши конфиги"), ("check", "проверить сигналы сейчас"),
+COMMANDS = [("monitor", "мониторинг: стратегии, позиции, автомод, live"), ("positions", "открытые позиции"), ("digest", "сводка в чат: daily / weekly / off / now"), ("export", "выгрузка CSV: trades / log / fills"), ("panic", "СТОП ВСЁ: закрыть позиции и выключить автомод"), ("list", "ваши конфиги"), ("check", "проверить сигналы сейчас"),
             ("status", "состояние данных"), ("help", "справка")]
 
 

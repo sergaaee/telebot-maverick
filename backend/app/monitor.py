@@ -81,26 +81,29 @@ def compact(view):
     return v
 
 
-def evaluate_entry(store, defaults, name, config_id, params, auto=None, paused=False, available_fn=None, detail=False):
-    """Один блок мониторинга; ошибка расчёта превращается в поле error (одна сломанная стратегия не роняет страницу)."""
+def cached_result(store, defaults, params, available_fn=None):
+    """Результат расчёта стратегии с краткой (TTL) памятью: страница мониторинга, портфель и бот не считают одно и то же дважды подряд."""
     key = json.dumps(params, sort_keys=True, default=str)
     now = time.monotonic()
     with _lock:
         hit = _cache.get(key)
         if hit and now - hit[0] < TTL:
-            res = hit[1]
-        else:
-            res = None
-    err = None
-    if res is None:
-        try:
-            res = run_backtest(store, defaults, BacktestParams(**{**LEGACY_OFF, **params}), available_fn=available_fn)
-            with _lock:
-                _cache[key] = (now, res)
-                if len(_cache) > 64:
-                    _cache.pop(next(iter(_cache)))
-        except (ParamError, FileNotFoundError, KeyError, ValueError) as e:
-            err = str(e.args[0]) if e.args else str(e)
+            return hit[1]
+    res = run_backtest(store, defaults, BacktestParams(**{**LEGACY_OFF, **params}), available_fn=available_fn)
+    with _lock:
+        _cache[key] = (now, res)
+        if len(_cache) > 64:
+            _cache.pop(next(iter(_cache)))
+    return res
+
+
+def evaluate_entry(store, defaults, name, config_id, params, auto=None, paused=False, available_fn=None, detail=False):
+    """Один блок мониторинга; ошибка расчёта превращается в поле error (одна сломанная стратегия не роняет страницу)."""
+    err, res = None, None
+    try:
+        res = cached_result(store, defaults, params, available_fn)
+    except (ParamError, FileNotFoundError, KeyError, ValueError) as e:
+        err = str(e.args[0]) if e.args else str(e)
     if res is None:
         return {"name": name, "config_id": config_id, "symbol": params.get("symbol"), "auto": auto, "paused": paused, "error": err, "position": None}
     sym = res["symbol"]

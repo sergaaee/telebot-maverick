@@ -376,3 +376,33 @@ def test_panic_closes_everything_and_turns_auto_off(env, fake_verify, monkeypatc
     env.handle_update(cb("pny"))
     assert called and env.db.get_config(cid)["auto"] == {"open": False, "manage": False}
     assert any(x["kind"] == "panic" for x in env.db.list_auto_log(env.alice["id"], 10))
+
+
+def test_digest_and_export_commands(env):
+    env.handle_update(tmsg("/digest"))
+    assert "сейчас: <b>off</b>" in env.tg.texts(CHAT)[-1]
+    env.handle_update(tmsg("/digest daily"))
+    assert env.db.get_user(env.alice["id"])["digest"] == "daily" and "каждый день" in env.tg.texts(CHAT)[-1]
+    cid = add_cfg(env, "Для сводки")
+    env.handle_update(tmsg("/digest now"))
+    assert "Дневная сводка" in env.tg.texts(CHAT)[-1] and "Для сводки" in env.tg.texts(CHAT)[-1]
+    # автоматическая отправка по расписанию: один раз за слот
+    env.db.mark_digest_sent(env.alice["id"], 1.0)
+    env.now["t"] = 1_700_000_000 + 3600 * 12
+    before = len(env.tg.texts(CHAT))
+    env._send_digests()
+    env._send_digests()
+    sent = [t for t in env.tg.texts(CHAT)[before:] if "сводка" in t]
+    assert len(sent) == 1
+    env.handle_update(tmsg("/digest off"))
+    assert env.db.get_user(env.alice["id"])["digest"] == "off"
+    # выгрузки файлами
+    env.handle_update(tmsg("/export trades"))
+    name, body = env.tg.docs[-1][1], env.tg.docs[-1][2].decode("utf-8")
+    assert name == "maverick-trades.csv" and body.lstrip("﻿").startswith("strategy,symbol")
+    env.handle_update(tmsg("/export log"))
+    assert env.tg.docs[-1][1] == "maverick-autolog.csv"
+    env.handle_update(tmsg("/export fills"))
+    assert "не подключён" in env.tg.texts(CHAT)[-1]
+    env.handle_update(tmsg("/export"))
+    assert "/export trades" in env.tg.texts(CHAT)[-1]

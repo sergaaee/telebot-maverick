@@ -406,7 +406,7 @@ def _closed_prefix(sim):
     return kept, [x for x in sim["skipped"] if x[0] < cut], resume, cut
 
 
-def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None) -> dict:
+def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, available_fn=None, now_ms=None, use_cache=True) -> dict:
     eff = effective_params(defaults, params)
     source_id = eff.get("source") or store.s.default_source
     liq_id = eff.get("liq_source")
@@ -469,7 +469,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         raise ParamError(str(e))
 
     # снимок прошлого расчёта этой стратегии: если данные только дописались, считаем только новые отчёты и свечи (см. runcache.py)
-    rc = runcache.for_dir(store.s.cache_dir) if runcache.enabled() else None
+    rc = runcache.for_dir(store.s.cache_dir) if (use_cache and runcache.enabled()) else None
     ckey = runcache.make_key(eff, source_id, liq_id, symbol) if rc else None
     snap = rc.get(ckey) if rc else None
     if snap and not (snap["n_sigs"] <= len(sigs) and runcache.matches(snap["sig_probe"], sigs, snap["n_sigs"])
