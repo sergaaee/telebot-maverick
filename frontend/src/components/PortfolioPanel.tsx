@@ -105,14 +105,18 @@ export default function PortfolioPanel() {
             <div className="card"><div className="card-label">Стратегий в портфеле</div><div className="card-value">{pf.portfolio.strategies}</div></div>
             <div className="card"><div className="card-label">Результат (расчёт)</div><div className={`card-value ${signClass(pf.portfolio.total_usd)}`}>{fmtUsd(pf.portfolio.total_usd)}</div></div>
             <div className="card"><div className="card-label">К сумме депозитов</div><div className={`card-value ${signClass(pf.portfolio.return_pct ?? 0)}`}>{pf.portfolio.return_pct == null ? '–' : fmtPct(pf.portfolio.return_pct, 1)}</div></div>
-            <div className="card"><div className="card-label">Макс. просадка</div><div className="card-value neg">{pf.portfolio.max_dd_pct.toFixed(1)}%</div></div>
+            <div className="card" data-testid="pf-dd" title={`С учётом открытых позиций по рыночной цене${pf.portfolio.max_dd_real_ts ? `, самый глубокий провал: ${fmtTs(pf.portfolio.max_dd_real_ts)}` : ''}. Только по закрытым сделкам: ${pf.portfolio.max_dd_pct.toFixed(1)}% от депозита (${fmtUsd(pf.portfolio.max_dd_usd)})`}>
+              <div className="card-label">Макс. просадка (с позициями) <Help text={HELP.pf_dd_real} /></div>
+              <div className="card-value neg">{(pf.portfolio.max_dd_real_pct ?? pf.portfolio.max_dd_pct).toFixed(1)}%</div>
+              <div className="muted small">{pf.portfolio.max_dd_real_usd != null ? `${fmtUsd(pf.portfolio.max_dd_real_usd)} · по закрытым ${pf.portfolio.max_dd_pct.toFixed(1)}%` : 'по закрытым сделкам'}</div>
+            </div>
             <div className="card"><div className="card-label">{pf.portfolio.joint ? 'Общий депозит' : 'Сумма депозитов'}</div><div className="card-value">{fmtUsd(pf.portfolio.deposit)}</div></div>
             <div className="card" title={pf.portfolio.peak_margin_ts ? `пик: ${fmtTs(pf.portfolio.peak_margin_ts)}` : undefined}><div className="card-label">Пик занятой маржи</div><div className={`card-value ${(pf.portfolio.peak_margin_pct ?? 0) > 100 ? 'neg' : ''}`}>{pf.portfolio.peak_margin_pct == null ? '–' : `${pf.portfolio.peak_margin_pct.toFixed(0)}%`}</div></div>
             <div className="card"><div className="card-label">Лучшая / худшая</div><div className="card-value small">{pf.portfolio.best ?? '–'} / {pf.portfolio.worst ?? '–'}</div></div>
           </div>
           {lines.length ? <PortfolioChart lines={lines} /> : <div className="empty small">Нет закрытых сделок у выбранных стратегий</div>}
           <div className="table-wrap mon-legs"><table>
-            <thead><tr><th title="Учитывать стратегию в расчётах портфеля">В портфеле <Help text={HELP.pf_include} /></th><th>Стратегия</th><th>Актив</th><th>Сделок</th><th>Winrate</th><th>PF</th><th>Результат</th><th>% депозита</th><th>Макс. просадка</th><th>Sharpe</th></tr></thead>
+            <thead><tr><th title="Учитывать стратегию в расчётах портфеля">В портфеле <Help text={HELP.pf_include} /></th><th>Стратегия</th><th>Актив</th><th>Сделок</th><th>Winrate</th><th>PF</th><th>Результат</th><th>% депозита</th><th title="С учётом открытых позиций (от пика капитала); в подсказке ячейки — по закрытым сделкам">Макс. просадка</th><th>Sharpe</th></tr></thead>
             <tbody>
               {pf.items.map((i) => (
                 <tr key={i.id} className={i.included ? '' : 'muted'} data-testid="pf-row">
@@ -122,7 +126,7 @@ export default function PortfolioPanel() {
                     <>
                       <td>{i.trades}</td><td>{i.winrate != null ? `${i.winrate.toFixed(0)}%` : '–'}</td><td>{i.profit_factor == null ? (i.trades ? '∞' : '–') : fmtPf(i.profit_factor)}</td>
                       <td className={signClass(i.total_usd ?? 0)}>{fmtUsd(i.total_usd ?? 0)}</td><td className={signClass(i.return_pct ?? 0)}>{i.return_pct != null ? fmtPct(i.return_pct, 1) : '–'}</td>
-                      <td className="neg">{i.max_dd_pct != null ? `${i.max_dd_pct.toFixed(1)}%` : '–'}</td><td>{i.sharpe != null ? i.sharpe.toFixed(2) : '–'}</td>
+                      <td className="neg" title={i.max_dd_pct != null ? `по закрытым сделкам: ${i.max_dd_pct.toFixed(1)}%` : undefined}>{i.max_dd_real_pct != null ? `${i.max_dd_real_pct.toFixed(1)}%` : i.max_dd_pct != null ? `${i.max_dd_pct.toFixed(1)}%` : '–'}</td><td>{i.sharpe != null ? i.sharpe.toFixed(2) : '–'}</td>
                     </>
                   )}
                 </tr>

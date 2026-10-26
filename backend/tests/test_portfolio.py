@@ -102,3 +102,36 @@ def test_excluded_strategies_are_left_out_of_every_calculation():
     assert r["portfolio"]["strategies"] == 2 and r["portfolio"]["deposit"] == 2000.0 and r["correlation"]["ids"] == [1, 2]
     assert r["exposure"]["gross"] == 200 and r["settings"]["exclude"] == [3]
     assert build_portfolio([mk(1, "A", 1)], exclude=[1])["portfolio"]["strategies"] == 0
+
+
+def _candles(prices, t0=0, step=60_000):
+    """prices: [(open, high, low, close)] по минутам."""
+    return [(t0 + i * step, o, h, l, c) for i, (o, h, l, c) in enumerate(prices)]
+
+
+def _trade(side, entry, notional, entry_i, exit_i, exit_px, pnl, reason="TP"):
+    return {"side": side, "entry": entry, "notional": notional, "entry_ts": entry_i * 60_000, "exit_ts": exit_i * 60_000, "exit": exit_px, "pnl_usd": pnl, "reason": reason,
+            "fills": [{"ts": exit_i * 60_000, "price": exit_px, "share": 1.0}]}
+
+
+def test_mtm_drawdown_sees_the_dip_inside_a_trade_with_leverage():
+    from app.core.equity import mtm_drawdown_multi
+    c = _candles([(100, 101, 99, 100), (100, 100, 90, 95), (95, 111, 94, 110), (110, 110, 110, 110)])
+    t = _trade("long", 100.0, 1000.0, 0, 3, 110.0, 100.0)                       # объём 1000 $ (плечо уже внутри), по дороге цена падала до 90, закрылась +10%
+    r = mtm_drawdown_multi([([t], c)], 1000.0)
+    assert abs(r["max_dd_real_usd"] - 100.0) < 1e-9 and abs(r["max_dd_real_pct"] - 10.0) < 1e-9 and abs(r["min_equity_usd"] - 900.0) < 1e-9
+    assert r["max_dd_real_ts"] is not None
+    # по закрытым сделкам просадки не было совсем — именно это и занижало показатель
+    assert build_portfolio([{**srow(1, "A", [{**leg(0, 3, 10.0), "pnl_usd": 100.0}]), "candles": c}])["portfolio"]["max_dd_usd"] == 0.0
+
+
+def test_mtm_drawdown_of_two_strategies_on_one_account_adds_up():
+    from app.core.equity import mtm_drawdown_multi
+    btc = _candles([(100, 100, 100, 100), (100, 100, 90, 95), (95, 100, 95, 100), (100, 100, 100, 100)])
+    eth = _candles([(50, 50, 50, 50), (50, 52, 45, 48), (48, 50, 48, 50), (50, 50, 50, 50)])
+    a = _trade("long", 100.0, 1000.0, 0, 3, 100.0, 0.0, "BE")
+    b = _trade("long", 50.0, 500.0, 0, 3, 50.0, 0.0, "BE")
+    r = mtm_drawdown_multi([([a], btc), ([b], eth)], 2000.0)
+    assert abs(r["max_dd_real_usd"] - (100 + 50)) < 1e-9                         # обе просели в одном блоке: 10% от 1000 и 10% от 500
+    p = build_portfolio([{**srow(1, "A", [{**leg(0, 3, 0.0), "entry": 100.0, "side": "long", "fills": [], "notional": 1000.0}]), "candles": btc}])
+    assert p["portfolio"]["max_dd_real_pct"] is not None

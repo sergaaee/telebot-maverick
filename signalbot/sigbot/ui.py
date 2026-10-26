@@ -90,7 +90,7 @@ class MonitorUI:
         """-> (тело, клавиатура). Тело без строки времени: по нему решаем, менять ли сообщение."""
         kind, *a = screen.split(":")
         fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
-              "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect}.get(kind)
+              "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "sz": self._s_sizing, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect}.get(kind)
         if fn is None:
             return self._s_list(user, live)
         return fn(user, *a, live=live)
@@ -193,7 +193,8 @@ class MonitorUI:
         if e.get("paused"):
             lines.append("⏸ Конфиг на паузе: бот его не считает, автомод выключен.")
         kb = [[(f"{'✅' if a.get('open') else '⬜'} Открывать", f"a:{c['id']}:o"), (f"{'✅' if a.get('manage') else '⬜'} Управлять", f"a:{c['id']}:m")],
-              [(f"💰 База: {'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}", f"ab:{c['id']}"), ("▶ Возобновить" if c["paused"] else "⏸ Пауза", f"p:{c['id']}")],
+              [(f"💰 База: {'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}", f"ab:{c['id']}"), (f"📐 {st['trade_pct']:g}% × {st['leverage']:g}×" if st else "📐 Размер", f"sz:{c['id']}")],
+              [("▶ Возобновить" if c["paused"] else "⏸ Пауза", f"p:{c['id']}")],
               [("📊 Статистика", f"v:{c['id']}:stats"), ("📜 История", f"v:{c['id']}:hist")],
               [("⚙️ Параметры", f"v:{c['id']}:params"), ("📋 Журнал", f"v:{c['id']}:log")],
               [("🔄", f"c:{c['id']}"), self._live_btn(f"c:{c['id']}", live), ("⬇ Конфиг", f"e:{c['id']}"), ("🗑", f"cd:{c['id']}")],
@@ -303,6 +304,26 @@ class MonitorUI:
     def _s_confirm_disconnect(self, user, live=False):
         return self._confirm("🔌 Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxy", "x")
 
+    PCTS = (5, 10, 15, 20, 25, 30, 50, 100)
+    LEVS = (1, 2, 3, 5, 10, 15, 20, 25)
+
+    def _s_sizing(self, user, cid, live=False):
+        c = self._cfg(user, cid)
+        p = c["params"]
+        pyr = p.get("pyramid_enabled")
+        d = self._ad(user).describe()
+        body = [f"📐 <b>#{c['id']} {esc(c['name'])}</b> · размер входа",
+                f"Доля депозита на вход: <b>{p['trade_pct']:g}%</b> · плечо: <b>{p['leverage']:g}×</b> → объём {p['trade_pct'] * p['leverage']:g}% депозита"
+                + (f"\nДобор: <b>{p.get('pyramid_pct') or 0:g}%</b> · плечо добора <b>{(p.get('pyramid_leverage') or p['leverage']):g}×</b>" if pyr else ""),
+                "База: " + ("<b>баланс счёта</b> на бирже" if c["auto"].get("base") == "account" else "<b>депозит из конфига</b> " + f"({p['deposit']:g} $)"),
+                "<i>Меняет размер НОВЫХ входов и расчёты по истории; позиции, уже открытые на бирже, не меняются.</i>"
+                + ("" if not d["real"] else "\n<i>Любое другое значение: /size " + f"{c['id']} ПРОЦЕНТ ПЛЕЧО</i>")]
+        kb = [[(f"{'✅' if abs(p['trade_pct'] - v) < 1e-9 else ''}{v}%", f"szp:{c['id']}:{v}") for v in self.PCTS[:4]], [(f"{'✅' if abs(p['trade_pct'] - v) < 1e-9 else ''}{v}%", f"szp:{c['id']}:{v}") for v in self.PCTS[4:]],
+              [(f"{'✅' if abs(p['leverage'] - v) < 1e-9 else ''}{v}×", f"szl:{c['id']}:{v}") for v in self.LEVS[:4]], [(f"{'✅' if abs(p['leverage'] - v) < 1e-9 else ''}{v}×", f"szl:{c['id']}:{v}") for v in self.LEVS[4:]],
+              [("← Карточка", f"c:{c['id']}")]]
+        body.insert(1, "Доля (ряды 1–2) и плечо (ряды 3–4):")
+        return "\n".join(body), kb
+
     def _s_confirm_panic(self, user, live=False):
         d = self._ad(user).describe()
         where = f"на {esc(d['name'].capitalize())} ({'тестовая сеть' if d['testnet'] else '<b>БОЕВАЯ сеть</b>'})" if d["real"] else "(счёт не подключён — закрывать нечего, только выключится автомод)"
@@ -368,6 +389,11 @@ class MonitorUI:
             new = "config" if c["auto"].get("base") == "account" else "account"
             manage.set_auto(self.db, self._ad(user), uid, c["id"], base=new)
             return ("Размер входа теперь считается от баланса счёта на бирже" if new == "account" else "Размер входа считается от депозита конфига"), False, f"c:{a[0]}"
+        if kind in ("szp", "szl"):
+            c = self._cfg(user, a[0])
+            r = manage.set_sizing(self.db, self._ad(user), uid, c["id"], **({"trade_pct": float(a[1])} if kind == "szp" else {"leverage": float(a[1])}))
+            self.svc.forget(c["id"])
+            return f"Теперь: {r['trade_pct']:g}% депозита × {r['leverage']:g}×", False, f"sz:{a[0]}"
         if kind == "ay":
             c = self._cfg(user, a[0])
             manage.set_auto(self.db, self._ad(user), uid, c["id"], open_=True if a[1] == "o" else None, manage=True if a[1] == "m" else None)
@@ -419,7 +445,7 @@ class MonitorUI:
                 return "Live остановлен", False, screen
             self.live[key] = {"screen": screen, "uid": uid, "until": time.time() + LIVE_TTL, "sig": None}
             return f"Live включён на {LIVE_TTL // 60} мин", False, screen
-        if kind in ("c", "v", "ca", "cd"):
+        if kind in ("c", "v", "ca", "cd", "sz"):
             self._cfg(user, a[0])                                                  # чужой или удалённый конфиг — сразу понятная ошибка, а не пустой экран
         return None, False, data                                                   # всё остальное — просто экран
 

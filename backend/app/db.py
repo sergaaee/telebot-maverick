@@ -526,6 +526,11 @@ class Database:
             except sqlite3.IntegrityError:
                 raise DbError("Такое имя уже занято") from None
 
+    def update_params(self, cfg_id, params):
+        """Заменяет параметры конфига (например, размер входа и плечо); состояние бота по конфигу (последний сигнал, исполнения) не сбрасывается."""
+        with self.conn() as c:
+            c.execute("UPDATE configs SET params=?, updated=? WHERE id=?", (json.dumps(params, ensure_ascii=False), time.time(), cfg_id))
+
     def remove_config(self, cfg_id):
         with self.conn() as c:
             c.execute("DELETE FROM configs WHERE id=?", (cfg_id,))

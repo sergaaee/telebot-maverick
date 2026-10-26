@@ -65,3 +65,19 @@ def test_portfolio_prefs_exclude_and_common_deposit(auth_env):
     assert a.put("/api/monitor/configs/1/auto", json={"base": "bogus"}, headers=H_).status_code == 422
     assert a.post("/api/panic", json={"confirm": True}, headers=H_).status_code == 200
     assert db.get_config(1)["auto"]["base"] == "account"                                                    # СТОП ВСЁ выключает автомод, но не сбрасывает выбор базы
+
+
+def test_config_sizing_can_be_changed_per_config(auth_env):
+    db = auth_env
+    alice, a, b = two_users(db)
+    r = a.put("/api/monitor/configs/1/sizing", json={"trade_pct": 25, "leverage": 3}, headers=H_)
+    assert r.status_code == 200 and r.json()["sizing"]["trade_pct"] == 25 and r.json()["sizing"]["leverage"] == 3
+    assert db.get_config(1)["params"]["trade_pct"] == 25 and db.get_config(1)["params"]["leverage"] == 3 and db.get_config(1)["params"]["sl_pct"] == 50        # остальные параметры целы
+    e = a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]
+    assert e["position"]["notional"] == 10000 * 0.25 * 3 and e["settings"]["trade_pct"] == 25 and e["settings"]["leverage"] == 3                              # расчёты сразу идут с новым размером
+    assert any(x["kind"] == "sizing" for x in db.list_auto_log(alice["id"], 5))
+    for bad in ({"trade_pct": 0}, {"trade_pct": 101}, {"leverage": 0.5}, {"leverage": 200}, {"leverage": "много"}, {}):
+        assert a.put("/api/monitor/configs/1/sizing", json=bad, headers=H_).status_code == 422, bad
+    assert b.put("/api/monitor/configs/1/sizing", json={"leverage": 2}, headers=H_).status_code == 404                                                       # чужой конфиг
+    db.update_params(1, {**db.get_config(1)["params"], "pyramid_enabled": True, "pyramid_pct": 40, "pyramid_max": 2})
+    assert "места не остаётся" in a.put("/api/monitor/configs/1/sizing", json={"trade_pct": 70}, headers=H_).json()["detail"]

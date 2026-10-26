@@ -34,6 +34,38 @@ def set_auto(db, adapter, uid, config_id, open_=None, manage=None, base=None):
     return new
 
 
+SIZING_KEYS = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage")
+
+
+def set_sizing(db, adapter, uid, config_id, **new):
+    """Размер входа конфига: trade_pct — доля депозита (маржа) на первый вход, leverage — плечо; для пирамидинга ещё pyramid_pct и pyramid_leverage.
+    Применяется к НОВЫМ входам и ко всем расчётам по истории; позиции, уже открытые на бирже, не меняются. Проверяются те же границы, что у параметров бэктеста."""
+    c = own_config(db, uid, config_id)
+    upd = {k: v for k, v in new.items() if k in SIZING_KEYS and (v is not None or k == "pyramid_leverage") and k in new}
+    if not upd:
+        raise ManageError("Нечего менять: укажите trade_pct и/или leverage")
+    for k, v in upd.items():
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
+            raise ManageError(f"{k}: нужно число")
+    from pydantic import ValidationError
+    from .schemas import BacktestParams
+    try:
+        BacktestParams(**{k: v for k, v in upd.items()})
+    except ValidationError as e:
+        err = e.errors()[0]
+        raise ManageError(f"{err['loc'][0]}: {err['msg']}")
+    old = {k: c["params"].get(k) for k in upd}
+    params = {**c["params"], **upd}
+    if params.get("pyramid_enabled"):
+        tp, pp = params.get("trade_pct") or 0, params.get("pyramid_pct") or 0
+        if pp and int((100 - tp) // pp) < 1:
+            raise ManageError(f"Пирамидинг: первая нога {tp:g}% депозита, на добор ({pp:g}%) места не остаётся — уменьшите доли")
+    db.update_params(c["id"], params)
+    db.add_auto_log(uid, c["id"], "sizing", None, None, "info", {"from": old, "to": upd, "exchange": adapter.name})
+    trade_log("sizing", user=uid, config=c["id"], name=c["name"], old=old, new=upd)
+    return {k: params.get(k) for k in SIZING_KEYS}
+
+
 def auto_off_all(db, uid):
     n = db.disable_all_auto(uid)
     db.add_auto_log(uid, None, "auto_off_all", None, None, "info", {"configs": n})

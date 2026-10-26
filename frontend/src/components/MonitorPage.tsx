@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, closeTestPosition, panicStop, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
+import { autoOffAll, closeTestPosition, panicStop, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
 import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
@@ -227,9 +227,61 @@ function statusOf(e: MonitorEntry): { cls: string; text: string } {
 }
 
 /** Строка стратегии в списке: статус, позиция, автомод, пауза и «Подробнее». */
-function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause }: {
+function SizingEditor({ e, exchange, onSaved, onError }: { e: MonitorEntry; exchange: MonitorResponse['exchange']; onSaved: () => void; onError: (m: string) => void }) {
+  const st = e.settings;
+  const [pct, setPct] = useState('');
+  const [lev, setLev] = useState('');
+  const [pp, setPp] = useState('');
+  const [pl, setPl] = useState('');
+  useEffect(() => {
+    if (!st) return;
+    setPct(String(st.trade_pct));
+    setLev(String(st.leverage));
+    setPp(st.pyramid_pct != null ? String(st.pyramid_pct) : '');
+    setPl(st.pyramid_leverage != null ? String(st.pyramid_leverage) : '');
+  }, [st?.trade_pct, st?.leverage, st?.pyramid_pct, st?.pyramid_leverage]);                       // eslint-disable-line react-hooks/exhaustive-deps
+  if (!st || e.config_id == null) return null;
+  const n = (v: string) => Number(v.replace(',', '.'));
+  const patch: Parameters<typeof setSizing>[1] = {};
+  if (pct.trim() !== '' && n(pct) !== st.trade_pct) patch.trade_pct = n(pct);
+  if (lev.trim() !== '' && n(lev) !== st.leverage) patch.leverage = n(lev);
+  if (st.pyramid_enabled) {
+    if (pp.trim() !== '' && n(pp) !== (st.pyramid_pct ?? NaN)) patch.pyramid_pct = n(pp);
+    if (pl.trim() !== '' && n(pl) !== (st.pyramid_leverage ?? NaN)) patch.pyramid_leverage = n(pl);
+  }
+  const dirty = Object.keys(patch).length > 0;
+  const save = async () => {
+    const real = exchange.real && e.auto?.open;
+    if (real && !window.confirm(`Новые входы по автомоду пойдут с размером ${pct}% депозита × ${lev}× на ${exchange.name}. Позиции, уже открытые на бирже, не меняются. Продолжить?`)) return;
+    try {
+      await setSizing(e.config_id!, patch);
+      onSaved();
+    } catch (x) {
+      onError(x instanceof Error ? x.message : String(x));
+    }
+  };
+  const volume = n(pct) * n(lev);
+  return (
+    <div className="mon-sizing" data-testid="mon-sizing">
+      <span className="muted small">Размер входа<Help text={HELP.sizing} />:</span>
+      <input className="mon-num" inputMode="decimal" value={pct} onChange={(ev) => setPct(ev.target.value)} onKeyDown={(ev) => { if (ev.key === 'Enter' && dirty) void save(); }} aria-label="Доля депозита на вход, %" data-testid="mon-pct" /> <span className="small">% депозита ×</span>
+      <input className="mon-num" inputMode="decimal" value={lev} onChange={(ev) => setLev(ev.target.value)} onKeyDown={(ev) => { if (ev.key === 'Enter' && dirty) void save(); }} aria-label="Плечо" data-testid="mon-lev" /> <span className="small">плечо</span>
+      {Number.isFinite(volume) && volume > 0 && <span className="muted small">= объём {volume.toFixed(volume < 10 ? 1 : 0)}% депозита</span>}
+      {st.pyramid_enabled && (
+        <>
+          <span className="muted small">· добор</span>
+          <input className="mon-num" inputMode="decimal" value={pp} onChange={(ev) => setPp(ev.target.value)} aria-label="Доля депозита на добор, %" /> <span className="small">% ×</span>
+          <input className="mon-num" inputMode="decimal" value={pl} placeholder={String(st.leverage)} onChange={(ev) => setPl(ev.target.value)} aria-label="Плечо добора" />
+        </>
+      )}
+      <button type="button" className="ghost" disabled={!dirty} onClick={() => void save()} data-testid="mon-sizing-save">Применить</button>
+    </div>
+  );
+}
+
+function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause, onSaved, onError }: {
   e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange']; account?: MonitorResponse['account'];
-  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => void; onPause: () => void;
+  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => void; onPause: () => void; onSaved: () => void; onError: (m: string) => void;
 }) {
   const st = statusOf(e);
   const pos = e.position;
@@ -257,6 +309,7 @@ function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause }: {
         {(e.auto?.open || e.auto?.manage) && <span className={exchange.real ? 'neg small' : 'muted small'}>{exchange.real ? '● биржа' : '● симуляция'}</span>}
       </span>
       {sizeWarn && <div className="warn-text small mon-sizewarn" data-testid="mon-sizewarn">⚠️ Депозит конфига {fmtUsd(dep ?? 0)} намного больше капитала на бирже {fmtUsd(account!.equity ?? 0)}: объём входа считается от {fmtUsd(dep ?? 0)} и, скорее всего, не пройдёт. Выберите «размер от баланса счёта».</div>}
+      <SizingEditor e={e} exchange={exchange} onSaved={onSaved} onError={onError} />
       <span className="mon-btns">
         <button type="button" className="ghost" onClick={onPause} data-testid="mon-pause">{e.paused ? '▶ Возобновить' : '⏸ Пауза'}</button>
         <button type="button" className="ghost" onClick={onToggleOpen} aria-expanded={open} data-testid="mon-more">{open ? 'Свернуть ▴' : 'Подробнее ▾'}</button>
@@ -529,7 +582,7 @@ export default function MonitorPage() {
         {entries.map((e) => (
           <section key={e.config_id ?? e.name} className="mon-card" data-testid="mon-card" data-name={e.title ?? e.name}>
             <Row2 e={e} open={e.config_id != null && openIds.has(e.config_id)} exchange={data!.exchange} account={data!.account}
-              onToggleOpen={() => e.config_id != null && toggleOpen(e.config_id)} onAuto={(p) => e.config_id != null && void auto(e.config_id, p)} onPause={() => void pause(e)} />
+              onToggleOpen={() => e.config_id != null && toggleOpen(e.config_id)} onAuto={(p) => e.config_id != null && void auto(e.config_id, p)} onPause={() => void pause(e)} onSaved={() => void load()} onError={(m) => setErr(m)} />
             {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
             {e.config_id != null && openIds.has(e.config_id) && <Details id={e.config_id} exchange={data!.exchange} onChanged={() => void load()} />}
           </section>

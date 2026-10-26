@@ -22,7 +22,7 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
            "recent": [{"side": t["side"], "entry_ts": t["entry_ts"], "exit_ts": t["exit_ts"], "reason": t["reason"], "pnl_usd": t["pnl_usd"], "pnl_pct": t["pnl_pct"],
                        "hold_h": t["hold_h"]} for t in [t for t in res["trades"] if t["reason"] != "OPEN"][-5:]][::-1],
            "settings": {"sl_pct": p["sl_pct"], "tps": p["tps"], "be_after_tp1": p["be_after_tp1"], "leverage": p["leverage"], "pyramid_leverage": p.get("pyramid_leverage"),
-                        "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
+                        "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "pyramid_pct": p.get("pyramid_pct"), "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
                         "weekdays_only": p.get("weekdays_only", False), "side": p["side"]}}
     if detail:                                             # подробности: статистика, вся история закрытых сделок (последние 300) и полные параметры
         t = res["stats"]["total"]
