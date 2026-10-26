@@ -171,3 +171,6 @@ export const setDigest = (mode: string) => request<{ mode: string }>('/api/diges
 
 export const savePortfolioPrefs = (patch: { exclude?: number[]; total_deposit?: number | null }) =>
   request<{ exclude: number[]; total_deposit: number | null }>('/api/portfolio/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+
+export const setSizing = (configId: number, patch: { trade_pct?: number; leverage?: number; pyramid_pct?: number; pyramid_leverage?: number | null }) =>
+  request<{ sizing: { trade_pct: number; leverage: number; pyramid_pct: number | null; pyramid_leverage: number | null } }>(`/api/monitor/configs/${configId}/sizing`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });

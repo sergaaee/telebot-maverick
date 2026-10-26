@@ -833,6 +833,16 @@ def scenario(pg, base, state_url):
     pg.get_by_test_id("mon-base").first.select_option("account"); pg.wait_for_timeout(1500)
     check("база размера «баланс счёта» сохраняется", pg.get_by_test_id("mon-base").first.input_value() == "account")
     pg.get_by_test_id("mon-base").first.select_option("config"); pg.wait_for_timeout(1000)
+    sz = card("Переименован").get_by_test_id("mon-sizing")
+    check("у каждого конфига есть редактор размера входа (% депозита и плечо) с подсказкой", sz.get_by_test_id("mon-pct").input_value() == "10" and sz.get_by_test_id("mon-lev").input_value() == "5" and sz.locator(".help").count() == 1 and sz.get_by_test_id("mon-sizing-save").is_disabled())
+    sz.get_by_test_id("mon-pct").fill("20"); sz.get_by_test_id("mon-lev").fill("2")
+    check("после изменения кнопка «Применить» включается и показан объём", sz.get_by_test_id("mon-sizing-save").is_enabled() and "объём 40% депозита" in sz.inner_text())
+    sz.get_by_test_id("mon-sizing-save").click(); pg.wait_for_timeout(2000)
+    cid_sz = E2E_DB.find_config(tid, "Переименован")
+    check("размер входа сохранён в конфиге (остальные параметры целы) и показан после обновления", cid_sz["params"]["trade_pct"] == 20 and cid_sz["params"]["leverage"] == 2 and cid_sz["params"]["sl_pct"] == 60 and card("Переименован").get_by_test_id("mon-pct").input_value() == "20" and card("Переименован").get_by_test_id("mon-sizing-save").is_disabled())
+    card("Переименован").get_by_test_id("mon-pct").fill("200"); card("Переименован").get_by_test_id("mon-sizing-save").click(); pg.wait_for_timeout(1000)
+    check("доля больше 100% отклоняется с понятной ошибкой, значение в базе прежнее", E2E_DB.find_config(tid, "Переименован")["params"]["trade_pct"] == 20 and pg.locator(".banner.error").count() >= 1)
+    card("Переименован").get_by_test_id("mon-pct").fill("10"); card("Переименован").get_by_test_id("mon-lev").fill("5"); card("Переименован").get_by_test_id("mon-sizing-save").click(); pg.wait_for_timeout(1500)
     check("кнопка «СТОП ВСЁ» с подсказкой", pg.get_by_test_id("panic").is_visible())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_test_id("panic").click(); pg.get_by_test_id("mon-msg").filter(has_text="СТОП ВСЁ").wait_for(timeout=10000)
@@ -843,6 +853,7 @@ def scenario(pg, base, state_url):
     ptxt = pg.get_by_test_id("portfolio-page").inner_text().lower()
     check("портфель: итоги, таблица стратегий, риск и корреляция", "стратегий в портфеле" in ptxt and "риск: открытые позиции вместе" in ptxt and "корреляция дневных результатов" in ptxt and pg.get_by_test_id("portfolio-page").locator("tbody tr").count() >= 1)
     check("портфель: у разделов есть «?», ссылки на выгрузки CSV и выбор сводки", pg.get_by_test_id("portfolio-page").locator(".help").count() >= 4 and pg.locator("a[href='/api/export/trades.csv']").count() == 1 and pg.get_by_label("Сводка в Telegram").count() == 1)
+    check("портфель: просадка с учётом открытых позиций (с подсказкой), а не только по закрытым", "%" in pg.get_by_test_id("pf-dd").inner_text() and "с позициями" in pg.get_by_test_id("pf-dd").inner_text())
     has_chart = pg.get_by_test_id("pf-chart").count() == 1
     check("портфель: график кривых показан (в e2e-данных есть закрытые сделки)", has_chart, pg.get_by_test_id("portfolio-page").inner_text()[:300].replace("\n", " | "))
     if has_chart:
@@ -980,9 +991,9 @@ def main():
             pg.on("console", lambda m: errors.append(f"после «{STEP[0]}»: {m.type}: {m.text}") if m.type in ("error", "warning") else None)
             pg.on("pageerror", lambda e: errors.append(f"после «{STEP[0]}»: pageerror: {e}\n{(getattr(e, 'stack', '') or '')[:700]}"))
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
-            expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив и запрос «только Global» без порогов
+            expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 3, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 4, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

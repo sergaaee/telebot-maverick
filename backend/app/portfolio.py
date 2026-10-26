@@ -11,6 +11,7 @@ import heapq
 import math
 
 from .core import backtest
+from .core import equity as equity_mod
 from .monitor import cached_result
 from .service import ParamError, _clean, sharpe_ratio
 
@@ -126,25 +127,31 @@ def build_portfolio(rows, real=None, min_corr_days=10, exclude=(), total_deposit
             if joint:
                 st = backtest.stats(tr)
                 st = {**st, "sharpe": sharpe_ratio(tr, deposit) if tr else None, "return_pct": 100 * st["total_usd"] / deposit}
+                if r.get("candles"):
+                    st.update(equity_mod.mtm_drawdown_multi([(tr, r["candles"])], deposit))
             else:
                 st = r.get("stats") or {}
             items.append({**base, "error": None, "deposit": r["deposit"], "trades": st.get("trades", 0), "winrate": st.get("winrate"), "profit_factor": st.get("profit_factor"),
                           "total_usd": st.get("total_usd"), "return_pct": st.get("return_pct"), "sharpe": st.get("sharpe"),
-                          "max_dd_usd": dd, "max_dd_pct": 100 * dd / (deposit if joint else r["deposit"]) if (deposit if joint else r["deposit"]) else 0.0, "curve": _thin(curve)})
+                          "max_dd_usd": dd, "max_dd_pct": 100 * dd / (deposit if joint else r["deposit"]) if (deposit if joint else r["deposit"]) else 0.0,
+                          "max_dd_real_pct": st.get("max_dd_real_pct"), "max_dd_real_usd": st.get("max_dd_real_usd"), "curve": _thin(curve)})
         else:                                           # отключена из портфеля или на паузе: показываем собственные цифры, но в расчёты она не входит
             curve, dd = _curve(r["trades"])
             st = r.get("stats") or {}
             items.append({**base, "error": None, "deposit": r["deposit"], "trades": st.get("trades", 0), "winrate": st.get("winrate"), "profit_factor": st.get("profit_factor"),
                           "total_usd": st.get("total_usd"), "return_pct": st.get("return_pct"), "sharpe": st.get("sharpe"),
-                          "max_dd_usd": dd, "max_dd_pct": 100 * dd / r["deposit"] if r["deposit"] else 0.0, "curve": _thin(curve)})
+                          "max_dd_usd": dd, "max_dd_pct": 100 * dd / r["deposit"] if r["deposit"] else 0.0,
+                          "max_dd_real_pct": st.get("max_dd_real_pct"), "max_dd_real_usd": st.get("max_dd_real_usd"), "curve": _thin(curve)})
 
     # --- общий портфель
     all_tr = [t for tr in sized.values() for t in tr]
     pcurve, pdd = _curve(all_tr)
     total = sum(t["pnl_usd"] for t in all_tr if t["reason"] != "OPEN")
     pk, pk_ts = peak_margin(all_tr)
+    mtm = equity_mod.mtm_drawdown_multi([(sized[r["id"]], r["candles"]) for r in active if r.get("candles")], deposit) if active and all(r.get("candles") for r in active) else {}
     portfolio = {"strategies": len(active), "deposit": deposit, "joint": joint, "total_usd": total, "return_pct": 100 * total / deposit if deposit else None,
                  "max_dd_usd": pdd, "max_dd_pct": 100 * pdd / deposit if deposit else 0.0, "curve": _thin(pcurve),
+                 "max_dd_real_usd": mtm.get("max_dd_real_usd"), "max_dd_real_pct": mtm.get("max_dd_real_pct"), "min_equity_usd": mtm.get("min_equity_usd"), "max_dd_real_ts": mtm.get("max_dd_real_ts"),
                  "trades": sum(1 for t in all_tr if t["reason"] != "OPEN"),
                  "peak_margin": pk, "peak_margin_pct": 100 * pk / deposit if deposit else None, "peak_margin_ts": pk_ts}
     contrib = sorted(((i["total_usd"] or 0.0, i["name"]) for i in items if i["included"] and not i["error"]), reverse=True)
@@ -231,7 +238,11 @@ def collect(store, defaults, configs, available_fn=None):
             rows.append({**base, "error": str(e.args[0]) if e.args else str(e)})
             continue
         p = res["params"]
-        rows.append({**base, "symbol": res["symbol"], "deposit": p["deposit"], "trades": res["trades"], "stats": res["stats"]["total"], "error": None,
+        try:
+            candles = store.candles(res["symbol"])
+        except (KeyError, FileNotFoundError):
+            candles = None
+        rows.append({**base, "symbol": res["symbol"], "deposit": p["deposit"], "trades": res["trades"], "candles": candles, "stats": res["stats"]["total"], "error": None,
                      "sizing": {"trade_pct": p["trade_pct"], "leverage": p["leverage"], "pyramid_pct": p.get("pyramid_pct"), "pyramid_leverage": p.get("pyramid_leverage"),
                                 "compound": bool(p.get("compound", True))}})
     return rows

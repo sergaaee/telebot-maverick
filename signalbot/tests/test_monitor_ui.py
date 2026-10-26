@@ -462,3 +462,29 @@ def test_card_warns_when_config_deposit_far_above_real_capital(env, fake_verify,
     assert "База размера входа" in body and "депозит конфига" in body and "намного больше капитала на бирже" in body
     env.handle_update(cb(f"ab:{cid}"))
     assert "намного больше" not in last_edit(env)[2] and "баланс счёта" in last_edit(env)[2]
+
+
+def test_sizing_per_config_via_command_and_buttons(env):
+    cid = add_cfg(env, "Размер конфига")                                                       # в конфиге: 20% и плечо 2×
+    env.handle_update(cb(f"c:{cid}"))
+    assert "📐 20% × 2×" in kb_str(last_edit(env)[3])
+    env.handle_update(cb(f"sz:{cid}"))
+    body = last_edit(env)[2]
+    assert "размер входа" in body and "20%" in body and "позиции, уже открытые на бирже, не меняются" in body
+    env.handle_update(cb(f"szp:{cid}:10"))
+    env.handle_update(cb(f"szl:{cid}:5"))
+    p = env.db.get_config(cid)["params"]
+    assert p["trade_pct"] == 10 and p["leverage"] == 5 and p["sl_pct"] == 40                  # остальное не тронуто
+    assert "✅10%" in kb_str(last_edit(env)[3]) and "✅5×" in kb_str(last_edit(env)[3])
+    env.handle_update(tmsg(f"/size {cid} 15 3"))
+    assert env.db.get_config(cid)["params"]["trade_pct"] == 15 and env.db.get_config(cid)["params"]["leverage"] == 3 and "15% депозита × 3×" in env.tg.texts(CHAT)[-1]
+    env.handle_update(tmsg(f"/size {cid} 30%"))                                                # только доля
+    assert env.db.get_config(cid)["params"]["trade_pct"] == 30 and env.db.get_config(cid)["params"]["leverage"] == 3
+    env.handle_update(tmsg(f"/size {cid} 0 5"))
+    assert env.db.get_config(cid)["params"]["trade_pct"] == 30 and "trade_pct" in env.tg.texts(CHAT)[-1]       # 0% не принимается, значения прежние
+    env.handle_update(tmsg("/size"))
+    assert "/size № [доля" in env.tg.texts(CHAT)[-1]
+    env.handle_update(tmsg("/size 999 10 5"))
+    assert "не найден" in env.tg.texts(CHAT)[-1].lower()
+    env.handle_update(tmsg(f"/size {cid}"))
+    assert "размер входа" in env.tg.texts(CHAT)[-1]

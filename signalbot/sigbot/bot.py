@@ -215,6 +215,32 @@ class SignalService:
             return
         self.tg.send_document(chat, "trading-log.jsonl", ("\n".join(rows) + "\n").encode("utf-8"), caption=f"Лог автоторговли: последние {len(rows)} записей (JSON по строке)")
 
+    def cmd_size(self, chat, user, arg):
+        """Размер входа конфига: /size 3 — экран с кнопками; /size 3 10 5 — 10% депозита с плечом 5×; /size 3 10 — только доля."""
+        parts = arg.replace(",", ".").replace("%", " ").replace("x", " ").replace("×", " ").split()
+        if not parts or not parts[0].lstrip("#").isdigit():
+            self.send(chat, "Укажите конфиг: /size № [доля % [плечо]]\nПример: /size 3 10 5 — 10% депозита с плечом 5×. Экран с кнопками: /size 3")
+            return
+        c = self._cfg(chat, user, parts[0].lstrip("#"))
+        if not c:
+            return
+        if len(parts) == 1:
+            self.ui.open(chat, user, f"sz:{c['id']}")
+            return
+        try:
+            vals = [float(x) for x in parts[1:3]]
+        except ValueError:
+            self.send(chat, "Доля и плечо — числа: /size 3 10 5")
+            return
+        new = {"trade_pct": vals[0]} | ({"leverage": vals[1]} if len(vals) > 1 else {})
+        try:
+            r = manage.set_sizing(self.db, self.adapter_for(user["id"]), user["id"], c["id"], **new)
+        except manage.ManageError as e:
+            self.send(chat, f"⚠️ {esc(str(e))}")
+            return
+        self.forget(c["id"])
+        self.send(chat, f"✅ <b>#{c['id']} {esc(c['name'])}</b>: теперь {r['trade_pct']:g}% депозита × {r['leverage']:g}× (объём {r['trade_pct'] * r['leverage']:g}% депозита). Новые входы пойдут с этим размером; открытые позиции не меняются.")
+
     def cmd_digest(self, chat, user, arg):
         """Регулярная сводка: /digest daily — каждый день, /digest weekly — по понедельникам, /digest off — выключить, /digest now — прислать сейчас."""
         a = arg.strip().lower()

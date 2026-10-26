@@ -531,7 +531,7 @@ export interface MonitorEntry {
   report?: { ts: number; dg: number | null; dl: number; ds: number } | null;
   ready_now?: PendingSignal[];
   recent?: { side: 'long' | 'short'; entry_ts: number; exit_ts: number; reason: Reason; pnl_usd: number; pnl_pct: number; hold_h: number }[];
-  settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side };
+  settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; pyramid_pct?: number | null; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side };
   position: MonitorPositionSummary | null;
   stats?: Record<string, number | null>;
   params?: Record<string, unknown>;
@@ -591,10 +591,10 @@ export interface WalkForward {
   verdict: string;
 }
 
-export interface PfItem { id: number; name: string; symbol: string | null; paused: boolean; included: boolean; error: string | null; deposit?: number; trades?: number; winrate?: number | null; profit_factor?: number | null; total_usd?: number | null; return_pct?: number | null; sharpe?: number | null; max_dd_usd?: number; max_dd_pct?: number; curve?: [number, number][] }
+export interface PfItem { id: number; name: string; symbol: string | null; paused: boolean; included: boolean; error: string | null; deposit?: number; trades?: number; winrate?: number | null; profit_factor?: number | null; total_usd?: number | null; return_pct?: number | null; sharpe?: number | null; max_dd_usd?: number; max_dd_pct?: number; max_dd_real_pct?: number | null; max_dd_real_usd?: number | null; curve?: [number, number][] }
 export interface Portfolio {
   items: PfItem[];
-  portfolio: { strategies: number; deposit: number; joint: boolean; total_usd: number; return_pct: number | null; max_dd_usd: number; max_dd_pct: number; curve: [number, number][]; trades: number; best: string | null; worst: string | null; peak_margin: number; peak_margin_pct: number | null; peak_margin_ts: number | null };
+  portfolio: { strategies: number; deposit: number; joint: boolean; total_usd: number; return_pct: number | null; max_dd_usd: number; max_dd_pct: number; max_dd_real_usd: number | null; max_dd_real_pct: number | null; min_equity_usd: number | null; max_dd_real_ts: number | null; curve: [number, number][]; trades: number; best: string | null; worst: string | null; peak_margin: number; peak_margin_pct: number | null; peak_margin_ts: number | null };
   correlation: { ids: number[]; names: string[]; matrix: (number | null)[][]; days: number | null; note: string | null };
   exposure: { symbols: { asset: string; long: number; short: number; net: number; gross: number; margin: number; configs: { name: string; side: string }[] }[]; gross: number; net: number; margin: number; leverage: number | null; margin_pct: number | null; warnings: string[]; real?: { equity: number; gross: number; leverage: number | null } };
   settings: { exclude: number[]; total_deposit: number | null };

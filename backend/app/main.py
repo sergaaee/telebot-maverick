@@ -24,7 +24,7 @@ from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
 from .walkforward import run_walkforward
 from . import manage as manage_mod
-from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, test_close, test_open)
+from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, set_sizing, test_close, test_open)
 
 
 def _adapter(request, db):
@@ -401,6 +401,12 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         base — от чего считать размер входа: config (депозит из конфига, по умолчанию) или account (реальный капитал на бирже)."""
         new = _guard(set_auto, db, _adapter(request, db), request.state.user["id"], config_id, body.get("open"), body.get("manage"), body.get("base"))
         return {"auto": new, "exchange": _adapter(request, db).describe()}
+
+    @app.put("/api/monitor/configs/{config_id}/sizing")
+    def sizing_ep(config_id: int, request: Request, body: dict = Body(...)):
+        """Размер входа конфига: trade_pct — % депозита (маржа) на вход, leverage — плечо; при пирамидинге ещё pyramid_pct и pyramid_leverage. Действует на новые входы и на все расчёты."""
+        new = {k: body[k] for k in ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage") if k in body}
+        return {"sizing": _guard(set_sizing, db, _adapter(request, db), request.state.user["id"], config_id, **new)}
 
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
