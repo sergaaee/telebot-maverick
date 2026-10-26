@@ -416,7 +416,13 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         p = db.get_pref(uid, "portfolio", {}) or {}
         ex = [int(x) for x in p.get("exclude", []) if isinstance(x, int)]
         td = p.get("total_deposit")
-        return {"exclude": ex, "total_deposit": float(td) if isinstance(td, (int, float)) and td > 0 else None}
+        sz = {}
+        for k, v in (p.get("sizing") or {}).items():
+            if isinstance(v, dict) and str(k).isdigit():
+                e = {n: float(v[n]) for n in ("trade_pct", "leverage") if isinstance(v.get(n), (int, float)) and not isinstance(v.get(n), bool)}
+                if e:
+                    sz[str(int(k))] = e
+        return {"exclude": ex, "total_deposit": float(td) if isinstance(td, (int, float)) and td > 0 else None, "sizing": sz}
 
     @app.get("/api/portfolio/prefs")
     def portfolio_prefs(request: Request):
@@ -436,6 +442,25 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             if td is not None and (isinstance(td, bool) or not isinstance(td, (int, float)) or not 0 < td <= 1e9):
                 raise HTTPException(422, "Общий депозит — число больше 0 (или null, чтобы у каждой стратегии был свой)")
             cur["total_deposit"] = float(td) if td is not None else None
+        if "sizing" in body:
+            raw = body["sizing"]
+            if not isinstance(raw, dict):
+                raise HTTPException(422, "sizing — словарь {номер стратегии: {trade_pct, leverage}}")
+            new = {}
+            for k, v in raw.items():
+                if not str(k).isdigit() or not isinstance(v, dict):
+                    raise HTTPException(422, "sizing: ключ — номер стратегии, значение — {trade_pct, leverage}")
+                e = {}
+                for n, lo, hi in (("trade_pct", 0.0, 100.0), ("leverage", 1.0, 125.0)):
+                    if v.get(n) is None:
+                        continue
+                    x = v[n]
+                    if isinstance(x, bool) or not isinstance(x, (int, float)) or not (lo < x <= hi if n == "trade_pct" else lo <= x <= hi):
+                        raise HTTPException(422, "Доля входа — от 0 до 100 %, плечо — от 1 до 125")
+                    e[n] = float(x)
+                if e:
+                    new[str(int(k))] = e
+            cur["sizing"] = new
         db.set_pref(uid, "portfolio", cur)
         return cur
 
@@ -453,7 +478,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                 real = {"equity": ad.account().get("equity"), "positions": ad.positions()}
             except Exception:                      # биржа недоступна — портфель показываем без блока «реальная биржа»
                 real = None
-        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"])
+        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"], sizing=prefs["sizing"])
 
     @app.get("/api/export/{kind}.csv")
     def export_csv(kind: str, request: Request, config_id: int | None = Query(None)):
