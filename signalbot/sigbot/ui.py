@@ -90,7 +90,7 @@ class MonitorUI:
         """-> (тело, клавиатура). Тело без строки времени: по нему решаем, менять ли сообщение."""
         kind, *a = screen.split(":")
         fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
-              "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect}.get(kind)
+              "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect}.get(kind)
         if fn is None:
             return self._s_list(user, live)
         return fn(user, *a, live=live)
@@ -136,7 +136,7 @@ class MonitorUI:
             kb.append(pair)
         kb.append([("🔄 Обновить", "m"), self._live_btn("m", live)])
         kb.append([("🏦 Биржа", "x"), ("🧪 Тест $1", "t")])
-        kb.append([("⛔ Автомод выкл. везде", "coff")])
+        kb.append([("⛔ Автомод выкл. везде", "coff"), ("🚨 СТОП ВСЁ", "cpn")])
         return body, kb
 
     def _positions_block(self, e):
@@ -295,6 +295,11 @@ class MonitorUI:
     def _s_confirm_disconnect(self, user, live=False):
         return self._confirm("🔌 Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxy", "x")
 
+    def _s_confirm_panic(self, user, live=False):
+        d = self._ad(user).describe()
+        where = f"на {esc(d['name'].capitalize())} ({'тестовая сеть' if d['testnet'] else '<b>БОЕВАЯ сеть</b>'})" if d["real"] else "(счёт не подключён — закрывать нечего, только выключится автомод)"
+        return self._confirm(f"🚨 <b>СТОП ВСЁ</b>\nАвтомод выключится у ВСЕХ конфигов, все позиции {where} закроются по рынку, все ордера (стопы, тейки) снимутся. Продолжить?", "pny", "m")
+
     def _s_confirm_off(self, user, live=False):
         return self._confirm("⛔ Выключить автомод у ВСЕХ ваших конфигов? Уже открытые на бирже позиции это не закрывает.", "offy", "m")
 
@@ -384,6 +389,12 @@ class MonitorUI:
         if kind == "dxy":
             manage.disconnect_account(self.db, uid)
             return "Счёт отключён, автомод выключен", False, "x"
+        if kind == "pny":
+            r = manage.panic(self.db, self._ad(user), uid)
+            txt = f"Автомод выкл. у {r['auto_off']}; закрыто позиций {len(r['closed'])}, снято ордеров {r['cancelled']}" + (f"; ОШИБКИ: {len(r['errors'])} — см. /tradelog" if r["errors"] else "")
+            if r["errors"]:
+                self.svc.send(chat, "🚨 <b>СТОП ВСЁ: есть ошибки</b>\n" + "\n".join(f"• {esc(str(e)[:200])}" for e in r["errors"]) + "\nПроверьте счёт на бирже вручную.")
+            return txt[:190], bool(r["errors"]), "x" if r["closed"] or r["errors"] else "m"
         if kind == "offy":
             n = manage.auto_off_all(self.db, uid)
             return f"Автомод выключен у конфигов: {n}", False, "m"

@@ -1,5 +1,6 @@
 """FastAPI-бэкенд интерактивного просмотра бэктеста. Запуск: python cli.py serve (из папки backend/)."""
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -17,9 +18,11 @@ from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
 from .schemas import BacktestParams, MonteCarloRequest
+from . import watchdog
+from .watchdog import Watchdog
 from .monitor import evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
-from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, test_close, test_open)
+from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, test_close, test_open)
 
 
 def _adapter(request, db):
@@ -94,9 +97,15 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @asynccontextmanager
     async def lifespan(_app):
+        wd = None
+        if os.getenv("SIGNALBOT_TOKEN", "").strip() and os.getenv("WATCHDOG", "on").strip().lower() not in ("off", "0", "false"):
+            wd = Watchdog(db, watchdog.telegram_notify(os.getenv("SIGNALBOT_TOKEN").strip()))        # сторож бота: пишет в Telegram, если бот молчит
+            wd.start()
         candle_sync.start()                # свечи: при запуске и затем каждые CANDLES_SYNC_MIN минут
         sync.start()                       # подгрузка при запуске сервера и затем каждые HISTORY_SYNC_MIN минут
         yield
+        if wd:
+            wd.stop()
         sync.stop()
         candle_sync.stop()
 
@@ -326,7 +335,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                     "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"]} for c in db.list_configs(uid)]
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
-        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(),
+        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(), "bot": watchdog.bot_status(db),
                 "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
 
     def _guard(fn, *a, **k):
@@ -382,6 +391,13 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
         return {"disabled": auto_off_all(db, request.state.user["id"])}
+
+    @app.post("/api/panic")
+    def panic_ep(request: Request, body: dict = Body(default={})):
+        """Аварийная кнопка: автомод выключается у всех конфигов, все позиции на бирже закрываются по рынку, все ордера снимаются. Нужно confirm: true."""
+        if body.get("confirm") is not True:
+            raise HTTPException(422, "Нужно подтверждение (confirm: true)")
+        return panic(db, _adapter(request, db), request.state.user["id"])
 
     @app.post("/api/trading/test-position")
     def test_position(request: Request, body: dict = Body(...)):

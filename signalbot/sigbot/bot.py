@@ -199,6 +199,10 @@ class SignalService:
 
     cmd_m = cmd_monitor
 
+    def cmd_panic(self, chat, user, arg):
+        """Аварийная кнопка: подтверждение → автомод выкл. везде, все позиции закрыть, все ордера снять."""
+        self.ui.open(chat, user, "cpn")
+
     def cmd_tradelog(self, chat, user, arg):
         """Последние записи лога автоторговли по вашему аккаунту (ошибки биржи, решения автомода, запросы/ответы). Полный файл — trading.log рядом с базой."""
         n = int(arg) if arg.strip().isdigit() else 40
@@ -429,6 +433,7 @@ class SignalService:
         Сначала уже посчитанные конфиги (их сигналы не ждут чужих долгих загрузок), потом новые. Перед каждым конфигом он читается из базы
         заново, поэтому /pause, /remove и /cancel действуют до того, как до конфига дойдёт очередь."""
         with self._cycle_lock:
+            self._beat("bot_cycle_start")
             forced, self._force = self._force, set()
             users = {u["id"]: u for u in self.db.list_users() if u["telegram_id"] and not u["disabled"]}
             memo = {"eval": {}, "candles": {}, "top": {}}
@@ -453,6 +458,14 @@ class SignalService:
             self._download_top(memo, users)
             self._cancel.clear()
         self.last_cycle = self.clock()
+        self._beat("bot_cycle")
+
+    def _beat(self, key):
+        """Пульс для сторожа (watchdog.py): время последнего цикла."""
+        try:
+            self.db.set_meta(key, self.clock())
+        except Exception:
+            log.warning("не записать пульс %s", key)
 
     def _evaluate(self, params, memo, user):
         """Свечи актива обновляются и расчёт делается один раз на одинаковые параметры, даже если они у разных пользователей."""
@@ -550,13 +563,21 @@ class SignalService:
         self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter_for(cfg["user_id"]).name})
 
     def _auto_open(self, cfg, res, sig, plan):
-        """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига)."""
+        """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига). Перед ордером состояние сверяется с реальной биржей."""
         if not cfg["auto"]["open"]:
             return
         p = res["params"]
         add = bool(sig.get("pyramid"))
         notional, margin = self.engine.order_size(res, add)
         ad = self.adapter_for(cfg["user_id"])
+        pre = manage.preflight_open(ad, p["symbol"], sig["side"], add)
+        if pre.get("skip"):
+            self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": pre["skip"], "exchange": ad.name})
+            trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=pre["skip"])
+            self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(pre['skip'])}")
+            return
+        if pre.get("close_first"):                          # на бирже позиция в обратную сторону: по правилам стратегии это разворот — сначала закрываем её
+            self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"})
         self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                  lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
                                                   plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),

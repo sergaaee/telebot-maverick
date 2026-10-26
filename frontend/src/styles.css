@@ -226,3 +226,4 @@ a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
 .mon-cards { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); } .mon-cards .card:first-child { grid-column: auto; } .mon-cards .card:first-child .card-value { font-size: 15px; }
 .mon-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 2px 18px; font-size: 12px; }
 @media (max-width: 900px) { .mon-row { grid-template-columns: 14px 1fr; } .mon-row > * { min-width: 0; } .mon-auto, .mon-btns { grid-column: 2; margin-left: 0; } }
+.danger { background: var(--neg); color: #fff; border: 0; border-radius: 6px; padding: 4px 12px; font-weight: 600; cursor: pointer; } .danger:hover { filter: brightness(1.1); }

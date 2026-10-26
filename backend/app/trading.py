@@ -58,6 +58,10 @@ class ExchangeAdapter:
     def account(self):
         return {}
 
+    def close_all(self):
+        """Аварийно: закрыть все позиции и снять все ордера. -> {"closed": [...], "cancelled": n, "errors": [...]}"""
+        return {"closed": [], "cancelled": 0, "errors": []}
+
 
 class DryRunAdapter(ExchangeAdapter):
     """Ничего не отправляет: возвращает то, что было бы сделано."""
@@ -71,6 +75,9 @@ class DryRunAdapter(ExchangeAdapter):
 
     def close_market(self, symbol, side, share=1.0):
         return {"status": "dry_run", "note": "симуляция: позиция не закрывалась", "symbol": symbol, "side": side, "share": share}
+
+    def close_all(self):
+        return {"closed": [], "cancelled": 0, "errors": [], "note": "симуляция: счёт не подключён, закрывать нечего"}
 
 
 class HyperliquidAdapter(ExchangeAdapter):
@@ -204,6 +211,8 @@ class HyperliquidAdapter(ExchangeAdapter):
         size, pos_side = self._position(ex, sym)
         if size <= 0:
             return {"status": "skipped", "note": "позиции на бирже нет — закрывать нечего", "symbol": sym}
+        if side and pos_side != side:                          # на бирже позиция в другую сторону (например, уже открыта новая после разворота) — чужую не трогаем
+            return {"status": "skipped", "note": f"на бирже позиция {pos_side}, а закрывать нужно {side} — не трогаю", "symbol": sym}
         exit_side = "sell" if pos_side == "long" else "buy"
         part = min(1.0, max(0.0, float(share)))
         amount = size if part >= 0.999 else float(ex.amount_to_precision(sym, size * part))
@@ -219,6 +228,29 @@ class HyperliquidAdapter(ExchangeAdapter):
                     except Exception:
                         pass
         return {"status": "sent", "symbol": sym, "closed": amount, "order": o.get("id") if isinstance(o, dict) else None}
+
+    def close_all(self):
+        """Аварийное закрытие: все позиции по рынку (reduce-only) и отмена всех открытых ордеров. Ошибка по одной позиции не мешает остальным."""
+        ex = self._x()
+        closed, errors, cancelled = [], [], 0
+        self._log("close_all_start", "warn")
+        for p in self.positions():
+            try:
+                r = self.close_market(p["symbol"], p["side"], 1.0)
+                closed.append({"symbol": p["symbol"], "side": p["side"], "size": p["size"], "status": r.get("status")})
+            except Exception as e:
+                errors.append(f"закрытие {p['symbol']}: {e}")
+        try:
+            for o in self._call("ордера", ex.fetch_open_orders) or []:
+                try:
+                    ex.cancel_order(o["id"], o.get("symbol"))
+                    cancelled += 1
+                except Exception as e:
+                    errors.append(f"отмена ордера {o.get('id')}: {e}")
+        except Exception as e:
+            errors.append(f"список ордеров: {e}")
+        self._log("close_all_done", "warn", closed=len(closed), cancelled=cancelled, errors=errors)
+        return {"closed": closed, "cancelled": cancelled, "errors": errors}
 
     # ---------- состояние биржи ----------
     def positions(self):

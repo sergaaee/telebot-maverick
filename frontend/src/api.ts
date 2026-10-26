@@ -156,3 +156,6 @@ export const closeTestPosition = () =>
 export const getExchangeAccount = () => request<ExchangeAccount>('/api/exchange/account');
 
 export const disconnectExchange = () => request<{ removed: boolean }>('/api/exchange/account', { method: 'DELETE' });
+
+export const panicStop = () =>
+  request<{ auto_off: number; closed: unknown[]; cancelled: number; errors: string[] }>('/api/panic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true }) });

@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS auto_log (
     status TEXT NOT NULL,
     details TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_autolog_user ON auto_log(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -286,6 +290,16 @@ class Database:
     def delete_exchange_account(self, user_id):
         with self.conn() as c:
             return c.execute("DELETE FROM exchange_accounts WHERE user_id=?", (user_id,)).rowcount > 0
+
+    # ---------------- служебные значения (пульс бота и т.п.) ----------------
+    def set_meta(self, key, value):
+        with self.conn() as c:
+            c.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+    def get_meta(self, key, default=None):
+        with self.conn() as c:
+            r = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else default
 
     # ---------------- автомод: действия (журнал) ----------------
     def set_auto(self, user_id, cfg_id, open_=None, manage=None):

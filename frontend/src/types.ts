@@ -576,5 +576,6 @@ export interface MonitorResponse {
   entries: MonitorEntry[];
   log: AutoLogItem[];
   exchange: ExchangeInfo;
+  bot?: { state: 'ok' | 'dead' | 'stalled' | 'unknown'; alive_age_s: number | null; cycle_age_s: number | null; dead_min: number; stall_min: number };
   data: { source: string; now: number };
 }

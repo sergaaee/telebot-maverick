@@ -310,6 +310,7 @@ def test_trading_log_records_whole_auto_flow_without_secrets(env, fake_verify, m
     env.handle_update(cb(f"ay:{cid}:o"))
     from app import trading
     monkeypatch.setattr(trading.HyperliquidAdapter, "_x", lambda self: (_ for _ in ()).throw(trading.ExchangeError("Hyperliquid недоступен: таймаут")))
+    monkeypatch.setattr(trading.HyperliquidAdapter, "positions", lambda self: [])              # сверка с биржей проходит (позиций нет), падает уже сам ордер
     start = T0 + 38 * H
     append_reports(env.hist, LONG(start, 3), 11)
     env.now["t"] = (start + 3 * H // 2) / 1000
@@ -339,3 +340,39 @@ def test_failed_verification_is_logged_with_reason(env):
     assert any(r["event"] == "verify_start" for r in recs) and any(r["event"] == "verify_fail" for r in recs)
     raw = open(__import__("app.tradelog", fromlist=["x"]).log_path(env.db.path), encoding="utf-8").read()
     assert KEY not in raw
+
+
+def test_auto_open_is_checked_against_real_exchange_positions(env, fake_verify, monkeypatch):
+    from app import trading
+    env.handle_update(cb("hl:t"))
+    env.handle_update(tmsg(f"{WALLET} {KEY}", mid=820))
+    cid = add_cfg(env, "Сверка")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    sent, closed, state = [], [], {"pos": [{"symbol": "BTC/USDC:USDC", "side": "long", "size": 0.001}]}
+    monkeypatch.setattr(trading.HyperliquidAdapter, "positions", lambda self: state["pos"])
+    monkeypatch.setattr(trading.HyperliquidAdapter, "open_market", lambda self, *a, **k: sent.append(a) or {"status": "sent"})
+    monkeypatch.setattr(trading.HyperliquidAdapter, "close_market", lambda self, *a, **k: closed.append(a) or {"status": "sent"})
+    start = T0 + 38 * H
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    from app import monitor
+    monitor._cache.clear()
+    env.cycle()
+    assert not sent and not closed                                                            # на бирже уже есть лонг — повторный вход пропущен
+    assert any("уже есть позиция" in (x["details"].get("note") or "") for x in env.db.list_auto_log(env.alice["id"], 20) if x["status"] == "skipped")
+    assert any("уже есть позиция" in t for t in env.tg.texts(CHAT))
+
+
+def test_panic_closes_everything_and_turns_auto_off(env, fake_verify, monkeypatch):
+    from app import trading
+    env.handle_update(cb("hl:t"))
+    env.handle_update(tmsg(f"{WALLET} {KEY}", mid=830))
+    cid = add_cfg(env, "Паника")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    called = []
+    monkeypatch.setattr(trading.HyperliquidAdapter, "close_all", lambda self: called.append(1) or {"closed": [{"symbol": "BTC/USDC:USDC"}], "cancelled": 2, "errors": []})
+    env.handle_update(tmsg("/panic"))
+    assert not called and "СТОП ВСЁ" in env.tg.texts(CHAT)[-1]                                # сначала подтверждение
+    env.handle_update(cb("pny"))
+    assert called and env.db.get_config(cid)["auto"] == {"open": False, "manage": False}
+    assert any(x["kind"] == "panic" for x in env.db.list_auto_log(env.alice["id"], 10))
