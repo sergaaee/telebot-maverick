@@ -265,7 +265,7 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     assert [e["name"] for e in r["entries"]] == ["#1 Открытая", "#2 Сломанная"]
     e = r["entries"][0]
     pos = e["position"]
-    assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False}                 # автомод выключен, пока явно не включён
+    assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False, "base": "config"}                 # автомод выключен, пока явно не включён
     assert pos["legs_n"] == 1 and "legs" not in pos and pos["notional"] == pos["margin"] * 5 and pos["danger"] is False                     # в списке — краткая сводка, ноги в подробностях
     cid0 = e["config_id"]
     det = a.get(f"/api/monitor/configs/{cid0}").json()
@@ -285,13 +285,13 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     # автомод
     cid = e["config_id"]
     s = a.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).json()
-    assert s["auto"] == {"open": True, "manage": False}
-    assert a.put(f"/api/monitor/configs/{cid}/auto", json={"manage": True}, headers=H_).json()["auto"] == {"open": True, "manage": True}
+    assert s["auto"] == {"open": True, "manage": False, "base": "config"}
+    assert a.put(f"/api/monitor/configs/{cid}/auto", json={"manage": True}, headers=H_).json()["auto"] == {"open": True, "manage": True, "base": "config"}
     assert b.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).status_code == 404                     # чужой конфиг
     r2 = a.post("/api/monitor", json={}, headers=H_).json()
-    assert r2["entries"][0]["auto"] == {"open": True, "manage": True} and any(x["kind"] == "auto_toggle" for x in r2["log"])
+    assert r2["entries"][0]["auto"] == {"open": True, "manage": True, "base": "config"} and any(x["kind"] == "auto_toggle" for x in r2["log"])
     assert a.post("/api/monitor/auto/off", headers=H_).json()["disabled"] == 1
-    assert a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]["auto"] == {"open": False, "manage": False}
+    assert a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]["auto"] == {"open": False, "manage": False, "base": "config"}
 
 
 def test_test_position_requires_confirmation_limits_amount_and_is_dry_run(auth_env, monkeypatch):
@@ -322,7 +322,7 @@ def test_test_position_requires_confirmation_limits_amount_and_is_dry_run(auth_e
     cfg_id = auth_env.list_configs(alice["id"])[-1]["id"]
     auth_env.set_auto(alice["id"], cfg_id, True, True)
     assert a.delete("/api/exchange/account", headers=H_).json() == {"removed": True}
-    assert auth_env.get_exchange_account(alice["id"]) is None and auth_env.get_config(cfg_id)["auto"] == {"open": False, "manage": False}              # автомод выключен вместе с отключением
+    assert auth_env.get_exchange_account(alice["id"]) is None and auth_env.get_config(cfg_id)["auto"] == {"open": False, "manage": False, "base": "config"}              # автомод выключен вместе с отключением
     assert a.get("/api/exchange/account").json()["connected"] is False
     assert a.post("/api/trading/test-position", json={"confirm": True}, headers=H_).json()["status"] == "dry_run"
 
@@ -344,7 +344,7 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     assert [e["name"] for e in r["entries"]] == ["#1 Открытая", "#2 Сломанная"]
     e = r["entries"][0]
     pos = e["position"]
-    assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False}                 # автомод выключен, пока явно не включён
+    assert pos and pos["side"] == "long" and e["price"] > 0 and e["auto"] == {"open": False, "manage": False, "base": "config"}                 # автомод выключен, пока явно не включён
     assert pos["legs_n"] == 1 and "legs" not in pos and pos["notional"] == pos["margin"] * 5 and pos["danger"] is False                     # в списке — краткая сводка, ноги в подробностях
     cid0 = e["config_id"]
     det = a.get(f"/api/monitor/configs/{cid0}").json()
@@ -364,13 +364,13 @@ def test_monitor_shows_open_position_with_levels_and_per_user_auto(auth_env):
     # автомод
     cid = e["config_id"]
     s = a.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).json()
-    assert s["auto"] == {"open": True, "manage": False}
-    assert a.put(f"/api/monitor/configs/{cid}/auto", json={"manage": True}, headers=H_).json()["auto"] == {"open": True, "manage": True}
+    assert s["auto"] == {"open": True, "manage": False, "base": "config"}
+    assert a.put(f"/api/monitor/configs/{cid}/auto", json={"manage": True}, headers=H_).json()["auto"] == {"open": True, "manage": True, "base": "config"}
     assert b.put(f"/api/monitor/configs/{cid}/auto", json={"open": True}, headers=H_).status_code == 404                     # чужой конфиг
     r2 = a.post("/api/monitor", json={}, headers=H_).json()
-    assert r2["entries"][0]["auto"] == {"open": True, "manage": True} and any(x["kind"] == "auto_toggle" for x in r2["log"])
+    assert r2["entries"][0]["auto"] == {"open": True, "manage": True, "base": "config"} and any(x["kind"] == "auto_toggle" for x in r2["log"])
     assert a.post("/api/monitor/auto/off", headers=H_).json()["disabled"] == 1
-    assert a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]["auto"] == {"open": False, "manage": False}
+    assert a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]["auto"] == {"open": False, "manage": False, "base": "config"}
 
 
 def test_monitor_config_management_is_per_user(auth_env):
@@ -385,7 +385,7 @@ def test_monitor_config_management_is_per_user(auth_env):
     # пауза: автомод выключается, возобновление — пересчёт с нуля
     assert a.post(f"/api/monitor/configs/{c1['id']}/pause", json={"paused": True}, headers=H_).json() == {"paused": True}
     got = db.get_config(c1["id"])
-    assert got["paused"] and got["auto"] == {"open": False, "manage": False}
+    assert got["paused"] and got["auto"] == {"open": False, "manage": False, "base": "config"}
     db.update_config(c1["id"], baseline=True, last_ts=123)
     assert a.post(f"/api/monitor/configs/{c1['id']}/pause", json={"paused": False}, headers=H_).json() == {"paused": False}
     got = db.get_config(c1["id"])

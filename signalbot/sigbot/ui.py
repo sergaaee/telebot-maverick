@@ -181,11 +181,19 @@ class MonitorUI:
             lines.append(f"План: SL {st['sl_pct']:g}% · TP " + " / ".join(f"{t['pct']:g}%×{t['share']:g}" for t in st["tps"]) + (" · БУ после TP1" if st["be_after_tp1"] else "")
                          + f" · плечо {st['leverage']:g}× · {st['trade_pct']:g}% депозита")
         lines.append(f"🤖 Автомод: {_auto(e)}" + ("" if self._ad(user).real else " (симуляция)"))
+        a = e.get("auto") or {}
+        ad = self._ad(user)
+        if ad.real:
+            acc = manage.account_quick(ad, user["id"])
+            lines.append(f"💰 База размера входа: <b>{'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}</b>"
+                         + (f" (капитал на бирже {acc['equity']:,.2f} $)".replace(",", " ") if acc and acc.get("equity") is not None else ""))
+            warn = manage.sizing_warning(a, (e.get("settings") or {}).get("deposit"), acc)
+            if warn:
+                lines.append(f"⚠️ {esc(warn)}")
         if e.get("paused"):
             lines.append("⏸ Конфиг на паузе: бот его не считает, автомод выключен.")
-        a = e.get("auto") or {}
         kb = [[(f"{'✅' if a.get('open') else '⬜'} Открывать", f"a:{c['id']}:o"), (f"{'✅' if a.get('manage') else '⬜'} Управлять", f"a:{c['id']}:m")],
-              [("▶ Возобновить" if c["paused"] else "⏸ Пауза", f"p:{c['id']}")],
+              [(f"💰 База: {'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}", f"ab:{c['id']}"), ("▶ Возобновить" if c["paused"] else "⏸ Пауза", f"p:{c['id']}")],
               [("📊 Статистика", f"v:{c['id']}:stats"), ("📜 История", f"v:{c['id']}:hist")],
               [("⚙️ Параметры", f"v:{c['id']}:params"), ("📋 Журнал", f"v:{c['id']}:log")],
               [("🔄", f"c:{c['id']}"), self._live_btn(f"c:{c['id']}", live), ("⬇ Конфиг", f"e:{c['id']}"), ("🗑", f"cd:{c['id']}")],
@@ -355,6 +363,11 @@ class MonitorUI:
                 return None, False, f"ca:{a[0]}:{a[1]}"
             manage.set_auto(self.db, self._ad(user), uid, c["id"], open_=False if a[1] == "o" else None, manage=False if a[1] == "m" else None)
             return "Автомод выключен", False, f"c:{a[0]}"
+        if kind == "ab":                                                           # база размера входа: депозит конфига <-> реальный баланс счёта
+            c = self._cfg(user, a[0])
+            new = "config" if c["auto"].get("base") == "account" else "account"
+            manage.set_auto(self.db, self._ad(user), uid, c["id"], base=new)
+            return ("Размер входа теперь считается от баланса счёта на бирже" if new == "account" else "Размер входа считается от депозита конфига"), False, f"c:{a[0]}"
         if kind == "ay":
             c = self._cfg(user, a[0])
             manage.set_auto(self.db, self._ad(user), uid, c["id"], open_=True if a[1] == "o" else None, manage=True if a[1] == "m" else None)

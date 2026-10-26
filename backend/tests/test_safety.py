@@ -74,7 +74,7 @@ def test_panic_turns_auto_off_first_and_closes_everything(tmp_path):
     ex = Ex([{"symbol": "BTC/USDC:USDC", "side": "long", "size": 1}])
     r = manage.panic(db, ex, u["id"])
     assert r["auto_off"] == 1 and ex.closed_all == 1 and len(r["closed"]) == 1 and r["cancelled"] == 3 and not r["errors"]
-    assert db.get_config(cid)["auto"] == {"open": False, "manage": False}
+    assert db.get_config(cid)["auto"] == {"open": False, "manage": False, "base": "config"}
     assert db.list_auto_log(u["id"], 5)[0]["kind"] == "panic"
     r2 = manage.panic(db, DryRunAdapter(), u["id"])                                                              # без счёта — просто выключает автомод
     assert r2["closed"] == [] and not r2["errors"]
