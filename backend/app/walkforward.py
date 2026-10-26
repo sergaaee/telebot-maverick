@@ -7,7 +7,7 @@ import math
 from datetime import datetime, timezone
 
 from .schemas import BacktestParams, WalkForwardRequest
-from .service import ParamError, run_backtest
+from .service import ParamError, _clean, run_backtest
 
 DAY = 86_400_000
 MAX_RUNS = 600                 # все прогоны одной проверки (окна × значения сетки)
@@ -127,4 +127,4 @@ def run_walkforward(store, defaults, req: WalkForwardRequest, available_fn=None)
         verdict = "На проверке прибыль заметно слабее, чем на подборе: часть результата — подгонка. Закладывайте запас."
     else:
         verdict = "На проверочных отрезках убыток: подобранные значения, скорее всего, подгонка под прошлое."
-    return {"folds": out_folds, "summary": summary, "oos_curve": curve, "stability": stability, "verdict": verdict, "base": {k: base_kw.get(k) for k in ("symbol", "source")}}
+    return _clean({"folds": out_folds, "summary": summary, "oos_curve": curve, "stability": stability, "verdict": verdict, "base": {k: base_kw.get(k) for k in ("symbol", "source")}})

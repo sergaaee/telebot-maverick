@@ -5,7 +5,7 @@ build_portfolio — чистая функция от уже посчитанны
 import math
 
 from .monitor import cached_result
-from .service import ParamError
+from .service import ParamError, _clean
 
 DAY = 86_400_000
 MAX_POINTS = 400
@@ -80,9 +80,9 @@ def build_portfolio(rows, real=None, min_corr_days=10):
 
     # --- корреляция дневных результатов (в долях депозита) на общем календаре
     series = {r["id"]: {k: v / r["deposit"] for k, v in _daily(r["trades"]).items()} for r in active if r["deposit"]}
-    days = None
-    if len(series) >= 2:
-        allk = [k for s in series.values() for k in s]
+    days, lo = None, 0
+    allk = [k for s in series.values() for k in s]
+    if len(series) >= 2 and allk:
         lo, hi = min(allk), max(allk)
         days = hi - lo + 1
     ids = [r["id"] for r in active if r["id"] in series]
@@ -96,7 +96,6 @@ def build_portfolio(rows, real=None, min_corr_days=10):
             if days is None or days < min_corr_days:
                 row.append(None)
                 continue
-            lo = min(k for s in series.values() for k in s)
             xs = [series[a].get(lo + i, 0.0) for i in range(days)]
             ys = [series[b].get(lo + i, 0.0) for i in range(days)]
             row.append(_pearson(xs, ys))
@@ -144,7 +143,7 @@ def build_portfolio(rows, real=None, min_corr_days=10):
         exposure["real"] = {"equity": eq, "gross": real_gross, "leverage": real_gross / eq if eq else None}
         if eq and gross > eq * 10:
             warnings.append(f"Расчётный объём позиций ({gross:.0f} $) больше капитала на бирже ({eq:.0f} $) в {gross / eq:.1f} раз — проверьте плечи и размеры")
-    return {"items": items, "portfolio": portfolio, "correlation": correlation, "exposure": exposure}
+    return _clean({"items": items, "portfolio": portfolio, "correlation": correlation, "exposure": exposure})
 
 
 def collect(store, defaults, configs, available_fn=None):

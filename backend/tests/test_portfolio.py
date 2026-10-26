@@ -40,3 +40,17 @@ def test_correlation_needs_history_and_real_exchange_block():
     assert r["correlation"]["matrix"][0][1] is None and "10 дней" in r["correlation"]["note"]
     assert r["exposure"]["real"] == {"equity": 50.0, "gross": 400.0, "leverage": 8.0}
     assert build_portfolio([])["portfolio"]["strategies"] == 0
+
+
+def test_infinite_profit_factor_is_json_safe():
+    import json
+    r = row(1, "A", [tr(1, 5)])
+    r["stats"]["profit_factor"] = float("inf")
+    out = build_portfolio([r])
+    json.dumps(out, allow_nan=False)                                       # inf/nan не должны попадать в ответ API
+    assert out["items"][0]["profit_factor"] is None
+
+
+def test_strategies_without_closed_trades_do_not_break_portfolio():
+    r = build_portfolio([row(1, "A", [tr(5, 0, "OPEN", "long", 100, 10)]), row(2, "B", [])])
+    assert r["correlation"]["days"] is None and r["correlation"]["matrix"][0][1] is None and r["exposure"]["gross"] == 100

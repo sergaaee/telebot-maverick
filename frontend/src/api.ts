@@ -1,4 +1,4 @@
-import type { ExchangeAccount, ExchangeInfo, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, RunSummary, SavedRun, SyncStatus, TfMode, UiState } from './types';
+import type { ExchangeAccount, ExchangeInfo, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, Portfolio, RunSummary, SavedRun, SyncStatus, TfMode, UiState, WalkForward } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -159,3 +159,12 @@ export const disconnectExchange = () => request<{ removed: boolean }>('/api/exch
 
 export const panicStop = () =>
   request<{ auto_off: number; closed: unknown[]; cancelled: number; errors: string[] }>('/api/panic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true }) });
+
+export interface WfRequest { grid: { param: string; values: number[] }[]; train_days: number; test_days: number; step_days?: number | null; metric: string; min_trades: number }
+export const runWalkForward = (p: Params, wf: WfRequest) =>
+  request<WalkForward>('/api/walkforward', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...p, ...wf }) });
+
+export const getPortfolio = () => request<Portfolio>('/api/portfolio', { method: 'POST' });
+
+export const getDigest = () => request<{ mode: 'off' | 'daily' | 'weekly'; telegram: boolean; hour_utc: number }>('/api/digest');
+export const setDigest = (mode: string) => request<{ mode: string }>('/api/digest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
