@@ -5,6 +5,7 @@
 свечи) общие: одинаковые расчёты в одном цикле выполняются один раз."""
 import json
 import logging
+import os
 import threading
 import time
 from html import escape as esc
@@ -13,7 +14,9 @@ from app.db import DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
-from app import manage
+from app import digest as digest_mod, exporter, manage
+from app.monitor import cached_result
+from app.service import ParamError
 from app.secrets_store import SecretError, encrypt
 from app.tradelog import read_tail, trade_error, trade_log
 from app.trading import adapter_for, forget_adapter, mask_address, verify_hyperliquid
@@ -199,6 +202,10 @@ class SignalService:
 
     cmd_m = cmd_monitor
 
+    def cmd_panic(self, chat, user, arg):
+        """Аварийная кнопка: подтверждение → автомод выкл. везде, все позиции закрыть, все ордера снять."""
+        self.ui.open(chat, user, "cpn")
+
     def cmd_tradelog(self, chat, user, arg):
         """Последние записи лога автоторговли по вашему аккаунту (ошибки биржи, решения автомода, запросы/ответы). Полный файл — trading.log рядом с базой."""
         n = int(arg) if arg.strip().isdigit() else 40
@@ -207,6 +214,63 @@ class SignalService:
             self.send(chat, "Лог автоторговли по вашему аккаунту пока пуст.")
             return
         self.tg.send_document(chat, "trading-log.jsonl", ("\n".join(rows) + "\n").encode("utf-8"), caption=f"Лог автоторговли: последние {len(rows)} записей (JSON по строке)")
+
+    def cmd_digest(self, chat, user, arg):
+        """Регулярная сводка: /digest daily — каждый день, /digest weekly — по понедельникам, /digest off — выключить, /digest now — прислать сейчас."""
+        a = arg.strip().lower()
+        if a == "now":
+            mode = user.get("digest") if user.get("digest") in digest_mod.PERIOD_H else "daily"
+            self.send(chat, digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, user, self.adapter_for(user["id"]), self.engine.available, mode))
+            return
+        if a in ("off", "daily", "weekly"):
+            self.db.set_digest(user["id"], a)
+            hour = int(os.getenv("DIGEST_HOUR_UTC", "8") or 8)
+            self.send(chat, {"off": "Сводка выключена.", "daily": f"Сводка включена: каждый день в {hour:02d}:00 UTC.", "weekly": f"Сводка включена: по понедельникам в {hour:02d}:00 UTC."}[a])
+            return
+        cur = user.get("digest") or "off"
+        self.send(chat, f"Сводка сейчас: <b>{cur}</b>.\n/digest daily — каждый день\n/digest weekly — по понедельникам\n/digest off — выключить\n/digest now — прислать сейчас")
+
+    def cmd_export(self, chat, user, arg):
+        """Выгрузка в CSV: /export trades (сделки стратегий, расчёт), /export log (журнал автоторговли), /export fills (реальные исполнения на бирже)."""
+        kind = arg.strip().lower()
+        if kind == "trades":
+            items = []
+            for c in self.db.list_configs(user["id"]):
+                try:
+                    items.append((c["name"], cached_result(self.engine.store, self.s.defaults, c["params"], self.engine.available)))
+                except (ParamError, FileNotFoundError, KeyError, ValueError):
+                    continue
+            body, name = exporter.trades_csv(items), "maverick-trades.csv"
+        elif kind in ("log", "autolog"):
+            body, name = exporter.autolog_csv(self.db.list_auto_log(user["id"], 500)), "maverick-autolog.csv"
+        elif kind == "fills":
+            ad = self.adapter_for(user["id"])
+            if not ad.real:
+                self.send(chat, "Счёт биржи не подключён (/hl) — реальных исполнений нет.")
+                return
+            try:
+                body, name = exporter.fills_csv(ad.fills(500)), "maverick-fills.csv"
+            except Exception as e:
+                self.send(chat, f"⚠️ Не удалось получить исполнения: {esc(str(e)[:200])}")
+                return
+        else:
+            self.send(chat, "Что выгрузить?\n/export trades — сделки стратегий (расчёт)\n/export log — журнал автоторговли\n/export fills — реальные исполнения на бирже")
+            return
+        self.tg.send_document(chat, name, body.encode("utf-8"), caption=name)
+
+    def _send_digests(self):
+        """Раз в цикл: кому пора — присылаем сводку (daily / weekly, час — DIGEST_HOUR_UTC)."""
+        hour = int(os.getenv("DIGEST_HOUR_UTC", "8") or 8)
+        now = self.clock()
+        for u in self.db.list_users():
+            if u["disabled"] or not u["telegram_id"] or not digest_mod.due(u["digest"], u["digest_ts"], now, hour):
+                continue
+            try:
+                text = digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, u, self.adapter_for(u["id"]), self.engine.available, u["digest"], now)
+                self.send(u["telegram_id"], text)
+            except Exception:
+                log.exception("сводка для %s", u["login"])
+            self.db.mark_digest_sent(u["id"], now)                   # и при сбое: не пытаться каждую минуту
 
     def cmd_hl(self, chat, user, arg):
         """Подключение счёта Hyperliquid (адрес кошелька + ключ API-кошелька) и состояние счёта."""
@@ -429,6 +493,7 @@ class SignalService:
         Сначала уже посчитанные конфиги (их сигналы не ждут чужих долгих загрузок), потом новые. Перед каждым конфигом он читается из базы
         заново, поэтому /pause, /remove и /cancel действуют до того, как до конфига дойдёт очередь."""
         with self._cycle_lock:
+            self._beat("bot_cycle_start")
             forced, self._force = self._force, set()
             users = {u["id"]: u for u in self.db.list_users() if u["telegram_id"] and not u["disabled"]}
             memo = {"eval": {}, "candles": {}, "top": {}}
@@ -453,6 +518,18 @@ class SignalService:
             self._download_top(memo, users)
             self._cancel.clear()
         self.last_cycle = self.clock()
+        self._beat("bot_cycle")
+        try:
+            self._send_digests()
+        except Exception:
+            log.exception("сводки")
+
+    def _beat(self, key):
+        """Пульс для сторожа (watchdog.py): время последнего цикла."""
+        try:
+            self.db.set_meta(key, self.clock())
+        except Exception:
+            log.warning("не записать пульс %s", key)
 
     def _evaluate(self, params, memo, user):
         """Свечи актива обновляются и расчёт делается один раз на одинаковые параметры, даже если они у разных пользователей."""
@@ -550,13 +627,21 @@ class SignalService:
         self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter_for(cfg["user_id"]).name})
 
     def _auto_open(self, cfg, res, sig, plan):
-        """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига)."""
+        """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига). Перед ордером состояние сверяется с реальной биржей."""
         if not cfg["auto"]["open"]:
             return
         p = res["params"]
         add = bool(sig.get("pyramid"))
         notional, margin = self.engine.order_size(res, add)
         ad = self.adapter_for(cfg["user_id"])
+        pre = manage.preflight_open(ad, p["symbol"], sig["side"], add)
+        if pre.get("skip"):
+            self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": pre["skip"], "exchange": ad.name})
+            trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=pre["skip"])
+            self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(pre['skip'])}")
+            return
+        if pre.get("close_first"):                          # на бирже позиция в обратную сторону: по правилам стратегии это разворот — сначала закрываем её
+            self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"})
         self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                  lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
                                                   plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),

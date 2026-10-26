@@ -80,3 +80,21 @@ class MonteCarloRequest(BacktestParams):
     runs: int = Field(1000, ge=100, le=5000, description="число прогонов")
     mode: Literal["shuffle", "bootstrap"] = Field("shuffle", description="shuffle — тот же набор сделок в случайном порядке; bootstrap — случайная выборка с возвращением")
     seed: Optional[int] = Field(None, description="зерно генератора (для воспроизводимости)")
+
+
+WF_PARAMS = ("local_min", "scalp_min", "global_min", "short_local_max", "short_scalp_max", "short_global_max", "sl_pct", "confirm")
+
+
+class GridAxis(BaseModel):
+    param: Literal["local_min", "scalp_min", "global_min", "short_local_max", "short_scalp_max", "short_global_max", "sl_pct", "confirm"]
+    values: list[float] = Field(min_length=2, max_length=30)
+
+
+class WalkForwardRequest(BacktestParams):
+    """Параметры бэктеста плюс настройки walk-forward: на каждом окне подбираются лучшие значения из сетки, затем проверяются на следующем отрезке."""
+    grid: list[GridAxis] = Field(min_length=1, max_length=2, description="что подбирать (1–2 параметра) и какие значения перебирать")
+    train_days: int = Field(90, ge=14, le=1500, description="длина окна подбора, дней")
+    test_days: int = Field(30, ge=7, le=730, description="длина окна проверки, дней")
+    step_days: Optional[int] = Field(None, ge=7, le=730, description="сдвиг окон; по умолчанию равен окну проверки")
+    metric: Literal["pnl", "sharpe", "profit_factor", "calmar"] = Field("pnl", description="по чему выбирать лучшие значения на окне подбора")
+    min_trades: int = Field(5, ge=1, le=1000, description="минимум сделок на окне подбора, чтобы значения учитывались")

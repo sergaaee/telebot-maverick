@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, closeTestPosition, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
+import { autoOffAll, closeTestPosition, panicStop, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
 import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
@@ -19,6 +19,17 @@ const ago = (ms: number | null | undefined) => {
   return m < 1 ? 'только что' : m < 90 ? `${m} мин назад` : m < 48 * 60 ? `${(m / 60).toFixed(1)} ч назад` : `${Math.round(m / 1440)} дн назад`;
 };
 const held = (h: number) => (h < 1 ? `${Math.round(h * 60)} мин` : h < 48 ? `${h.toFixed(1)} ч` : `${(h / 24).toFixed(1)} сут`);
+
+function BotStatus({ bot, anyAuto }: { bot: MonitorResponse['bot']; anyAuto: boolean }) {
+  if (!bot || bot.state === 'ok' || (bot.state === 'unknown' && !anyAuto)) return null;
+  const mins = (s: number | null) => (s == null ? '?' : Math.round(s / 60));
+  const text = bot.state === 'dead' ? `Бот не отвечает уже ${mins(bot.alive_age_s)} мин` : bot.state === 'stalled' ? `Бот завис: цикл проверки не заканчивается ${mins(bot.cycle_age_s)} мин` : 'Бот ещё ни разу не запускался (нет пульса)';
+  return (
+    <div className="banner error" data-testid="bot-status">
+      ⚠️ {text}. {anyAuto ? 'Автоторговля не работает: новые сигналы не открываются, стопы в безубыток не переставляются (стопы и тейки на бирже работают).' : ''} <Help text={HELP.bot_status} />
+    </div>
+  );
+}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return <div className="mon-kv"><span className="muted">{label}</span><span>{children}</span></div>;
@@ -425,6 +436,17 @@ export default function MonitorPage() {
     await load();
   };
 
+  const panic = async () => {
+    if (!window.confirm(`🚨 СТОП ВСЁ\nАвтомод выключится у ВСЕХ конфигов, все позиции ${data?.exchange.real ? `на ${exchangeLabel(data.exchange)}` : '(счёт не подключён — закрывать нечего)'} закроются по рынку, все ордера (стопы, тейки) снимутся. Продолжить?`)) return;
+    try {
+      const r = await panicStop();
+      setMsg(`СТОП ВСЁ: автомод выключен у ${r.auto_off}, закрыто позиций ${r.closed.length}, снято ордеров ${r.cancelled}${r.errors.length ? `. ОШИБКИ: ${r.errors.join('; ')} — проверьте счёт на бирже вручную` : ''}`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+    await load();
+  };
+
   const testPos = async () => {
     const mn = data?.exchange.min_notional ?? 0;
     const lev = mn ? Math.ceil(mn * 1.1) : 1;
@@ -480,7 +502,9 @@ export default function MonitorPage() {
         {data && <span className="muted small" data-testid="mon-summary">Стратегий: {entries.length} · с позицией: {open}{open > 0 && <> · открытый результат <b className={signClass(total)}>{fmtUsd(total)}</b></>}</span>}
         <span className="mon-spacer" />
         <button type="button" className="ghost" disabled={!anyAuto} onClick={() => void offAll()}>⛔ Выключить автомод везде</button><Help text={HELP.auto_off_all} />
+        <button type="button" className="danger" data-testid="panic" onClick={() => void panic()}>🚨 СТОП ВСЁ</button><Help text={HELP.panic} />
       </div>
+      <BotStatus bot={data?.bot} anyAuto={anyAuto} />
       <ExchangeBanner info={data?.exchange} />
       {err && <div className="banner error">{err}</div>}
       <div className="mon-test">

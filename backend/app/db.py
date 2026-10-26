@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS auto_log (
     status TEXT NOT NULL,
     details TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_autolog_user ON auto_log(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -126,7 +130,8 @@ def _user(row):
     if row is None:
         return None
     return {"id": row["id"], "login": row["login"], "is_admin": bool(row["is_admin"]), "disabled": bool(row["disabled"]),
-            "telegram_id": row["telegram_id"], "telegram_name": row["telegram_name"], "created": row["created"]}
+            "telegram_id": row["telegram_id"], "telegram_name": row["telegram_name"], "created": row["created"],
+            "digest": (row["digest"] if "digest" in row.keys() else None) or "off", "digest_ts": row["digest_ts"] if "digest_ts" in row.keys() else None}
 
 
 class Database:
@@ -135,6 +140,11 @@ class Database:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with self.conn() as c:
             c.executescript(SCHEMA)
+            ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+            if "digest" not in ucols:        # регулярная сводка в Telegram: off / daily / weekly
+                c.execute("ALTER TABLE users ADD COLUMN digest TEXT")
+            if "digest_ts" not in ucols:     # когда сводка последний раз отправлена
+                c.execute("ALTER TABLE users ADD COLUMN digest_ts REAL")
             cols = {r["name"] for r in c.execute("PRAGMA table_info(configs)")}
             if "auto" not in cols:           # автомод: JSON {"open": bool, "manage": bool}; NULL = выключен
                 c.execute("ALTER TABLE configs ADD COLUMN auto TEXT")
@@ -286,6 +296,26 @@ class Database:
     def delete_exchange_account(self, user_id):
         with self.conn() as c:
             return c.execute("DELETE FROM exchange_accounts WHERE user_id=?", (user_id,)).rowcount > 0
+
+    def set_digest(self, user_id, mode):
+        if mode not in ("off", "daily", "weekly"):
+            raise DbError("Сводка: off, daily или weekly")
+        with self.conn() as c:
+            c.execute("UPDATE users SET digest=?, digest_ts=? WHERE id=?", (mode, time.time() if mode != "off" else None, user_id))
+
+    def mark_digest_sent(self, user_id, ts=None):
+        with self.conn() as c:
+            c.execute("UPDATE users SET digest_ts=? WHERE id=?", (time.time() if ts is None else ts, user_id))
+
+    # ---------------- служебные значения (пульс бота и т.п.) ----------------
+    def set_meta(self, key, value):
+        with self.conn() as c:
+            c.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+    def get_meta(self, key, default=None):
+        with self.conn() as c:
+            r = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else default
 
     # ---------------- автомод: действия (журнал) ----------------
     def set_auto(self, user_id, cfg_id, open_=None, manage=None):

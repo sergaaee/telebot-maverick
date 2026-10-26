@@ -1,5 +1,6 @@
 """FastAPI-бэкенд интерактивного просмотра бэктеста. Запуск: python cli.py serve (из папки backend/)."""
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -16,10 +17,13 @@ from .candle_sync import CandleSync
 from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
-from .schemas import BacktestParams, MonteCarloRequest
-from .monitor import evaluate_entry
+from .schemas import BacktestParams, MonteCarloRequest, WalkForwardRequest
+from . import exporter, portfolio, watchdog
+from .watchdog import Watchdog
+from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
-from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, test_close, test_open)
+from .walkforward import run_walkforward
+from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, test_close, test_open)
 
 
 def _adapter(request, db):
@@ -94,9 +98,15 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @asynccontextmanager
     async def lifespan(_app):
+        wd = None
+        if os.getenv("SIGNALBOT_TOKEN", "").strip() and os.getenv("WATCHDOG", "on").strip().lower() not in ("off", "0", "false"):
+            wd = Watchdog(db, watchdog.telegram_notify(os.getenv("SIGNALBOT_TOKEN").strip()))        # сторож бота: пишет в Telegram, если бот молчит
+            wd.start()
         candle_sync.start()                # свечи: при запуске и затем каждые CANDLES_SYNC_MIN минут
         sync.start()                       # подгрузка при запуске сервера и затем каждые HISTORY_SYNC_MIN минут
         yield
+        if wd:
+            wd.stop()
         sync.stop()
         candle_sync.stop()
 
@@ -285,6 +295,16 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         except ParamError as e:
             raise HTTPException(422, str(e))
 
+    @app.post("/api/walkforward")
+    def walkforward_run(req: WalkForwardRequest):
+        """Walk-forward: подбор параметров на окне и проверка на следующем, окна сдвигаются. Показывает, не подогнана ли стратегия под прошлое."""
+        try:
+            return run_walkforward(store, s.defaults, req, available_fn=available_fn)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        except ParamError as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/top/download")
     def top_download(params: BacktestParams, request: Request):
         """Ставит в фон загрузку недостающих окон свечей топ-коинов (момент сигнала + TOP_DAYS) для текущих параметров."""
@@ -326,7 +346,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                     "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"]} for c in db.list_configs(uid)]
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
-        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(),
+        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(), "bot": watchdog.bot_status(db),
                 "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
 
     def _guard(fn, *a, **k):
@@ -382,6 +402,72 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
         return {"disabled": auto_off_all(db, request.state.user["id"])}
+
+    @app.post("/api/portfolio")
+    def portfolio_ep(request: Request):
+        """Портфель всех стратегий пользователя: кривые капитала рядом, общая кривая, корреляция дневных результатов, суммарная экспозиция по активам и предупреждения о риске."""
+        uid = request.state.user["id"]
+        rows = portfolio.collect(store, s.defaults, db.list_configs(uid), available_fn)
+        real = None
+        ad = _adapter(request, db)
+        if ad.real:
+            try:
+                real = {"equity": ad.account().get("equity"), "positions": ad.positions()}
+            except Exception:                      # биржа недоступна — портфель показываем без блока «реальная биржа»
+                real = None
+        return portfolio.build_portfolio(rows, real)
+
+    @app.get("/api/export/{kind}.csv")
+    def export_csv(kind: str, request: Request, config_id: int | None = Query(None)):
+        """CSV-выгрузки: trades — сделки стратегий (расчёт; config_id — одной, иначе всех), autolog — журнал автоторговли, fills — реальные исполнения на бирже."""
+        uid = request.state.user["id"]
+        if kind == "trades":
+            cfgs = [_own(request, config_id)] if config_id is not None else db.list_configs(uid)
+            items = []
+            for c in cfgs:
+                try:
+                    items.append((c["name"], cached_result(store, s.defaults, c["params"], available_fn)))
+                except (ParamError, FileNotFoundError, KeyError, ValueError):
+                    continue
+            body = exporter.trades_csv(items)
+        elif kind == "autolog":
+            body = exporter.autolog_csv(db.list_auto_log(uid, 500, config_id))
+        elif kind == "fills":
+            ad = _adapter(request, db)
+            if not ad.real:
+                raise HTTPException(409, "Счёт биржи не подключён — реальных исполнений нет")
+            try:
+                body = exporter.fills_csv(ad.fills(500))
+            except Exception as e:
+                raise HTTPException(502, str(e))
+        else:
+            raise HTTPException(404, "Неизвестная выгрузка")
+        return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="maverick-{kind}.csv"'})
+
+    @app.get("/api/digest")
+    def digest_get(request: Request):
+        u = request.state.user
+        return {"mode": u.get("digest") or "off", "telegram": bool(u["telegram_id"]), "hour_utc": int(os.getenv("DIGEST_HOUR_UTC", "8") or 8)}
+
+    @app.put("/api/digest")
+    def digest_put(request: Request, body: dict = Body(...)):
+        """Регулярная сводка в Telegram: off / daily (каждый день) / weekly (по понедельникам). Нужен привязанный Telegram."""
+        mode = str(body.get("mode") or "")
+        u = request.state.user
+        if mode != "off" and not u["telegram_id"]:
+            raise HTTPException(409, "Сводка приходит в Telegram: сначала привяжите бота (/link)")
+        try:
+            db.set_digest(u["id"], mode)
+        except DbError as e:
+            raise HTTPException(422, str(e))
+        return {"mode": mode}
+
+    @app.post("/api/panic")
+    def panic_ep(request: Request, body: dict = Body(default={})):
+        """Аварийная кнопка: автомод выключается у всех конфигов, все позиции на бирже закрываются по рынку, все ордера снимаются. Нужно confirm: true."""
+        if body.get("confirm") is not True:
+            raise HTTPException(422, "Нужно подтверждение (confirm: true)")
+        return panic(db, _adapter(request, db), request.state.user["id"])
 
     @app.post("/api/trading/test-position")
     def test_position(request: Request, body: dict = Body(...)):

@@ -19,7 +19,7 @@ from .transport import AiogramTransport, build_dispatcher, make_bot
 
 log = logging.getLogger("signalbot")
 LIVE_SEC = 20
-COMMANDS = [("monitor", "мониторинг: стратегии, позиции, автомод, live"), ("positions", "открытые позиции"), ("list", "ваши конфиги"), ("check", "проверить сигналы сейчас"),
+COMMANDS = [("monitor", "мониторинг: стратегии, позиции, автомод, live"), ("positions", "открытые позиции"), ("digest", "сводка в чат: daily / weekly / off / now"), ("export", "выгрузка CSV: trades / log / fills"), ("panic", "СТОП ВСЁ: закрыть позиции и выключить автомод"), ("list", "ваши конфиги"), ("check", "проверить сигналы сейчас"),
             ("status", "состояние данных"), ("help", "справка")]
 
 
@@ -44,6 +44,13 @@ async def run(service, bot, dp, poll_sec):
             except Exception:
                 log.exception("live-обновление")
 
+    async def alive():
+        """Пульс процесса для сторожа: пока жив цикл событий, раз в 15 с пишем время в базу."""
+        while not service.stopped:
+            await asyncio.to_thread(service._beat, "bot_alive")
+            await asyncio.sleep(15)
+
+    task0 = asyncio.create_task(alive())
     task = asyncio.create_task(cycles())
     task2 = asyncio.create_task(live())
     try:
@@ -56,6 +63,7 @@ async def run(service, bot, dp, poll_sec):
         service.stop()
         task.cancel()
         task2.cancel()
+        task0.cancel()
         await bot.session.close()
 
 

@@ -5,6 +5,7 @@ import EquityChart from './components/EquityChart';
 import Help from './components/Help';
 import MetricsBar from './components/MetricsBar';
 import MonteCarloPanel from './components/MonteCarloPanel';
+import WalkForwardPanel from './components/WalkForwardPanel';
 import RunsPanel from './components/RunsPanel';
 import ParamsPanel from './components/ParamsPanel';
 import PriceChart from './components/PriceChart';
@@ -656,6 +657,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
               {params && (
                 <>
                   <MonteCarloPanel params={params} result={result} />
+                  <WalkForwardPanel params={result.params ?? params} />
                   <RunsPanel params={params} tf={tfMode} result={result} onLoad={onLoadRun} />
                 </>
               )}

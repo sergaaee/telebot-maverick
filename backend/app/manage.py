@@ -80,7 +80,7 @@ def test_open(db, adapter, uid, side="long", margin=1.0):
 
 def test_close(db, adapter, uid):
     try:
-        res = adapter.close_market(TEST_SYMBOL, "long", 1.0)
+        res = adapter.close_market(TEST_SYMBOL, None, 1.0)
     except (NotConfigured, ExchangeError) as e:
         _fail(db, uid, "test_close", None, e)
     db.add_auto_log(uid, None, "test_close", TEST_SYMBOL, None, res.get("status", "sent"), res)
@@ -126,3 +126,42 @@ def disconnect_account(db, uid):
     db.add_auto_log(uid, None, "exchange_disconnected", None, None, "info", {"removed": removed, "auto_off": n})
     trade_log("account_disconnected", "warn", user=uid, removed=removed, auto_off=n)
     return removed
+
+
+def preflight_open(adapter, symbol, side, add):
+    """Сверка с реальной биржей перед входом / добором (решение бота опирается на симуляцию, а позиция на бирже могла измениться: закрыта вручную, не закрылась и т.п.).
+    -> {"skip": причина} (ордер не отправлять), {"close_first": сторона} (сначала закрыть встречную позицию) или {} (можно). Не удалось проверить — не торгуем."""
+    if not adapter.real:
+        return {}
+    try:
+        positions = adapter.positions()
+    except (NotConfigured, ExchangeError) as e:
+        return {"skip": f"не удалось проверить позиции на бирже ({e}) — ордер не отправлен"}
+    base = symbol.split("/")[0]
+    cur = next((p for p in positions if (p.get("symbol") or "").split("/")[0] == base), None)
+    if add:
+        if not cur or cur["side"] != side:
+            return {"skip": f"добор {side}: на бирже нет позиции {side} по {base} — добирать нечего"}
+        return {}
+    if cur and cur["side"] == side:
+        return {"skip": f"на бирже уже есть позиция {side} по {base} ({cur['size']:g}) — повторный вход пропущен"}
+    if cur:
+        return {"close_first": cur["side"]}
+    return {}
+
+
+def panic(db, adapter, uid):
+    """Аварийная остановка: автомод выключается у всех конфигов пользователя (сначала — чтобы бот не открыл позицию заново), затем закрываются все позиции
+    на бирже и снимаются все ордера. Ошибки не прерывают процесс: что не удалось — в errors."""
+    off = db.disable_all_auto(uid)
+    trade_log("panic_start", "warn", user=uid, auto_off=off, exchange=adapter.name, real=adapter.real)
+    errors, closed, cancelled = [], [], 0
+    try:
+        r = adapter.close_all()
+        closed, cancelled, errors = r.get("closed", []), r.get("cancelled", 0), list(r.get("errors", []))
+    except (NotConfigured, ExchangeError) as e:
+        errors.append(str(e))
+    out = {"auto_off": off, "closed": closed, "cancelled": cancelled, "errors": errors, "exchange": adapter.describe()}
+    db.add_auto_log(uid, None, "panic", None, None, "error" if errors else "ok", out)
+    trade_log("panic_done", "error" if errors else "warn", user=uid, **{k: v for k, v in out.items() if k != "exchange"})
+    return out
