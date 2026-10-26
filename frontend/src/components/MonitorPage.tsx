@@ -227,13 +227,15 @@ function statusOf(e: MonitorEntry): { cls: string; text: string } {
 }
 
 /** Строка стратегии в списке: статус, позиция, автомод, пауза и «Подробнее». */
-function Row2({ e, open, exchange, onToggleOpen, onAuto, onPause }: {
-  e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange'];
-  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean }) => void; onPause: () => void;
+function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause }: {
+  e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange']; account?: MonitorResponse['account'];
+  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => void; onPause: () => void;
 }) {
   const st = statusOf(e);
   const pos = e.position;
   const stale = e.candle_ts ? (Date.now() - e.candle_ts) / 60000 : null;
+  const dep = e.settings?.deposit;
+  const sizeWarn = !!(exchange.real && account?.equity && dep && dep > account.equity * 1.5 && e.auto?.open && (e.auto.base ?? 'config') === 'config');
   return (
     <div className="mon-row" data-status={st.cls}>
       <span className={`mon-dot ${st.cls}`} title={st.text} />
@@ -249,8 +251,12 @@ function Row2({ e, open, exchange, onToggleOpen, onAuto, onPause }: {
       <span className="mon-auto" data-testid="mon-auto">
         <label title={HELP.auto_open}><input type="checkbox" checked={e.auto?.open ?? false} disabled={e.paused} onChange={(ev) => onAuto({ open: ev.target.checked })} /> открывать<Help text={HELP.auto_open} /></label>
         <label title={HELP.auto_manage}><input type="checkbox" checked={e.auto?.manage ?? false} disabled={e.paused} onChange={(ev) => onAuto({ manage: ev.target.checked })} /> управлять<Help text={HELP.auto_manage} /></label>
+        <label className="mon-base" title={HELP.auto_base}>размер от <select value={e.auto?.base ?? 'config'} disabled={e.paused} onChange={(ev) => onAuto({ base: ev.target.value as 'config' | 'account' })} aria-label="База размера входа" data-testid="mon-base">
+          <option value="config">депозита конфига</option><option value="account">баланса счёта</option>
+        </select><Help text={HELP.auto_base} /></label>
         {(e.auto?.open || e.auto?.manage) && <span className={exchange.real ? 'neg small' : 'muted small'}>{exchange.real ? '● биржа' : '● симуляция'}</span>}
       </span>
+      {sizeWarn && <div className="warn-text small mon-sizewarn" data-testid="mon-sizewarn">⚠️ Депозит конфига {fmtUsd(dep ?? 0)} намного больше капитала на бирже {fmtUsd(account!.equity ?? 0)}: объём входа считается от {fmtUsd(dep ?? 0)} и, скорее всего, не пройдёт. Выберите «размер от баланса счёта».</div>}
       <span className="mon-btns">
         <button type="button" className="ghost" onClick={onPause} data-testid="mon-pause">{e.paused ? '▶ Возобновить' : '⏸ Пауза'}</button>
         <button type="button" className="ghost" onClick={onToggleOpen} aria-expanded={open} data-testid="mon-more">{open ? 'Свернуть ▴' : 'Подробнее ▾'}</button>
@@ -405,7 +411,7 @@ export default function MonitorPage() {
     return n;
   });
 
-  const auto = async (id: number, patch: { open?: boolean; manage?: boolean }) => {
+  const auto = async (id: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => {
     const turningOn = patch.open === true || patch.manage === true;
     if (turningOn && !window.confirm(data?.exchange.real
       ? `Включить автомод? Бот будет сам отправлять ордера на ${exchangeLabel(data.exchange)} по этому конфигу.`
@@ -522,7 +528,7 @@ export default function MonitorPage() {
       <div className="mon-list">
         {entries.map((e) => (
           <section key={e.config_id ?? e.name} className="mon-card" data-testid="mon-card" data-name={e.title ?? e.name}>
-            <Row2 e={e} open={e.config_id != null && openIds.has(e.config_id)} exchange={data!.exchange}
+            <Row2 e={e} open={e.config_id != null && openIds.has(e.config_id)} exchange={data!.exchange} account={data!.account}
               onToggleOpen={() => e.config_id != null && toggleOpen(e.config_id)} onAuto={(p) => e.config_id != null && void auto(e.config_id, p)} onPause={() => void pause(e)} />
             {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
             {e.config_id != null && openIds.has(e.config_id) && <Details id={e.config_id} exchange={data!.exchange} onChanged={() => void load()} />}

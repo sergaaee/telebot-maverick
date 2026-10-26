@@ -23,6 +23,7 @@ from .watchdog import Watchdog
 from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
 from .walkforward import run_walkforward
+from . import manage as manage_mod
 from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, test_close, test_open)
 
 
@@ -347,6 +348,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
         return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(), "bot": watchdog.bot_status(db),
+                "account": manage_mod.account_quick(_adapter(request, db), uid),
                 "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
 
     def _guard(fn, *a, **k):
@@ -395,18 +397,48 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @app.put("/api/monitor/configs/{config_id}/auto")
     def set_auto_ep(config_id: int, request: Request, body: dict = Body(...)):
-        """Автомод конфига: open — открывать позиции и доборы по сигналу, manage — переставлять стоп (БУ), закрывать и т.д. Выключен, пока явно не включён."""
-        new = _guard(set_auto, db, _adapter(request, db), request.state.user["id"], config_id, body.get("open"), body.get("manage"))
+        """Автомод конфига: open — открывать позиции и доборы по сигналу, manage — переставлять стоп (БУ), закрывать и т.д. Выключен, пока явно не включён.
+        base — от чего считать размер входа: config (депозит из конфига, по умолчанию) или account (реальный капитал на бирже)."""
+        new = _guard(set_auto, db, _adapter(request, db), request.state.user["id"], config_id, body.get("open"), body.get("manage"), body.get("base"))
         return {"auto": new, "exchange": _adapter(request, db).describe()}
 
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
         return {"disabled": auto_off_all(db, request.state.user["id"])}
 
+    def _pf_prefs(uid):
+        p = db.get_pref(uid, "portfolio", {}) or {}
+        ex = [int(x) for x in p.get("exclude", []) if isinstance(x, int)]
+        td = p.get("total_deposit")
+        return {"exclude": ex, "total_deposit": float(td) if isinstance(td, (int, float)) and td > 0 else None}
+
+    @app.get("/api/portfolio/prefs")
+    def portfolio_prefs(request: Request):
+        return _pf_prefs(request.state.user["id"])
+
+    @app.put("/api/portfolio/prefs")
+    def portfolio_prefs_put(request: Request, body: dict = Body(...)):
+        """Какие стратегии учитывать в портфеле и общий депозит (null — у каждой свой). Хранится у пользователя на сервере."""
+        uid = request.state.user["id"]
+        cur = _pf_prefs(uid)
+        if "exclude" in body:
+            if not isinstance(body["exclude"], list) or not all(isinstance(x, int) for x in body["exclude"]):
+                raise HTTPException(422, "exclude — список номеров стратегий")
+            cur["exclude"] = sorted(set(body["exclude"]))
+        if "total_deposit" in body:
+            td = body["total_deposit"]
+            if td is not None and (isinstance(td, bool) or not isinstance(td, (int, float)) or not 0 < td <= 1e9):
+                raise HTTPException(422, "Общий депозит — число больше 0 (или null, чтобы у каждой стратегии был свой)")
+            cur["total_deposit"] = float(td) if td is not None else None
+        db.set_pref(uid, "portfolio", cur)
+        return cur
+
     @app.post("/api/portfolio")
     def portfolio_ep(request: Request):
-        """Портфель всех стратегий пользователя: кривые капитала рядом, общая кривая, корреляция дневных результатов, суммарная экспозиция по активам и предупреждения о риске."""
+        """Портфель стратегий пользователя: кривые капитала рядом, общая кривая, корреляция дневных результатов, суммарная экспозиция по активам и предупреждения о риске.
+        Учитываются сохранённые настройки: отключённые стратегии не входят в расчёты, общий депозит (если задан) заменяет депозиты стратегий."""
         uid = request.state.user["id"]
+        prefs = _pf_prefs(uid)
         rows = portfolio.collect(store, s.defaults, db.list_configs(uid), available_fn)
         real = None
         ad = _adapter(request, db)
@@ -415,7 +447,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                 real = {"equity": ad.account().get("equity"), "positions": ad.positions()}
             except Exception:                      # биржа недоступна — портфель показываем без блока «реальная биржа»
                 real = None
-        return portfolio.build_portfolio(rows, real)
+        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"])
 
     @app.get("/api/export/{kind}.csv")
     def export_csv(kind: str, request: Request, config_id: int | None = Query(None)):

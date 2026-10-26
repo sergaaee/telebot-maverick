@@ -88,6 +88,12 @@ CREATE TABLE IF NOT EXISTS auto_log (
     status TEXT NOT NULL,
     details TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -307,6 +313,19 @@ class Database:
         with self.conn() as c:
             c.execute("UPDATE users SET digest_ts=? WHERE id=?", (time.time() if ts is None else ts, user_id))
 
+    # ---------------- личные настройки пользователя (JSON по ключу) ----------------
+    def get_pref(self, user_id, key, default=None):
+        with self.conn() as c:
+            r = c.execute("SELECT value FROM user_prefs WHERE user_id=? AND key=?", (user_id, key)).fetchone()
+        try:
+            return json.loads(r["value"]) if r else default
+        except ValueError:
+            return default
+
+    def set_pref(self, user_id, key, value):
+        with self.conn() as c:
+            c.execute("INSERT INTO user_prefs(user_id, key, value) VALUES (?,?,?) ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (user_id, key, json.dumps(value, ensure_ascii=False)))
+
     # ---------------- служебные значения (пульс бота и т.п.) ----------------
     def set_meta(self, key, value):
         with self.conn() as c:
@@ -318,19 +337,28 @@ class Database:
         return r["value"] if r else default
 
     # ---------------- автомод: действия (журнал) ----------------
-    def set_auto(self, user_id, cfg_id, open_=None, manage=None):
+    def set_auto(self, user_id, cfg_id, open_=None, manage=None, base=None):
+        if base not in (None, "config", "account"):
+            raise DbError("База размера: config или account")
         with self.conn() as c:
             row = c.execute("SELECT * FROM configs WHERE id=? AND user_id=?", (cfg_id, user_id)).fetchone()
             if not row:
                 return None
             cur = self._cfg(row)["auto"]
-            new = {"open": cur["open"] if open_ is None else bool(open_), "manage": cur["manage"] if manage is None else bool(manage)}
+            new = {"open": cur["open"] if open_ is None else bool(open_), "manage": cur["manage"] if manage is None else bool(manage), "base": base or cur["base"]}
             c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps(new), cfg_id))
             return new
 
     def disable_all_auto(self, user_id):
+        """Выключает открытие и управление у всех конфигов пользователя (выбранная база размера сохраняется). -> у скольких конфигов автомод был включён."""
+        n = 0
         with self.conn() as c:
-            return c.execute("UPDATE configs SET auto=NULL WHERE user_id=? AND auto IS NOT NULL", (user_id,)).rowcount
+            for row in c.execute("SELECT * FROM configs WHERE user_id=? AND auto IS NOT NULL", (user_id,)).fetchall():
+                a = self._cfg(row)["auto"]
+                if a["open"] or a["manage"]:
+                    n += 1
+                c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps({"open": False, "manage": False, "base": a["base"]}) if a["base"] != "config" else None, row["id"]))
+        return n
 
     def add_auto_log(self, user_id, config_id, kind, symbol, side, status, details):
         with self.conn() as c:
@@ -436,7 +464,8 @@ class Database:
             a = json.loads(d.get("auto") or "{}")
         except ValueError:
             a = {}
-        d["auto"] = {"open": bool(a.get("open")), "manage": bool(a.get("manage"))}          # автомод выключен, пока явно не включён
+        # автомод выключен, пока явно не включён; base — от чего считать размер входа: config (депозит из конфига, как в бэктесте) или account (реальный капитал на бирже)
+        d["auto"] = {"open": bool(a.get("open")), "manage": bool(a.get("manage")), "base": a.get("base") if a.get("base") in ("config", "account") else "config"}
         return d
 
     def list_configs(self, user_id=None):

@@ -632,20 +632,32 @@ class SignalService:
             return
         p = res["params"]
         add = bool(sig.get("pyramid"))
-        notional, margin = self.engine.order_size(res, add)
         ad = self.adapter_for(cfg["user_id"])
+        base = cfg["auto"].get("base", "config")
         pre = manage.preflight_open(ad, p["symbol"], sig["side"], add)
         if pre.get("skip"):
-            self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": pre["skip"], "exchange": ad.name})
-            trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=pre["skip"])
-            self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(pre['skip'])}")
+            self._skip_open(cfg, p, sig, add, ad, pre["skip"])
             return
+        acc = manage.account_quick(ad, cfg["user_id"], ttl=0) if ad.real else None            # свежий баланс: размер и свободная маржа решают, пройдёт ли ордер
+        if acc and pre.get("close_first"):
+            acc = {**acc, "free": None}                     # встречная позиция сейчас закроется и освободит маржу — свободную маржу до этого не сверяем
+        sz = manage.size_order(self.engine.order_size, res, add, ad, base, acc)
+        if sz.get("skip"):
+            self._skip_open(cfg, p, sig, add, ad, sz["skip"])
+            return
+        notional, margin = sz["notional"], sz["margin"]
         if pre.get("close_first"):                          # на бирже позиция в обратную сторону: по правилам стратегии это разворот — сначала закрываем её
             self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"})
         self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                  lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
                                                   plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
-                 {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1)})
+                 {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"]})
+
+    def _skip_open(self, cfg, p, sig, add, ad, reason):
+        """Вход / добор не выполнен по понятной причине: журнал, лог и сообщение владельцу."""
+        self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": reason, "exchange": ad.name})
+        trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=reason)
+        self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(reason)}")
 
     def _auto_fill(self, cfg, res, ev):
         """Автомод «управлять позицией»: после TP1 стоп в безубыток, закрытие к концу недели / по развороту (TP и SL исполняет сама биржа через стоп и лимитки)."""

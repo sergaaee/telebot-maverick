@@ -789,7 +789,7 @@ def test_auto_mode_is_off_by_default_and_logs_dry_run_actions_when_enabled(env):
     env.handle_update(msg(json.dumps(UI_CONFIG)))
     env.cycle()
     cfg = env.db.list_configs(env.alice["id"])[0]
-    assert cfg["auto"] == {"open": False, "manage": False}
+    assert cfg["auto"] == {"open": False, "manage": False, "base": "config"}
     start = T0 + 10 * H // 2
     append_reports(env.hist, LONG(start, 3), 11)
     env.now["t"] = (start + 3 * H // 2) / 1000

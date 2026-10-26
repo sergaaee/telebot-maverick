@@ -88,19 +88,19 @@ def test_auto_toggle_needs_confirmation_and_off_is_immediate(env):
     cid = add_cfg(env, "Автомод")
     env.handle_update(cb(f"a:{cid}:o"))
     assert "Включить автомод" in last_edit(env)[2] and f"ay:{cid}:o" in kb_data(last_edit(env)[3])
-    assert env.db.get_config(cid)["auto"] == {"open": False, "manage": False}                   # пока не подтвердили — выключен
+    assert env.db.get_config(cid)["auto"] == {"open": False, "manage": False, "base": "config"}                   # пока не подтвердили — выключен
     env.handle_update(cb(f"ay:{cid}:o"))
-    assert env.db.get_config(cid)["auto"] == {"open": True, "manage": False} and "✅ Открывать" in kb_str(last_edit(env)[3]) and "симуляция" in env.tg.answers[-1][1]
+    assert env.db.get_config(cid)["auto"] == {"open": True, "manage": False, "base": "config"} and "✅ Открывать" in kb_str(last_edit(env)[3]) and "симуляция" in env.tg.answers[-1][1]
     env.handle_update(cb(f"a:{cid}:m"))
     env.handle_update(cb(f"ay:{cid}:m"))
-    assert env.db.get_config(cid)["auto"] == {"open": True, "manage": True}
+    assert env.db.get_config(cid)["auto"] == {"open": True, "manage": True, "base": "config"}
     env.handle_update(cb(f"a:{cid}:o"))                                                         # включённый выключается сразу, без вопросов
-    assert env.db.get_config(cid)["auto"] == {"open": False, "manage": True} and "выключен" in env.tg.answers[-1][1]
+    assert env.db.get_config(cid)["auto"] == {"open": False, "manage": True, "base": "config"} and "выключен" in env.tg.answers[-1][1]
     assert any(x["kind"] == "auto_toggle" for x in env.db.list_auto_log(env.alice["id"]))
     env.handle_update(cb("coff"))
     assert "ВСЕХ" in last_edit(env)[2] and "offy" in kb_data(last_edit(env)[3])
     env.handle_update(cb("offy"))
-    assert env.db.get_config(cid)["auto"] == {"open": False, "manage": False} and "Мониторинг" in last_edit(env)[2]
+    assert env.db.get_config(cid)["auto"] == {"open": False, "manage": False, "base": "config"} and "Мониторинг" in last_edit(env)[2]
 
 
 def kb_str(kb):
@@ -112,7 +112,7 @@ def test_pause_resume_delete_and_foreign_configs(env):
     env.db.set_auto(env.alice["id"], cid, True, True)
     env.handle_update(cb(f"p:{cid}"))
     c = env.db.get_config(cid)
-    assert c["paused"] and c["auto"] == {"open": False, "manage": False} and "паузе" in last_edit(env)[2] and "Возобновить" in kb_str(last_edit(env)[3])
+    assert c["paused"] and c["auto"] == {"open": False, "manage": False, "base": "config"} and "паузе" in last_edit(env)[2] and "Возобновить" in kb_str(last_edit(env)[3])
     env.handle_update(cb(f"a:{cid}:o"))                                                         # на паузе автомод не включить
     assert env.tg.answers[-1][2] is True and "паузе" in env.tg.answers[-1][1] and not env.db.get_config(cid)["auto"]["open"]
     env.handle_update(cb(f"p:{cid}"))
@@ -247,7 +247,7 @@ def test_mainnet_needs_confirmation_and_disconnect_clears_key_and_auto(env, fake
     env.handle_update(cb("cdx"))
     assert "Отключить" in last_edit(env)[2] and "dxy" in kb_data(last_edit(env)[3]) and env.db.get_exchange_account(env.alice["id"])
     env.handle_update(cb("dxy"))
-    assert env.db.get_exchange_account(env.alice["id"]) is None and env.db.get_config(cid)["auto"] == {"open": False, "manage": False} and "не подключён" in last_edit(env)[2]
+    assert env.db.get_exchange_account(env.alice["id"]) is None and env.db.get_config(cid)["auto"] == {"open": False, "manage": False, "base": "config"} and "не подключён" in last_edit(env)[2]
 
 
 def test_exchange_screen_shows_account_positions_and_errors(env, monkeypatch):
@@ -374,7 +374,7 @@ def test_panic_closes_everything_and_turns_auto_off(env, fake_verify, monkeypatc
     env.handle_update(tmsg("/panic"))
     assert not called and "СТОП ВСЁ" in env.tg.texts(CHAT)[-1]                                # сначала подтверждение
     env.handle_update(cb("pny"))
-    assert called and env.db.get_config(cid)["auto"] == {"open": False, "manage": False}
+    assert called and env.db.get_config(cid)["auto"] == {"open": False, "manage": False, "base": "config"}
     assert any(x["kind"] == "panic" for x in env.db.list_auto_log(env.alice["id"], 10))
 
 
@@ -406,3 +406,59 @@ def test_digest_and_export_commands(env):
     assert "не подключён" in env.tg.texts(CHAT)[-1]
     env.handle_update(tmsg("/export"))
     assert "/export trades" in env.tg.texts(CHAT)[-1]
+
+
+def _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0):
+    from app import trading
+    env.handle_update(cb("hl:t"))
+    env.handle_update(tmsg(f"{WALLET} {KEY}", mid=840))
+    sent = []
+    monkeypatch.setattr(trading.HyperliquidAdapter, "positions", lambda self: [])
+    monkeypatch.setattr(trading.HyperliquidAdapter, "account", lambda self: {"equity": equity, "free": free, "used": equity - free})
+    monkeypatch.setattr(trading.HyperliquidAdapter, "open_market", lambda self, *a, **k: sent.append((a, k)) or {"status": "sent"})
+    return sent
+
+
+def _signal_cycle(env):
+    start = T0 + 38 * H
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    from app import monitor
+    monitor._cache.clear()
+    env.cycle()
+
+
+def test_size_from_config_deposit_vs_real_account_balance(env, fake_verify, monkeypatch):
+    sent = _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    cid = add_cfg(env, "Размер")                                                              # депозит конфига 5000, 20%, плечо 2 -> маржа 1000, объём 2000
+    env.handle_update(cb(f"ay:{cid}:o"))
+    # по умолчанию размер от депозита конфига: 5000 * 20% = 1000 $ маржи, а свободно 900 -> ордер не уходит, причина понятна
+    _signal_cycle(env)
+    assert not sent
+    skipped = [x for x in env.db.list_auto_log(env.alice["id"], 20) if x["status"] == "skipped"]
+    assert skipped and "не хватает свободной маржи" in skipped[0]["details"]["note"] and "баланс счёта" in skipped[0]["details"]["note"]
+    assert any("не хватает свободной маржи" in t for t in env.tg.texts(CHAT))
+    # база «баланс счёта»: маржа = 20% от 1000 = 200 $, объём 400 $ при том же плече 2×
+    env.handle_update(cb(f"ab:{cid}"))
+    assert env.db.get_config(cid)["auto"]["base"] == "account" and "баланса счёта" in env.tg.answers[-1][1]
+    env.db.update_config(cid, last_ts=0)
+    env.forget(cid)
+    _signal_cycle(env)
+    assert len(sent) == 1
+    assert abs(sent[0][0][2] - 400.0) < 1e-6 and abs(sent[0][0][3] - 2.0) < 1e-9
+    log = [x for x in env.db.list_auto_log(env.alice["id"], 20) if x["kind"] == "open" and x["status"] == "sent"][0]["details"]
+    assert log["size_base"] == "account" and "1 000" in log["size_note"]
+    # назад к депозиту конфига
+    env.handle_update(cb(f"ab:{cid}"))
+    assert env.db.get_config(cid)["auto"]["base"] == "config"
+
+
+def test_card_warns_when_config_deposit_far_above_real_capital(env, fake_verify, monkeypatch):
+    _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    cid = add_cfg(env, "Депозит 200к", deposit=200000)
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"c:{cid}"))
+    body = last_edit(env)[2]
+    assert "База размера входа" in body and "депозит конфига" in body and "намного больше капитала на бирже" in body
+    env.handle_update(cb(f"ab:{cid}"))
+    assert "намного больше" not in last_edit(env)[2] and "баланс счёта" in last_edit(env)[2]

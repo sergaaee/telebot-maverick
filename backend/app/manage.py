@@ -1,6 +1,9 @@
 """Управление стратегиями и автомодом — общая логика для веб-интерфейса и Telegram-бота, чтобы оба вели себя одинаково."""
 import math
+import threading
+import time
 
+from .db import DbError
 from .tradelog import trade_log
 from .trading import ExchangeError, NotConfigured, TEST_MAX_USD, forget_adapter, mask_address
 
@@ -20,9 +23,12 @@ def own_config(db, uid, config_id):
     return c
 
 
-def set_auto(db, adapter, uid, config_id, open_=None, manage=None):
+def set_auto(db, adapter, uid, config_id, open_=None, manage=None, base=None):
     own_config(db, uid, config_id)
-    new = db.set_auto(uid, config_id, open_, manage)
+    try:
+        new = db.set_auto(uid, config_id, open_, manage, base)
+    except DbError as e:
+        raise ManageError(str(e))
     db.add_auto_log(uid, config_id, "auto_toggle", None, None, "info", {"auto": new, "exchange": adapter.name})
     trade_log("auto_toggle", user=uid, config=config_id, auto=new, exchange=adapter.name, real=adapter.real, testnet=adapter.testnet)
     return new
@@ -165,3 +171,55 @@ def panic(db, adapter, uid):
     db.add_auto_log(uid, None, "panic", None, None, "error" if errors else "ok", out)
     trade_log("panic_done", "error" if errors else "warn", user=uid, **{k: v for k, v in out.items() if k != "exchange"})
     return out
+
+
+_acc, _acc_lock = {}, threading.Lock()
+
+
+def account_quick(adapter, uid, ttl=15.0):
+    """Капитал на бирже ({"equity", "free"}) с короткой памятью, чтобы страницы с автообновлением не дёргали биржу каждый раз. Нет счёта / ошибка -> None."""
+    if not adapter.real:
+        return None
+    now = time.monotonic()
+    with _acc_lock:
+        hit = _acc.get(uid)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    try:
+        a = adapter.account()
+        val = {"equity": a.get("equity"), "free": a.get("free")}
+    except (NotConfigured, ExchangeError):
+        val = None
+    with _acc_lock:
+        _acc[uid] = (now, val)
+    return val
+
+
+def sizing_warning(auto, deposit, acc):
+    """Предупреждение, если размеры считаются от депозита конфига, а на бирже капитала заметно меньше (или заметно больше)."""
+    if not acc or not acc.get("equity") or not auto or not auto.get("open") or auto.get("base") == "account":
+        return None
+    eq = acc["equity"]
+    if deposit and deposit > eq * 1.5:
+        return (f"Депозит конфига {deposit:,.0f} $ намного больше капитала на бирже {eq:,.0f} $: объём входа считается от {deposit:,.0f} $ и, скорее всего, не пройдёт "
+                f"(лимит TRADE_MAX_USD или нехватка маржи). Выберите базу размера «баланс счёта».").replace(",", " ")
+    return None
+
+
+def size_order(engine_order_size, result, add, adapter, base, acc):
+    """Размер ордера автомода -> {"notional", "margin", "note", "skip"}. base='account': маржа = доля конфига × реальный капитал; иначе — от депозита конфига.
+    Если свободной маржи на бирже не хватает, ордер не отправляется (skip с причиной), а не ждёт отказа биржи."""
+    if base == "account" and adapter.real:
+        eq = (acc or {}).get("equity")
+        if not eq or eq <= 0:
+            return {"skip": "размер от баланса счёта: не удалось получить капитал на бирже — ордер не отправлен"}
+        notional, margin = engine_order_size(result, add, equity=eq)
+        note = f"от баланса счёта {eq:,.2f} $".replace(",", " ")
+    else:
+        notional, margin = engine_order_size(result, add)
+        note = "от депозита конфига" if base != "account" else "от депозита конфига (счёт не подключён — симуляция)"
+    free = (acc or {}).get("free") if adapter.real else None
+    if free is not None and margin > free * 0.98 + 1e-9:
+        hint = "" if base == "account" else " Поставьте базу размера «баланс счёта» или уменьшите долю входа."
+        return {"skip": f"не хватает свободной маржи: нужно {margin:,.2f} $, свободно {free:,.2f} $.{hint}".replace(",", " ")}
+    return {"notional": notional, "margin": margin, "note": note}

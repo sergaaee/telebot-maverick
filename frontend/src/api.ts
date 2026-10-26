@@ -140,8 +140,8 @@ export const deleteConfig = (id: number) => request<{ ok: boolean }>(`/api/monit
 
 export const exportBotConfig = (id: number) => request<Record<string, unknown>>(`/api/monitor/configs/${id}/export`);
 
-export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean }) =>
-  request<{ auto: { open: boolean; manage: boolean } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) =>
+  request<{ auto: { open: boolean; manage: boolean; base: 'config' | 'account' } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
 
 export const autoOffAll = () => request<{ disabled: number }>('/api/monitor/auto/off', { method: 'POST' });
 
@@ -168,3 +168,6 @@ export const getPortfolio = () => request<Portfolio>('/api/portfolio', { method:
 
 export const getDigest = () => request<{ mode: 'off' | 'daily' | 'weekly'; telegram: boolean; hour_utc: number }>('/api/digest');
 export const setDigest = (mode: string) => request<{ mode: string }>('/api/digest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
+
+export const savePortfolioPrefs = (patch: { exclude?: number[]; total_deposit?: number | null }) =>
+  request<{ exclude: number[]; total_deposit: number | null }>('/api/portfolio/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
