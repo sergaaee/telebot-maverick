@@ -150,3 +150,21 @@ def test_what_if_sizing_rescales_trades_in_both_modes():
     assert abs(j["items"][1]["total_usd"] - 2000 * 0.10 * 4 * 0.05) < 1e-9        # B: плечо 4× вместо 2×
     same = build_portfolio([a, b], sizing={1: {"trade_pct": 10.0, "leverage": 2.0}})
     assert not same["items"][0]["overridden"] and same["settings"]["sizing"] == {}  # равно конфигу — не «что если»
+
+
+def test_compounding_switch_for_the_whole_portfolio():
+    # две сделки одной стратегии подряд: первая +10% на объём, вторая -10% на объём; 50% депозита в объёме (25% × 2×)
+    t = [leg(0, 10, 10.0), leg(20, 30, -10.0)]
+    a = srow(1, "A", t, deposit=1000.0, trade_pct=25.0, leverage=2.0)
+    off = build_portfolio([a], compound=False)["items"][0]
+    # без сложного процента обе сделки считаются от начальных 1000: +50 и -50
+    assert abs(off["total_usd"]) < 1e-9 and off["compound"] is False and off["cfg_compound"] is True
+    # со сложным: первая +50 -> баланс 1050, вторая 1050 × 50% × -10% = -52.5
+    cfg_off = srow(1, "A", t, deposit=1000.0, trade_pct=25.0, leverage=2.0, compound=False)
+    forced = build_portfolio([cfg_off], compound=True)
+    assert abs(forced["items"][0]["total_usd"] - (50 - 52.5)) < 1e-9 and forced["settings"]["compound"] is True      # «для всех» важнее конфига
+    # общий депозит: тот же переключатель
+    j_on = build_portfolio([a], total_deposit=2000.0, compound=True)["portfolio"]["total_usd"]
+    j_off = build_portfolio([a], total_deposit=2000.0, compound=False)["portfolio"]["total_usd"]
+    assert abs(j_off) < 1e-9 and abs(j_on - (100 - 105)) < 1e-9
+    assert build_portfolio([a])["settings"]["compound"] is None

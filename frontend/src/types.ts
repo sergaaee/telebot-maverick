@@ -591,11 +591,11 @@ export interface WalkForward {
   verdict: string;
 }
 
-export interface PfItem { id: number; name: string; symbol: string | null; paused: boolean; included: boolean; error: string | null; trade_pct?: number; leverage?: number; cfg_trade_pct?: number; cfg_leverage?: number; overridden?: boolean; liq_sim?: boolean; deposit?: number; trades?: number; winrate?: number | null; profit_factor?: number | null; total_usd?: number | null; return_pct?: number | null; sharpe?: number | null; max_dd_usd?: number; max_dd_pct?: number; max_dd_real_pct?: number | null; max_dd_real_usd?: number | null; curve?: [number, number][] }
+export interface PfItem { id: number; name: string; symbol: string | null; paused: boolean; included: boolean; error: string | null; trade_pct?: number; leverage?: number; cfg_trade_pct?: number; cfg_leverage?: number; overridden?: boolean; liq_sim?: boolean; compound?: boolean; cfg_compound?: boolean; deposit?: number; trades?: number; winrate?: number | null; profit_factor?: number | null; total_usd?: number | null; return_pct?: number | null; sharpe?: number | null; max_dd_usd?: number; max_dd_pct?: number; max_dd_real_pct?: number | null; max_dd_real_usd?: number | null; curve?: [number, number][] }
 export interface Portfolio {
   items: PfItem[];
   portfolio: { strategies: number; deposit: number; joint: boolean; total_usd: number; return_pct: number | null; max_dd_usd: number; max_dd_pct: number; max_dd_real_usd: number | null; max_dd_real_pct: number | null; min_equity_usd: number | null; max_dd_real_ts: number | null; curve: [number, number][]; trades: number; best: string | null; worst: string | null; peak_margin: number; peak_margin_pct: number | null; peak_margin_ts: number | null };
   correlation: { ids: number[]; names: string[]; matrix: (number | null)[][]; days: number | null; note: string | null };
   exposure: { symbols: { asset: string; long: number; short: number; net: number; gross: number; margin: number; configs: { name: string; side: string }[] }[]; gross: number; net: number; margin: number; leverage: number | null; margin_pct: number | null; warnings: string[]; real?: { equity: number; gross: number; leverage: number | null } };
-  settings: { exclude: number[]; total_deposit: number | null; sizing: Record<string, { trade_pct?: number; leverage?: number }> };
+  settings: { exclude: number[]; total_deposit: number | null; compound: boolean | null; sizing: Record<string, { trade_pct?: number; leverage?: number }> };
 }

@@ -169,8 +169,8 @@ export const getPortfolio = () => request<Portfolio>('/api/portfolio', { method:
 export const getDigest = () => request<{ mode: 'off' | 'daily' | 'weekly'; telegram: boolean; hour_utc: number }>('/api/digest');
 export const setDigest = (mode: string) => request<{ mode: string }>('/api/digest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
 
-export const savePortfolioPrefs = (patch: { exclude?: number[]; total_deposit?: number | null; sizing?: Record<string, { trade_pct?: number; leverage?: number }> }) =>
-  request<{ exclude: number[]; total_deposit: number | null; sizing: Record<string, { trade_pct?: number; leverage?: number }> }>('/api/portfolio/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+export const savePortfolioPrefs = (patch: { exclude?: number[]; total_deposit?: number | null; compound?: boolean | null; sizing?: Record<string, { trade_pct?: number; leverage?: number }> }) =>
+  request<{ exclude: number[]; total_deposit: number | null; compound: boolean | null; sizing: Record<string, { trade_pct?: number; leverage?: number }> }>('/api/portfolio/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
 
 export const setSizing = (configId: number, patch: { trade_pct?: number; leverage?: number; pyramid_pct?: number; pyramid_leverage?: number | null }) =>
   request<{ sizing: { trade_pct: number; leverage: number; pyramid_pct: number | null; pyramid_leverage: number | null } }>(`/api/monitor/configs/${configId}/sizing`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
