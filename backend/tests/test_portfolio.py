@@ -135,3 +135,18 @@ def test_mtm_drawdown_of_two_strategies_on_one_account_adds_up():
     assert abs(r["max_dd_real_usd"] - (100 + 50)) < 1e-9                         # обе просели в одном блоке: 10% от 1000 и 10% от 500
     p = build_portfolio([{**srow(1, "A", [{**leg(0, 3, 0.0), "entry": 100.0, "side": "long", "fills": [], "notional": 1000.0}]), "candles": btc}])
     assert p["portfolio"]["max_dd_real_pct"] is not None
+
+
+def test_what_if_sizing_rescales_trades_in_both_modes():
+    a = srow(1, "A", [leg(0, 10, 5.0)], deposit=1000.0)                         # в конфиге 10% × 2 = 20% депозита
+    b = srow(2, "B", [leg(0, 10, 5.0)], deposit=1000.0)
+    sep = build_portfolio([a, b], sizing={1: {"trade_pct": 30.0}})              # у A доля 30% вместо 10%, плечо прежнее
+    ia, ib = sep["items"]
+    assert ia["overridden"] and ia["trade_pct"] == 30 and ia["cfg_trade_pct"] == 10 and not ib["overridden"]
+    assert abs(ia["total_usd"] - 1000 * 0.30 * 2 * 0.05) < 1e-9                   # 30 $ маржи... 1000 × 30% × 2× × 5% = 30 $
+    assert sep["settings"]["sizing"] == {"1": {"trade_pct": 30.0}}
+    j = build_portfolio([a, b], total_deposit=2000.0, sizing={"2": {"leverage": 4.0}})
+    assert abs(j["items"][0]["total_usd"] - 2000 * 0.10 * 2 * 0.05) < 1e-9        # A: от общих 2000
+    assert abs(j["items"][1]["total_usd"] - 2000 * 0.10 * 4 * 0.05) < 1e-9        # B: плечо 4× вместо 2×
+    same = build_portfolio([a, b], sizing={1: {"trade_pct": 10.0, "leverage": 2.0}})
+    assert not same["items"][0]["overridden"] and same["settings"]["sizing"] == {}  # равно конфигу — не «что если»

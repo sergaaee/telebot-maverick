@@ -48,14 +48,14 @@ def test_portfolio_exports_digest_panic(auth_env):
 def test_portfolio_prefs_exclude_and_common_deposit(auth_env):
     db = auth_env
     alice, a, b = two_users(db)
-    assert a.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None}
+    assert a.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None, "sizing": {}}
     assert a.put("/api/portfolio/prefs", json={"total_deposit": -5}, headers=H_).status_code == 422
     assert a.put("/api/portfolio/prefs", json={"total_deposit": "много"}, headers=H_).status_code == 422
     assert a.put("/api/portfolio/prefs", json={"exclude": "1"}, headers=H_).status_code == 422
-    assert a.put("/api/portfolio/prefs", json={"total_deposit": 1000, "exclude": [2]}, headers=H_).json() == {"exclude": [2], "total_deposit": 1000.0}
-    assert b.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None}                  # настройки у каждого пользователя свои
+    assert a.put("/api/portfolio/prefs", json={"total_deposit": 1000, "exclude": [2]}, headers=H_).json() == {"exclude": [2], "total_deposit": 1000.0, "sizing": {}}
+    assert b.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None, "sizing": {}}                  # настройки у каждого пользователя свои
     r = a.post("/api/portfolio", headers=H_).json()
-    assert r["settings"] == {"exclude": [2], "total_deposit": 1000.0} and r["portfolio"]["joint"] and r["portfolio"]["deposit"] == 1000.0
+    assert r["settings"] == {"exclude": [2], "total_deposit": 1000.0, "sizing": {}} and r["portfolio"]["joint"] and r["portfolio"]["deposit"] == 1000.0
     assert [i["included"] for i in r["items"]] == [True, False]
     assert a.put("/api/portfolio/prefs", json={"total_deposit": None}, headers=H_).json()["total_deposit"] is None
     r2 = a.post("/api/portfolio", headers=H_).json()
@@ -81,3 +81,21 @@ def test_config_sizing_can_be_changed_per_config(auth_env):
     assert b.put("/api/monitor/configs/1/sizing", json={"leverage": 2}, headers=H_).status_code == 404                                                       # чужой конфиг
     db.update_params(1, {**db.get_config(1)["params"], "pyramid_enabled": True, "pyramid_pct": 40, "pyramid_max": 2})
     assert "места не остаётся" in a.put("/api/monitor/configs/1/sizing", json={"trade_pct": 70}, headers=H_).json()["detail"]
+
+
+def test_portfolio_what_if_sizing_does_not_touch_the_config(auth_env):
+    db = auth_env
+    alice, a, b = two_users(db)
+    base = a.post("/api/portfolio", headers=H_).json()
+    it0 = base["items"][0]
+    assert it0["trade_pct"] == 10 and it0["leverage"] == 5 and not it0["overridden"] and it0["cfg_trade_pct"] == 10
+    for bad in ({"1": {"trade_pct": 0}}, {"1": {"trade_pct": 150}}, {"1": {"leverage": 0.5}}, {"1": {"leverage": 500}}, {"x": {"leverage": 2}}, {"1": "много"}, [1]):
+        assert a.put("/api/portfolio/prefs", json={"sizing": bad}, headers=H_).status_code == 422, bad
+    assert a.put("/api/portfolio/prefs", json={"sizing": {"1": {"trade_pct": 20, "leverage": 5}}}, headers=H_).json()["sizing"] == {"1": {"trade_pct": 20.0, "leverage": 5.0}}
+    r = a.post("/api/portfolio", headers=H_).json()
+    it = r["items"][0]
+    assert it["overridden"] and it["trade_pct"] == 20 and it["cfg_trade_pct"] == 10 and r["settings"]["sizing"] == {"1": {"trade_pct": 20.0, "leverage": 5.0}}
+    assert abs(r["exposure"]["gross"] - 2 * base["exposure"]["gross"]) < 1e-6                         # доля вдвое больше -> позиция вдвое больше
+    assert db.get_config(1)["params"]["trade_pct"] == 10                                              # конфиг (и автоторговля) не тронуты
+    assert b.get("/api/portfolio/prefs").json()["sizing"] == {}
+    assert a.put("/api/portfolio/prefs", json={"sizing": {}}, headers=H_).json()["sizing"] == {}

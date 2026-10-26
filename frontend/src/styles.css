@@ -240,3 +240,4 @@ a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
 .pf-dep-input { width: 130px; } .pf-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--line); margin-right: 3px; }
 .mon-sizewarn { grid-column: 1 / -1; } .mon-base select { padding: 1px 4px; font-size: 12px; }
 .mon-sizing { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; } .mon-num { width: 56px; padding: 1px 4px; font-size: 12px; text-align: right; }
+.pf-table { max-height: 520px; } .pf-table td, .pf-table th { white-space: nowrap; } .mon-num.changed { border-color: var(--accent); color: var(--accent); } .mini-btn { padding: 0 6px; font-size: 11px; margin-left: 2px; }

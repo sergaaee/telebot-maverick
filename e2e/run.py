@@ -870,6 +870,21 @@ def scenario(pg, base, state_url):
         check("портфель: стратегию можно отключить — она выпадает из расчётов и подписана", int(pg.get_by_test_id("portfolio-page").locator(".card-value").first.inner_text()) == n_before - 1 and "не учитывается" in pg.get_by_test_id("pf-row").first.inner_text())
         pg.get_by_test_id("pf-include").first.click(); pg.wait_for_timeout(1500)
         check("портфель: и вернуть обратно", int(pg.get_by_test_id("portfolio-page").locator(".card-value").first.inner_text()) == n_before)
+    row1 = pg.get_by_test_id("pf-row").first
+    cfg_pct0 = E2E_DB.find_config(tid, "Переименован")["params"]["trade_pct"]
+    check("портфель: у каждой стратегии свои поля «% депозита» и «плечо»", pg.get_by_test_id("pf-pct").count() >= 3 and pg.get_by_test_id("pf-lev").count() >= 3 and row1.get_by_test_id("pf-pct").input_value() == f"{cfg_pct0:g}" and row1.get_by_test_id("pf-size-reset").count() == 0)
+    row1.get_by_test_id("pf-pct").fill("25"); row1.get_by_test_id("pf-pct").press("Enter"); pg.wait_for_timeout(2000)
+    row1 = pg.get_by_test_id("pf-row").first
+    check("портфель: размер «что если» подсвечен, есть сброс и «в конфиг», сам конфиг не тронут", "changed" in (row1.get_by_test_id("pf-pct").get_attribute("class") or "") and row1.get_by_test_id("pf-size-reset").count() == 1 and row1.get_by_test_id("pf-size-save").count() == 1
+          and E2E_DB.find_config(tid, "Переименован")["params"]["trade_pct"] == cfg_pct0)
+    row1.get_by_test_id("pf-size-reset").click(); pg.wait_for_timeout(1800)
+    check("портфель: ↺ возвращает размер из конфига", pg.get_by_test_id("pf-row").first.get_by_test_id("pf-size-reset").count() == 0 and "changed" not in (pg.get_by_test_id("pf-row").first.get_by_test_id("pf-pct").get_attribute("class") or ""))
+    pg.get_by_test_id("pf-row").first.get_by_test_id("pf-pct").fill("25"); pg.get_by_test_id("pf-row").first.get_by_test_id("pf-pct").press("Enter"); pg.wait_for_timeout(1800)
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("pf-row").first.get_by_test_id("pf-size-save").click(); pg.wait_for_timeout(2500)
+    check("портфель: «в конфиг» записывает размер в конфиг и снимает сценарий", E2E_DB.find_config(tid, "Переименован")["params"]["trade_pct"] == 25 and pg.get_by_test_id("pf-row").first.get_by_test_id("pf-size-save").count() == 0)
+    c_ = E2E_DB.find_config(tid, "Переименован")
+    E2E_DB.update_params(c_["id"], {**c_["params"], "trade_pct": cfg_pct0})                       # вернуть как было для следующих проверок
     pg.locator("#pf-total-deposit").fill("1000"); pg.get_by_test_id("pf-deposit").get_by_role("button", name="Применить").click(); pg.wait_for_timeout(2000)
     check("портфель: общий депозит — все стратегии торгуют с одного счёта", "с одного счёта" in pg.get_by_test_id("pf-deposit").inner_text() and "1 000" in pg.get_by_test_id("portfolio-page").inner_text().replace("\u00a0", " ").replace(",", " "), pg.get_by_test_id("pf-deposit").inner_text()[-120:])
     pg.reload(); pg.get_by_test_id("tab-portfolio").click(); pg.get_by_test_id("portfolio-page").wait_for(timeout=15000); pg.wait_for_timeout(1500)
