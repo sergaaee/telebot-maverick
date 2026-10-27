@@ -94,6 +94,15 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     value TEXT NOT NULL,
     PRIMARY KEY (user_id, key)
 );
+CREATE TABLE IF NOT EXISTS auto_retry (
+    config_id INTEGER PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
+    signal_ts INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    pyramid INTEGER NOT NULL DEFAULT 0,
+    leg INTEGER,
+    reason TEXT,
+    created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -325,6 +334,21 @@ class Database:
     def set_pref(self, user_id, key, value):
         with self.conn() as c:
             c.execute("INSERT INTO user_prefs(user_id, key, value) VALUES (?,?,?) ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (user_id, key, json.dumps(value, ensure_ascii=False)))
+
+    # ---------------- вход, который не удался: повторить при перезапуске бота ----------------
+    def set_retry(self, config_id, signal_ts, side, pyramid=False, leg=None, reason=None):
+        with self.conn() as c:
+            c.execute("INSERT INTO auto_retry(config_id, signal_ts, side, pyramid, leg, reason, created) VALUES (?,?,?,?,?,?,?) "
+                      "ON CONFLICT(config_id) DO UPDATE SET signal_ts=excluded.signal_ts, side=excluded.side, pyramid=excluded.pyramid, leg=excluded.leg, reason=excluded.reason, created=excluded.created",
+                      (config_id, int(signal_ts), side, int(bool(pyramid)), leg, (reason or "")[:300], time.time()))
+
+    def list_retries(self):
+        with self.conn() as c:
+            return [dict(r) | {"pyramid": bool(r["pyramid"])} for r in c.execute("SELECT * FROM auto_retry ORDER BY created")]
+
+    def clear_retry(self, config_id):
+        with self.conn() as c:
+            c.execute("DELETE FROM auto_retry WHERE config_id=?", (config_id,))
 
     # ---------------- служебные значения (пульс бота и т.п.) ----------------
     def set_meta(self, key, value):

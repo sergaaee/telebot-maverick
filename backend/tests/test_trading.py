@@ -194,3 +194,11 @@ def test_adapter_for_is_per_user_and_encrypted_account_roundtrip(tmp_path, monke
 def test_exchange_failures_are_wrapped():
     with pytest.raises(ExchangeError, match="сбой ticker"):
         HyperliquidAdapter(exchange=FakeEx(fail_on="ticker")).open_market("BTC/USDT:USDT", "long", 20.0, 2.0)
+
+
+def test_default_order_limit_is_5000_and_env_overrides(monkeypatch):
+    from app.trading import HyperliquidAdapter
+    monkeypatch.delenv("TRADE_MAX_USD", raising=False)
+    assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 5000.0
+    monkeypatch.setenv("TRADE_MAX_USD", "100")                                                   # старое значение из .env продолжает действовать — его нужно поменять там
+    assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 100.0

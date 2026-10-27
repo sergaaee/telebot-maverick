@@ -174,7 +174,7 @@ def preflight_open(adapter, symbol, side, add):
     try:
         positions = adapter.positions()
     except (NotConfigured, ExchangeError) as e:
-        return {"skip": f"не удалось проверить позиции на бирже ({e}) — ордер не отправлен"}
+        return {"skip": f"не удалось проверить позиции на бирже ({e}) — ордер не отправлен", "retry": True}
     base = symbol.split("/")[0]
     cur = next((p for p in positions if (p.get("symbol") or "").split("/")[0] == base), None)
     if add:
@@ -244,7 +244,7 @@ def size_order(engine_order_size, result, add, adapter, base, acc):
     if base == "account" and adapter.real:
         eq = (acc or {}).get("equity")
         if not eq or eq <= 0:
-            return {"skip": "размер от баланса счёта: не удалось получить капитал на бирже — ордер не отправлен"}
+            return {"skip": "размер от баланса счёта: не удалось получить капитал на бирже — ордер не отправлен", "retry": True}
         notional, margin = engine_order_size(result, add, equity=eq)
         note = f"от баланса счёта {eq:,.2f} $".replace(",", " ")
     else:
@@ -253,5 +253,5 @@ def size_order(engine_order_size, result, add, adapter, base, acc):
     free = (acc or {}).get("free") if adapter.real else None
     if free is not None and margin > free * 0.98 + 1e-9:
         hint = "" if base == "account" else " Поставьте базу размера «баланс счёта» или уменьшите долю входа."
-        return {"skip": f"не хватает свободной маржи: нужно {margin:,.2f} $, свободно {free:,.2f} $.{hint}".replace(",", " ")}
+        return {"skip": f"не хватает свободной маржи: нужно {margin:,.2f} $, свободно {free:,.2f} $.{hint}".replace(",", " "), "retry": True}
     return {"notional": notional, "margin": margin, "note": note}
