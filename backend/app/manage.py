@@ -25,10 +25,15 @@ def own_config(db, uid, config_id):
 
 def set_auto(db, adapter, uid, config_id, open_=None, manage=None, base=None):
     own_config(db, uid, config_id)
+    was = db.find_config(uid, str(config_id))
     try:
         new = db.set_auto(uid, config_id, open_, manage, base)
     except DbError as e:
         raise ManageError(str(e))
+    if new and new["open"] and not was["auto"]["open"] and was["catchup"]["on"]:       # автомод «открывать» включили при включённом «догнать сигнал» — взводим один заход
+        db.set_catchup(uid, config_id, armed=True)
+    elif new and not new["open"]:
+        db.set_catchup(uid, config_id, armed=False)
     db.add_auto_log(uid, config_id, "auto_toggle", None, None, "info", {"auto": new, "exchange": adapter.name})
     trade_log("auto_toggle", user=uid, config=config_id, auto=new, exchange=adapter.name, real=adapter.real, testnet=adapter.testnet)
     return new
@@ -64,6 +69,24 @@ def set_sizing(db, adapter, uid, config_id, **new):
     db.add_auto_log(uid, c["id"], "sizing", None, None, "info", {"from": old, "to": upd, "exchange": adapter.name})
     trade_log("sizing", user=uid, config=c["id"], name=c["name"], old=old, new=upd)
     return {k: params.get(k) for k in SIZING_KEYS}
+
+
+def set_catchup(db, adapter, uid, config_id, on=None, age_min=None, move_pct=None):
+    """«Догнать свежий сигнал»: при включении автомода (или самой этой опции при уже включённом автомоде) бот один раз входит по последнему сигналу, если он не старше age_min минут
+    и цена не ушла в сторону прибыли больше чем на move_pct % от цены сигнала (то есть вход не хуже сигнального). Выключено по умолчанию."""
+    c = own_config(db, uid, config_id)
+    for name, v, lo, hi in (("age_min", age_min, 0.0, 240.0), ("move_pct", move_pct, 0.0, 5.0)):
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not (lo <= v <= hi) or (name == "age_min" and v <= 0)):
+            raise ManageError("Возраст сигнала — от 1 до 240 минут, допустимое движение цены в прибыль — от 0 до 5 %")
+    cur = c["catchup"]
+    new = db.set_catchup(uid, config_id, on, age_min, move_pct)
+    if on and not cur["on"] and c["auto"]["open"]:
+        new = db.set_catchup(uid, config_id, armed=True)
+    elif on is False:
+        new = db.set_catchup(uid, config_id, armed=False)
+    db.add_auto_log(uid, config_id, "catchup_cfg", None, None, "info", {"catchup": new, "exchange": adapter.name})
+    trade_log("catchup_cfg", user=uid, config=config_id, catchup=new)
+    return new
 
 
 def auto_off_all(db, uid):

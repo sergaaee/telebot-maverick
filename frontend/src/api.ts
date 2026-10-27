@@ -174,3 +174,6 @@ export const savePortfolioPrefs = (patch: { exclude?: number[]; total_deposit?: 
 
 export const setSizing = (configId: number, patch: { trade_pct?: number; leverage?: number; pyramid_pct?: number; pyramid_leverage?: number | null }) =>
   request<{ sizing: { trade_pct: number; leverage: number; pyramid_pct: number | null; pyramid_leverage: number | null } }>(`/api/monitor/configs/${configId}/sizing`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+
+export const setCatchup = (configId: number, patch: { on?: boolean; age_min?: number; move_pct?: number }) =>
+  request<{ catchup: { on: boolean; age_min: number; move_pct: number; armed: boolean } }>(`/api/monitor/configs/${configId}/catchup`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });

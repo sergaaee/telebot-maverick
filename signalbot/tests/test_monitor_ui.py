@@ -579,3 +579,72 @@ def test_failed_reversal_close_does_not_open_on_top_of_old_position(env, fake_ve
     _signal_cycle(env)
     assert not sent                                                                        # новую позицию поверх нерешённой старой не открываем
     assert [r["config_id"] for r in env.db.list_retries()] == [cid] and any("не удалось закрыть встречную позицию" in t for t in env.tg.texts(CHAT))
+
+
+def _signal_while_auto_off(env, fake_verify, monkeypatch, name, **extra):
+    """Сигнал приходит, пока автомод выключен: уведомление есть, ордера нет, last_ts сдвинут (обычное поведение)."""
+    sent = _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    cid = add_cfg(env, name, **extra)
+    env.handle_update(cb(f"ab:{cid}"))                                                       # размер от баланса счёта — маржи хватает
+    _signal_cycle(env)
+    assert not sent
+    return sent, cid
+
+
+def test_catchup_enters_on_fresh_signal_when_auto_is_switched_on(env, fake_verify, monkeypatch):
+    sent, cid = _signal_while_auto_off(env, fake_verify, monkeypatch, "Догнать")
+    assert env.db.get_config(cid)["catchup"]["on"] is False
+    env.handle_update(cb(f"ay:{cid}:o"))                                                     # опция выключена (по умолчанию): включение автомода ничего не догоняет
+    env.cycle()
+    assert not sent and not any("догоняю" in t for t in env.tg.texts(CHAT))
+    env.handle_update(cb(f"a:{cid}:o"))                                                      # снова выключаем автомод
+    env.handle_update(tmsg(f"/catchup {cid} on 120 0.1"))
+    assert env.db.get_config(cid)["catchup"] == {"on": True, "age_min": 120.0, "move_pct": 0.1, "armed": False}
+    assert "ВКЛ" in env.tg.texts(CHAT)[-1] and "при включении автомода" in env.tg.texts(CHAT)[-1]
+    env.handle_update(cb(f"ay:{cid}:o"))                                                     # включили автомод -> взведено
+    assert env.db.get_config(cid)["catchup"]["armed"] is True
+    env.cycle()
+    assert len(sent) == 1 and sent[0][0][1] == "long"
+    assert any("догоняю сигнал" in t for t in env.tg.texts(CHAT)) and env.db.get_config(cid)["catchup"]["armed"] is False
+    env.cycle()
+    assert len(sent) == 1                                                                    # один заход, повторов нет
+
+
+def test_catchup_refuses_old_signal_or_price_already_in_profit(env, fake_verify, monkeypatch):
+    sent, cid = _signal_while_auto_off(env, fake_verify, monkeypatch, "Не догонять")
+    env.handle_update(tmsg(f"/catchup {cid} on 10 0.1"))                                    # сигнал старше 10 минут
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert not sent and any("мин назад, а допустимо не больше 10" in t for t in env.tg.texts(CHAT))
+    assert any(x["kind"] == "catchup" and x["status"] == "skipped" for x in env.db.list_auto_log(env.alice["id"], 10))
+    # свежесть позволяет, но цена ушла в сторону прибыли больше чем на 0.1% от цены сигнала
+    env.handle_update(cb(f"a:{cid}:o"))
+    env.handle_update(tmsg(f"/catchup {cid} on 240 0.1"))
+    env.engine.price_fn = lambda sym: 10_000.0
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert not sent and any("ушла в сторону прибыли" in t for t in env.tg.texts(CHAT))
+    # цена ниже цены сигнала (для лонга это «в сторону убытка») — вход не хуже сигнального, догоняем
+    env.handle_update(cb(f"a:{cid}:o"))
+    env.engine.price_fn = lambda sym: 50.0
+    env.handle_update(cb(f"cu:{cid}"))                                                       # выключить опцию кнопкой
+    env.handle_update(cb(f"cu:{cid}"))                                                       # и включить снова (автомод выключен -> не взводится)
+    assert env.db.get_config(cid)["catchup"]["on"] and not env.db.get_config(cid)["catchup"]["armed"]
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert len(sent) == 1
+
+
+def test_catchup_toggled_on_while_auto_is_already_enabled_fires_immediately(env, fake_verify, monkeypatch):
+    sent, cid = _signal_while_auto_off(env, fake_verify, monkeypatch, "Позже")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert not sent
+    env.handle_update(tmsg(f"/catchup {cid} on 120 0.1"))                                    # автомод уже включён -> взводится сразу
+    assert env.db.get_config(cid)["catchup"]["armed"] is True and "проверяю сигнал" in env.tg.texts(CHAT)[-1]
+    env.cycle()
+    assert len(sent) == 1
+    env.handle_update(tmsg("/catchup"))
+    assert "Использование" in env.tg.texts(CHAT)[-1]
+    env.handle_update(tmsg(f"/catchup {cid} on 0 0.1"))
+    assert "от 1 до 240" in env.tg.texts(CHAT)[-1] and env.db.get_config(cid)["catchup"]["age_min"] == 120.0

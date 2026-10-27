@@ -165,6 +165,8 @@ class Database:
                 c.execute("ALTER TABLE configs ADD COLUMN auto TEXT")
             if "ready" not in cols:          # состояние «ждёт подтверждения»: NULL = ещё не фиксировали (первое сообщение не шлём)
                 c.execute("ALTER TABLE configs ADD COLUMN ready TEXT")
+            if "catchup" not in cols:        # «догнать свежий сигнал при включении автомода»: JSON {"on", "age_min", "move_pct", "armed"}; NULL = выключено
+                c.execute("ALTER TABLE configs ADD COLUMN catchup TEXT")
             if "fill_ts" not in cols:        # база от версии до уведомлений об исполнениях: NULL = «ещё не фиксировали», прошлые исполнения не присылаем
                 c.execute("ALTER TABLE configs ADD COLUMN fill_ts INTEGER")
 
@@ -373,6 +375,19 @@ class Database:
             c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps(new), cfg_id))
             return new
 
+    def set_catchup(self, user_id, cfg_id, on=None, age_min=None, move_pct=None, armed=None):
+        """Настройки «догнать свежий сигнал»: on — включено, age_min — не старше стольких минут, move_pct — цена не должна уйти в сторону прибыли больше чем на столько %,
+        armed — «взведено»: бот при ближайшей проверке один раз попробует догнать сигнал и снимет отметку."""
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM configs WHERE id=? AND user_id=?", (cfg_id, user_id)).fetchone()
+            if not row:
+                return None
+            cur = self._cfg(row)["catchup"]
+            new = {"on": cur["on"] if on is None else bool(on), "age_min": cur["age_min"] if age_min is None else float(age_min),
+                   "move_pct": cur["move_pct"] if move_pct is None else float(move_pct), "armed": cur["armed"] if armed is None else bool(armed)}
+            c.execute("UPDATE configs SET catchup=? WHERE id=?", (json.dumps(new), cfg_id))
+            return new
+
     def disable_all_auto(self, user_id):
         """Выключает открытие и управление у всех конфигов пользователя (выбранная база размера сохраняется). -> у скольких конфигов автомод был включён."""
         n = 0
@@ -382,6 +397,7 @@ class Database:
                 if a["open"] or a["manage"]:
                     n += 1
                 c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps({"open": False, "manage": False, "base": a["base"]}) if a["base"] != "config" else None, row["id"]))
+                c.execute("UPDATE configs SET catchup=json_set(COALESCE(catchup, '{}'), '$.armed', json('false')) WHERE id=? AND catchup IS NOT NULL", (row["id"],))
         return n
 
     def add_auto_log(self, user_id, config_id, kind, symbol, side, status, details):
@@ -489,6 +505,11 @@ class Database:
         except ValueError:
             a = {}
         # автомод выключен, пока явно не включён; base — от чего считать размер входа: config (депозит из конфига, как в бэктесте) или account (реальный капитал на бирже)
+        try:
+            cu = json.loads(d.get("catchup") or "{}")
+        except ValueError:
+            cu = {}
+        d["catchup"] = {"on": bool(cu.get("on")), "age_min": float(cu.get("age_min") or 15.0), "move_pct": float(cu["move_pct"]) if cu.get("move_pct") is not None else 0.1, "armed": bool(cu.get("armed"))}
         d["auto"] = {"open": bool(a.get("open")), "manage": bool(a.get("manage")), "base": a.get("base") if a.get("base") in ("config", "account") else "config"}
         return d
 
@@ -525,7 +546,7 @@ class Database:
         with self.conn() as c:
             old = self._by_name(c, user_id, name)
             if old:
-                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, auto=NULL, error=NULL, updated=? WHERE id=?",
+                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, auto=NULL, catchup=NULL, error=NULL, updated=? WHERE id=?",
                           (json.dumps(params, ensure_ascii=False), str(tf), now, old["id"]))
                 cid, created = old["id"], False
             else:

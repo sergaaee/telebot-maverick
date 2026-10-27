@@ -24,7 +24,7 @@ from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
 from .walkforward import run_walkforward
 from . import manage as manage_mod
-from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, set_sizing, test_close, test_open)
+from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, set_catchup, set_sizing, test_close, test_open)
 
 
 def _adapter(request, db):
@@ -344,7 +344,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         Это расчёт стратегии по свечам, а не позиции на бирже."""
         uid = request.state.user["id"]
         entries = [{**evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn),
-                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"]} for c in db.list_configs(uid)]
+                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "catchup": c["catchup"]} for c in db.list_configs(uid)]
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
         return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(), "bot": watchdog.bot_status(db),
@@ -407,6 +407,12 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         """Размер входа конфига: trade_pct — % депозита (маржа) на вход, leverage — плечо; при пирамидинге ещё pyramid_pct и pyramid_leverage. Действует на новые входы и на все расчёты."""
         new = {k: body[k] for k in ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage") if k in body}
         return {"sizing": _guard(set_sizing, db, _adapter(request, db), request.state.user["id"], config_id, **new)}
+
+    @app.put("/api/monitor/configs/{config_id}/catchup")
+    def catchup_ep(config_id: int, request: Request, body: dict = Body(...)):
+        """«Догнать свежий сигнал»: on — включить, age_min — не старше стольких минут, move_pct — цена не ушла в прибыль больше чем на столько % от цены сигнала."""
+        new = _guard(set_catchup, db, _adapter(request, db), request.state.user["id"], config_id, body.get("on"), body.get("age_min"), body.get("move_pct"))
+        return {"catchup": new}
 
     @app.post("/api/monitor/auto/off")
     def auto_off(request: Request):
