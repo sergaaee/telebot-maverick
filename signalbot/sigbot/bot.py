@@ -242,6 +242,29 @@ class SignalService:
         self.forget(c["id"])
         self.send(chat, f"✅ <b>#{c['id']} {esc(c['name'])}</b>: теперь {r['trade_pct']:g}% депозита × {r['leverage']:g}× (объём {r['trade_pct'] * r['leverage']:g}% депозита). Новые входы пойдут с этим размером; открытые позиции не меняются.")
 
+    def cmd_catchup(self, chat, user, arg):
+        """/catchup № on|off [минут [% движения]] — при включении автомода бот входит по свежему сигналу: не старше N минут, цена не ушла в прибыль больше чем на X %."""
+        parts = arg.replace(",", ".").replace("%", " ").split()
+        if len(parts) < 2 or parts[1].lower() not in ("on", "off", "вкл", "выкл"):
+            self.send(chat, "Использование: /catchup № on|off [минут [%]]\nПример: /catchup 3 on 15 0.1 — догонять сигнал не старше 15 мин, если цена не ушла в прибыль больше чем на 0.1%.")
+            return
+        c = self._cfg(chat, user, parts[0].lstrip("#"))
+        if not c:
+            return
+        on = parts[1].lower() in ("on", "вкл")
+        try:
+            age = float(parts[2]) if len(parts) > 2 else None
+            mv = float(parts[3]) if len(parts) > 3 else None
+            cu = manage.set_catchup(self.db, self.adapter_for(user["id"]), user["id"], c["id"], on, age, mv)
+        except ValueError:
+            self.send(chat, "Минуты и процент — числа: /catchup 3 on 15 0.1")
+            return
+        except manage.ManageError as e:
+            self.send(chat, f"⚠️ {esc(str(e))}")
+            return
+        self.send(chat, f"⏩ <b>#{c['id']} {esc(c['name'])}</b>: догнать свежий сигнал — {'ВКЛ' if cu['on'] else 'выкл'} (не старше {cu['age_min']:g} мин, цена не дальше {cu['move_pct']:g}% в прибыль)."
+                  + (" Автомод «открывать» включён — проверяю сигнал при ближайшей проверке." if cu["armed"] else (" Сработает при включении автомода «открывать»." if cu["on"] else "")))
+
     def cmd_digest(self, chat, user, arg):
         """Регулярная сводка: /digest daily — каждый день, /digest weekly — по понедельникам, /digest off — выключить, /digest now — прислать сейчас."""
         a = arg.strip().lower()
@@ -579,7 +602,7 @@ class SignalService:
     def _process(self, cfg, user, force, memo):
         p, chat = cfg["params"], user["telegram_id"]
         fp = (fingerprint(self.s, p), int(self.clock() // FILL_CHECK_SEC))     # исполнения зависят от свечей, которые обновляются независимо от истории отчётов — пересчёт раз в 5 минут
-        if not force and cfg["baseline"] and self._fp.get(cfg["id"]) == fp:
+        if not force and cfg["baseline"] and self._fp.get(cfg["id"]) == fp and not cfg["catchup"]["armed"]:
             return
         res, warn = self._evaluate(p, memo, user)
         if cfg["id"] in self._retry_ids:                         # вход, который не удался до перезапуска
@@ -615,6 +638,10 @@ class SignalService:
             self._send_fills(cfg, res, chat, label, upd)             # исполнения в счётчик «сигналов» (alerts) не входят
             self._send_ready(cfg, res, chat, label, upd, entered=sent > 0)
         self.db.update_config(cfg["id"], **upd)
+        if cfg["catchup"]["armed"]:                                  # «догнать свежий сигнал»: один заход после включения автомода
+            self.db.set_catchup(cfg["user_id"], cfg["id"], armed=False)
+            if cfg["auto"]["open"] and cfg["catchup"]["on"]:
+                self._catch_up(cfg, res, chat)
         self._fp[cfg["id"]] = fp
         # окна свечей топ-коинов для статистики докачиваются в конце цикла, с ограничением по времени (карточка и сигналы от них не зависят)
         if p.get("top_enabled"):
@@ -690,6 +717,44 @@ class SignalService:
             self._open_failed(cfg, sig, add, r.get("error"))
         else:
             self.db.clear_retry(cfg["id"])
+
+    def _catch_up(self, cfg, res, chat):
+        """Автомод включён при включённой опции «догнать сигнал»: входим по ПОСЛЕДНЕМУ сигналу, если он свеж (не старше age_min минут), по расчёту позиция по нему ещё открыта
+        и цена не ушла в сторону прибыли больше чем на move_pct % от цены сигнала — иначе вход был бы заметно хуже сигнального. Первая нога позиции; доборы не догоняются."""
+        cu, p = cfg["catchup"], res["params"]
+        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
+        taken = [x for x in res["last_signals"] if x["taken"] and not x["trend_blocked"]]
+        if not taken:
+            self.send(chat, f"⏩ {name}: догонять нечего — среди последних сигналов нет такого, по которому стратегия входила бы.")
+            return
+        sig = taken[-1]
+        trade = next((t for t in res["trades"] if t["signal_ts"] == sig["ts"]), None)
+        age = (self.clock() * 1000 - sig["ts"]) / 60000
+        why = None
+        if trade is None or trade.get("leg", 1) > 1:
+            why = "последний сигнал — добор к уже открытой позиции, догонять нечего"
+        elif age > cu["age_min"]:
+            why = f"последний сигнал {fm.ts_str(sig['ts'])} — {age:.0f} мин назад, а допустимо не больше {cu['age_min']:g}"
+        elif trade["reason"] != "OPEN":
+            why = f"по расчёту стратегии позиция по сигналу {fm.ts_str(sig['ts'])} уже закрыта ({trade['reason']})"
+        price = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
+        move = None
+        if not why:
+            if not price:
+                why = "не удалось получить текущую цену — не могу проверить, не ушла ли она"
+            else:
+                d = 1 if sig["side"] == "long" else -1
+                move = d * (price / trade["entry"] - 1) * 100                     # + — цена ушла в сторону прибыли, − — в сторону убытка (вход даже лучше сигнального)
+                if move > cu["move_pct"] + 1e-9:
+                    why = f"цена уже ушла в сторону прибыли на {move:.2f}% от цены сигнала ({trade['entry']:g} → {price:g}), допустимо не больше {cu['move_pct']:g}%"
+        trade_log("auto_catchup", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], signal_ts=sig["ts"], side=sig["side"], age_min=round(age, 1), move_pct=None if move is None else round(move, 3), skipped=why)
+        if why:
+            self.db.add_auto_log(cfg["user_id"], cfg["id"], "catchup", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": why})
+            self.send(chat, f"⏩ {name}: вход по свежему сигналу не выполнен — {esc(why)}.")
+            return
+        plan = self.engine.plan(sig["side"], price, p["tps"], p["sl_pct"])
+        self.send(chat, f"⏩ {name}: догоняю сигнал {'в лонг' if sig['side'] == 'long' else 'в шорт'} от {fm.ts_str(sig['ts'])} ({age:.0f} мин назад, цена {price:g}, от цены сигнала {fm.pct(move, 2)}).")
+        self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": False, "leg": 1}, plan)
 
     def _open_failed(self, cfg, sig, add, reason):
         """Вход не удался: запоминаем сигнал, чтобы повторить при перезапуске бота (пока он свеж), и сообщаем владельцу."""

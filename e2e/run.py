@@ -843,6 +843,13 @@ def scenario(pg, base, state_url):
     card("Переименован").get_by_test_id("mon-pct").fill("200"); card("Переименован").get_by_test_id("mon-sizing-save").click(); pg.wait_for_timeout(1000)
     check("доля больше 100% отклоняется с понятной ошибкой, значение в базе прежнее", E2E_DB.find_config(tid, "Переименован")["params"]["trade_pct"] == 20 and pg.locator(".banner.error").count() >= 1)
     card("Переименован").get_by_test_id("mon-pct").fill("10"); card("Переименован").get_by_test_id("mon-lev").fill("5"); card("Переименован").get_by_test_id("mon-sizing-save").click(); pg.wait_for_timeout(1500)
+    cu_ = card("Переименован").get_by_test_id("mon-catchup")
+    check("«догнать свежий сигнал»: по умолчанию выключено, есть «?» и параметры (15 мин, 0.1%)", not cu_.get_by_test_id("mon-catchup-on").is_checked() and cu_.locator(".help").count() == 1 and cu_.get_by_test_id("mon-catchup-age").input_value() == "15" and cu_.get_by_test_id("mon-catchup-move").input_value() == "0.1")
+    cu_.get_by_test_id("mon-catchup-age").fill("30"); cu_.get_by_test_id("mon-catchup-save").click(); pg.wait_for_timeout(1500)
+    card("Переименован").get_by_test_id("mon-catchup-on").click(); pg.wait_for_timeout(1500)
+    c_cu = E2E_DB.find_config(tid, "Переименован")["catchup"]
+    check("настройки «догнать сигнал» сохраняются в конфиге (включено, 30 мин, 0.1%)", c_cu["on"] and c_cu["age_min"] == 30.0 and c_cu["move_pct"] == 0.1 and card("Переименован").get_by_test_id("mon-catchup-on").is_checked())
+    card("Переименован").get_by_test_id("mon-catchup-on").click(); pg.wait_for_timeout(1000)
     check("кнопка «СТОП ВСЁ» с подсказкой", pg.get_by_test_id("panic").is_visible())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_test_id("panic").click(); pg.get_by_test_id("mon-msg").filter(has_text="СТОП ВСЁ").wait_for(timeout=10000)
@@ -887,7 +894,7 @@ def scenario(pg, base, state_url):
     E2E_DB.update_params(c_["id"], {**c_["params"], "trade_pct": cfg_pct0})                       # вернуть как было для следующих проверок
     pg.locator("#pf-total-deposit").fill("1000"); pg.get_by_test_id("pf-deposit").get_by_role("button", name="Применить").click(); pg.wait_for_timeout(2000)
     check("портфель: общий депозит — все стратегии торгуют с одного счёта", "с одного счёта" in pg.get_by_test_id("pf-deposit").inner_text() and "1 000" in pg.get_by_test_id("portfolio-page").inner_text().replace("\u00a0", " ").replace(",", " "), pg.get_by_test_id("pf-deposit").inner_text()[-120:])
-    pg.reload(); pg.get_by_test_id("tab-portfolio").click(); pg.get_by_test_id("portfolio-page").wait_for(timeout=15000); pg.wait_for_timeout(1500)
+    pg.reload(); pg.get_by_test_id("tab-portfolio").click(); pg.get_by_test_id("portfolio-page").get_by_text("Стратегий в портфеле").wait_for(timeout=60000); pg.wait_for_timeout(800)
     check("общий депозит запомнился на сервере", pg.locator("#pf-total-deposit").input_value() == "1000")
     pg.get_by_test_id("pf-deposit").get_by_role("button", name="У каждой свой").click(); pg.wait_for_timeout(1500)
     check("сброс: снова у каждой свой депозит", pg.locator("#pf-total-deposit").input_value() == "" and "депозит из её конфига" in pg.get_by_test_id("pf-deposit").inner_text())

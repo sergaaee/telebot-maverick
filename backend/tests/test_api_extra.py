@@ -111,3 +111,24 @@ def test_portfolio_compounding_switch_for_all(auth_env):
     assert db.get_config(1)["params"].get("compound", True) is True                                       # конфиги не тронуты
     assert a.put("/api/portfolio/prefs", json={"compound": None}, headers=H_).json()["compound"] is None
     assert a.post("/api/portfolio", headers=H_).json()["items"][0]["compound"] is True
+
+
+def test_catchup_settings_and_arming(auth_env):
+    db = auth_env
+    alice, a, b = two_users(db)
+    e = a.post("/api/monitor", json={}, headers=H_).json()["entries"][0]
+    assert e["catchup"] == {"on": False, "age_min": 15.0, "move_pct": 0.1, "armed": False}                    # по умолчанию выключено
+    r = a.put("/api/monitor/configs/1/catchup", json={"on": True, "age_min": 20, "move_pct": 0.2}, headers=H_).json()["catchup"]
+    assert r == {"on": True, "age_min": 20.0, "move_pct": 0.2, "armed": False}                                 # автомод выключен — пока не взводится
+    a.put("/api/monitor/configs/1/auto", json={"open": True}, headers=H_)
+    assert db.get_config(1)["catchup"]["armed"] is True                                                         # включили автомод -> взведено
+    a.put("/api/monitor/configs/1/auto", json={"open": False}, headers=H_)
+    assert db.get_config(1)["catchup"]["armed"] is False                                                        # выключили -> снято
+    a.put("/api/monitor/configs/1/auto", json={"open": True}, headers=H_)
+    a.post("/api/panic", json={"confirm": True}, headers=H_)
+    assert db.get_config(1)["catchup"]["armed"] is False and db.get_config(1)["catchup"]["on"] is True         # СТОП ВСЁ снимает «взведено», настройка остаётся
+    for bad in ({"age_min": 0}, {"age_min": 500}, {"move_pct": -1}, {"move_pct": 9}, {"age_min": "много"}):
+        assert a.put("/api/monitor/configs/1/catchup", json=bad, headers=H_).status_code == 422, bad
+    assert b.put("/api/monitor/configs/1/catchup", json={"on": True}, headers=H_).status_code == 404
+    a.put("/api/monitor/configs/1/catchup", json={"on": False}, headers=H_)
+    assert db.get_config(1)["catchup"]["on"] is False

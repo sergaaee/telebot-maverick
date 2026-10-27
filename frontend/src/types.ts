@@ -524,6 +524,7 @@ export interface MonitorEntry {
   alerts?: number;
   created?: number;
   auto: { open: boolean; manage: boolean; base?: 'config' | 'account' } | null;
+  catchup?: { on: boolean; age_min: number; move_pct: number; armed: boolean };
   paused: boolean;
   error?: string | null;
   price?: number | null;

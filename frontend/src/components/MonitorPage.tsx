@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, closeTestPosition, panicStop, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
+import { autoOffAll, closeTestPosition, panicStop, setCatchup, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
 import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
@@ -279,6 +279,38 @@ function SizingEditor({ e, exchange, onSaved, onError }: { e: MonitorEntry; exch
   );
 }
 
+function CatchupEditor({ e, onSaved, onError }: { e: MonitorEntry; onSaved: () => void; onError: (m: string) => void }) {
+  const cu = e.catchup;
+  const [age, setAge] = useState('');
+  const [mv, setMv] = useState('');
+  useEffect(() => {
+    if (!cu) return;
+    setAge(String(cu.age_min));
+    setMv(String(cu.move_pct));
+  }, [cu?.age_min, cu?.move_pct]);                                  // eslint-disable-line react-hooks/exhaustive-deps
+  if (!cu || e.config_id == null) return null;
+  const n = (v: string) => Number(v.replace(',', '.'));
+  const dirty = n(age) !== cu.age_min || n(mv) !== cu.move_pct;
+  const save = async (patch: { on?: boolean; age_min?: number; move_pct?: number }) => {
+    try {
+      await setCatchup(e.config_id!, patch);
+      onSaved();
+    } catch (x) {
+      onError(x instanceof Error ? x.message : String(x));
+    }
+  };
+  return (
+    <div className="mon-sizing" data-testid="mon-catchup">
+      <label title={HELP.catchup}><input type="checkbox" checked={cu.on} disabled={e.paused} onChange={(ev) => void save({ on: ev.target.checked, age_min: n(age), move_pct: n(mv) })} data-testid="mon-catchup-on" /> догнать свежий сигнал<Help text={HELP.catchup} /></label>
+      <span className="muted small">не старше</span>
+      <input className="mon-num" inputMode="decimal" value={age} onChange={(ev) => setAge(ev.target.value)} aria-label="Не старше, минут" data-testid="mon-catchup-age" /> <span className="small">мин, цена не ушла в прибыль больше</span>
+      <input className="mon-num" inputMode="decimal" value={mv} onChange={(ev) => setMv(ev.target.value)} aria-label="Допустимое движение цены в прибыль, %" data-testid="mon-catchup-move" /> <span className="small">%</span>
+      {dirty && <button type="button" className="ghost" onClick={() => void save({ age_min: n(age), move_pct: n(mv) })} data-testid="mon-catchup-save">Применить</button>}
+      {cu.armed && <span className="muted small">проверю сигнал при ближайшей проверке…</span>}
+    </div>
+  );
+}
+
 function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause, onSaved, onError }: {
   e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange']; account?: MonitorResponse['account'];
   onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => void; onPause: () => void; onSaved: () => void; onError: (m: string) => void;
@@ -310,6 +342,7 @@ function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause, onSav
       </span>
       {sizeWarn && <div className="warn-text small mon-sizewarn" data-testid="mon-sizewarn">⚠️ Депозит конфига {fmtUsd(dep ?? 0)} намного больше капитала на бирже {fmtUsd(account!.equity ?? 0)}: объём входа считается от {fmtUsd(dep ?? 0)} и, скорее всего, не пройдёт. Выберите «размер от баланса счёта».</div>}
       <SizingEditor e={e} exchange={exchange} onSaved={onSaved} onError={onError} />
+      <CatchupEditor e={e} onSaved={onSaved} onError={onError} />
       <span className="mon-btns">
         <button type="button" className="ghost" onClick={onPause} data-testid="mon-pause">{e.paused ? '▶ Возобновить' : '⏸ Пауза'}</button>
         <button type="button" className="ghost" onClick={onToggleOpen} aria-expanded={open} data-testid="mon-more">{open ? 'Свернуть ▴' : 'Подробнее ▾'}</button>
