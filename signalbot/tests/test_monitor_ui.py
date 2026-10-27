@@ -488,3 +488,94 @@ def test_sizing_per_config_via_command_and_buttons(env):
     assert "не найден" in env.tg.texts(CHAT)[-1].lower()
     env.handle_update(tmsg(f"/size {cid}"))
     assert "размер входа" in env.tg.texts(CHAT)[-1]
+
+
+def _restart(env):
+    """Новый экземпляр бота на той же базе: как перезапуск процесса."""
+    return type(env)(env.s, env.tg, env.db, env.engine, env.b, clock=lambda: env.now["t"])
+
+
+def test_failed_entry_is_retried_after_restart(env, fake_verify, monkeypatch):
+    from app import trading
+    sent = _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    state = {"fail": True}
+
+    def open_market(self, *a, **k):
+        if state["fail"]:
+            raise trading.ExchangeError("Объём 1000.84 $ больше лимита TRADE_MAX_USD=100 $ — ордер не отправлен.")
+        sent.append((a, k))
+        return {"status": "sent"}
+
+    monkeypatch.setattr(trading.HyperliquidAdapter, "open_market", open_market)
+    cid = add_cfg(env, "Повтор")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))                                                       # размер от баланса счёта: маржи хватает
+    _signal_cycle(env)
+    assert not sent and [x["status"] for x in env.db.list_auto_log(env.alice["id"], 5) if x["kind"] == "open"] == ["error"]
+    assert [r["config_id"] for r in env.db.list_retries()] == [cid]
+    assert any("не выполнен" in t and "после перезапуска" in t for t in env.tg.texts(CHAT))
+    env.cycle()                                                                              # без перезапуска бот ничего не повторяет (не долбит биржу каждую минуту)
+    assert not sent
+    # перезапуск: лимит поправили -> вход повторяется один раз
+    state["fail"] = False
+    env2 = _restart(env)
+    assert env2._retry_ids == {cid}
+    env2.cycle()
+    assert len(sent) == 1 and sent[0][0][1] == "long" and env.db.list_retries() == []
+    assert any("повторяю вход" in t for t in env.tg.texts(CHAT))
+    assert [x["status"] for x in env.db.list_auto_log(env.alice["id"], 10) if x["kind"] == "open"][:1] == ["sent"]
+    env3 = _restart(env)
+    env3.cycle()
+    assert len(sent) == 1                                                                    # ещё один перезапуск ничего не повторяет
+
+
+def test_retry_is_dropped_when_signal_is_stale_or_already_closed_or_position_exists(env, fake_verify, monkeypatch):
+    from app import trading
+    sent = _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    cid = add_cfg(env, "Не повторять")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    # 1) сигнал устарел
+    env.db.set_retry(cid, (env.now["t"] - 4 * 3600) * 1000, "long", False, 1, "ошибка")
+    env2 = _restart(env)
+    env2.cycle()
+    assert len(sent) == 1 and "устарел" in env.tg.texts(CHAT)[-1] and env.db.list_retries() == []           # (одна отправка — исходный вход)
+    # 2) на бирже уже есть позиция (первая попытка на самом деле прошла) -> дубль не открывается
+    monkeypatch.setattr(trading.HyperliquidAdapter, "positions", lambda self: [{"symbol": "BTC/USDC:USDC", "side": "long", "size": 0.01}])
+    env.db.set_retry(cid, (env.now["t"] - 600) * 1000, "long", False, 1, "ответ потерялся")
+    env3 = _restart(env)
+    env3.cycle()
+    assert len(sent) == 1 and "уже есть позиция" in env.tg.texts(CHAT)[-1] and env.db.list_retries() == []
+    # 3) автомод «открывать» выключен — повтор молча снимается
+    env.handle_update(cb(f"a:{cid}:o"))
+    env.db.set_retry(cid, (env.now["t"] - 600) * 1000, "long", False, 1, "x")
+    _restart(env).cycle()
+    assert len(sent) == 1 and env.db.list_retries() == []
+
+
+def test_temporary_skip_is_remembered_for_retry_but_permanent_is_not(env, fake_verify, monkeypatch):
+    from app import trading
+    sent = _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=50.0)             # свободной маржи мало
+    cid = add_cfg(env, "Маржа")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    assert not sent and [r["config_id"] for r in env.db.list_retries()] == [cid]               # нехватка маржи — временная причина
+    assert any("не хватает свободной маржи" in t and "после перезапуска" in t for t in env.tg.texts(CHAT))
+    monkeypatch.setattr(trading.HyperliquidAdapter, "account", lambda self: {"equity": 1000.0, "free": 900.0, "used": 100.0})        # пополнили, перезапустили
+    _restart(env).cycle()
+    assert len(sent) == 1 and env.db.list_retries() == []
+
+
+def test_failed_reversal_close_does_not_open_on_top_of_old_position(env, fake_verify, monkeypatch):
+    from app import trading
+    sent = _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    monkeypatch.setattr(trading.HyperliquidAdapter, "positions", lambda self: [{"symbol": "BTC/USDC:USDC", "side": "short", "size": 0.01}])           # на бирже шорт, сигнал — лонг
+    monkeypatch.setattr(trading.HyperliquidAdapter, "close_market", lambda self, *a, **k: (_ for _ in ()).throw(trading.ExchangeError("таймаут")))
+    cid = add_cfg(env, "Разворот")
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    assert not sent                                                                        # новую позицию поверх нерешённой старой не открываем
+    assert [r["config_id"] for r in env.db.list_retries()] == [cid] and any("не удалось закрыть встречную позицию" in t for t in env.tg.texts(CHAT))

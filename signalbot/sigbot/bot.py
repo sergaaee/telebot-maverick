@@ -43,6 +43,7 @@ class SignalService:
         self._stop = threading.Event()
         self.last_cycle = None
         self.ui = MonitorUI(self)
+        self._retry_ids = {r["config_id"] for r in db.list_retries()}      # входы, которые не удались до перезапуска: повторяются при первой проверке конфига
         self._hl = {}                       # user_id -> шаг подключения Hyperliquid (ждём адрес кошелька / ключ API-кошелька)
 
     # ---------------- отправка ----------------
@@ -581,6 +582,9 @@ class SignalService:
         if not force and cfg["baseline"] and self._fp.get(cfg["id"]) == fp:
             return
         res, warn = self._evaluate(p, memo, user)
+        if cfg["id"] in self._retry_ids:                         # вход, который не удался до перезапуска
+            self._retry_ids.discard(cfg["id"])
+            self._retry_open(cfg, res, chat)
         label = self.s.sources[p["source"]].label
         upd = {"error": None}
         if not cfg["baseline"]:
@@ -651,6 +655,7 @@ class SignalService:
             log.warning("автомод %s по %s: %s", kind, cfg["name"], e)
             trade_error("auto_fail", e, user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side)
         self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter_for(cfg["user_id"]).name})
+        return status, res
 
     def _auto_open(self, cfg, res, sig, plan):
         """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига). Перед ордером состояние сверяется с реальной биржей."""
@@ -662,28 +667,71 @@ class SignalService:
         base = cfg["auto"].get("base", "config")
         pre = manage.preflight_open(ad, p["symbol"], sig["side"], add)
         if pre.get("skip"):
-            self._skip_open(cfg, p, sig, add, ad, pre["skip"])
+            self._skip_open(cfg, p, sig, add, ad, pre["skip"], retry=pre.get("retry", False))
             return
         acc = manage.account_quick(ad, cfg["user_id"], ttl=0) if ad.real else None            # свежий баланс: размер и свободная маржа решают, пройдёт ли ордер
         if acc and pre.get("close_first"):
             acc = {**acc, "free": None}                     # встречная позиция сейчас закроется и освободит маржу — свободную маржу до этого не сверяем
         sz = manage.size_order(self.engine.order_size, res, add, ad, base, acc)
         if sz.get("skip"):
-            self._skip_open(cfg, p, sig, add, ad, sz["skip"])
+            self._skip_open(cfg, p, sig, add, ad, sz["skip"], retry=sz.get("retry", False))
             return
         notional, margin = sz["notional"], sz["margin"]
         if pre.get("close_first"):                          # на бирже позиция в обратную сторону: по правилам стратегии это разворот — сначала закрываем её
-            self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"})
-        self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
-                 lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
-                                                  plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
-                 {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"]})
+            st, r = self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"})
+            if st == "error":                               # встречная позиция не закрылась — открывать новую поверх неё нельзя
+                self._open_failed(cfg, sig, add, f"не удалось закрыть встречную позицию: {r.get('error')}")
+                return
+        st, r = self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
+                         lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
+                                                plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
+                         {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"]})
+        if st == "error":
+            self._open_failed(cfg, sig, add, r.get("error"))
+        else:
+            self.db.clear_retry(cfg["id"])
 
-    def _skip_open(self, cfg, p, sig, add, ad, reason):
-        """Вход / добор не выполнен по понятной причине: журнал, лог и сообщение владельцу."""
+    def _open_failed(self, cfg, sig, add, reason):
+        """Вход не удался: запоминаем сигнал, чтобы повторить при перезапуске бота (пока он свеж), и сообщаем владельцу."""
+        self.db.set_retry(cfg["id"], sig["ts"], sig["side"], add, sig.get("leg"), str(reason))
+        tg = self.db.get_user(cfg["user_id"])["telegram_id"]
+        self.send(tg, f"⚠️ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {'добор' if add else 'вход'} {'в лонг' if sig['side'] == 'long' else 'в шорт'} не выполнен: {esc(str(reason)[:300])}\n"
+                      f"Сигнал запомнен: после перезапуска бота вход будет повторён, если сигнал ещё свеж (не старше {self.b.max_age_min:g} мин) и позиция по нему не отработала.")
+
+    def _retry_open(self, cfg, res, chat):
+        """При запуске бота: повтор входа, который не удался (ошибка биржи, лимит, нехватка маржи). Только если сигнал свеж, автомод включён и по расчёту позиция по сигналу ещё открыта."""
+        r = next((x for x in self.db.list_retries() if x["config_id"] == cfg["id"]), None)
+        if not r:
+            return
+        self.db.clear_retry(cfg["id"])                          # новая неудача запишется заново
+        p = res["params"]
+        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
+        age = (self.clock() * 1000 - r["signal_ts"]) / 60000
+        if not cfg["auto"]["open"]:
+            return
+        if age > self.b.max_age_min:
+            self.send(chat, f"⏱ {name}: повтор входа отменён — сигнал устарел ({age:.0f} мин, предел {self.b.max_age_min:g}).")
+            return
+        trade = next((t for t in res["trades"] if t["signal_ts"] == r["signal_ts"] or r["signal_ts"] in (t.get("add_signals") or [])), None)
+        if trade is not None and trade["reason"] != "OPEN":
+            self.send(chat, f"⏱ {name}: повтор входа отменён — по расчёту стратегии позиция по этому сигналу уже закрыта ({trade['reason']}).")
+            return
+        sig = {"ts": r["signal_ts"], "side": r["side"], "pyramid": r["pyramid"], "leg": r["leg"] or 1}
+        entry = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
+        plan = self.engine.plan(sig["side"], entry, p["tps"], p["sl_pct"]) if entry else None
+        trade_log("auto_retry", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], signal_ts=r["signal_ts"], side=r["side"], age_min=round(age, 1), previous_error=r["reason"])
+        self.send(chat, f"🔁 {name}: повторяю {'добор' if r['pyramid'] else 'вход'} {'в лонг' if r['side'] == 'long' else 'в шорт'} по сигналу {fm.ts_str(r['signal_ts'])} (прошлая попытка не удалась: {esc(str(r['reason'])[:120])}).")
+        self._auto_open(cfg, res, sig, plan)
+
+    def _skip_open(self, cfg, p, sig, add, ad, reason, retry=False):
+        """Вход / добор не выполнен по понятной причине: журнал, лог и сообщение владельцу. retry — причина временная (биржа не ответила, не хватило маржи): сигнал запоминается для повтора при перезапуске."""
         self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": reason, "exchange": ad.name})
-        trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=reason)
-        self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(reason)}")
+        trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=reason, retry=retry)
+        if retry:
+            self.db.set_retry(cfg["id"], sig["ts"], sig["side"], add, sig.get("leg"), reason)
+        else:
+            self.db.clear_retry(cfg["id"])
+        self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(reason)}" + ("\nСигнал запомнен: повторю вход после перезапуска бота, если он ещё свеж." if retry else ""))
 
     def _auto_fill(self, cfg, res, ev):
         """Автомод «управлять позицией»: после TP1 стоп в безубыток, закрытие к концу недели / по развороту (TP и SL исполняет сама биржа через стоп и лимитки)."""
