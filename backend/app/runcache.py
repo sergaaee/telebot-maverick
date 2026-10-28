@@ -24,7 +24,7 @@ TAIL = 300                      # последние строки сверяют
 SAMPLES = 64
 
 # параметры, которые не влияют на сделки до расчёта размера позиции и топ-коинов — смена депозита и т.п. не сбрасывает снимок
-IGNORED = {"deposit", "compound"}
+IGNORED = {"deposit", "compound", "funding_apr", "funding_period_h", "funding_mode"}
 
 
 def enabled():

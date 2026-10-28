@@ -10,12 +10,12 @@ const round = (v: number | null | undefined, d: number): string => (v == null ? 
 
 /** Сделки в CSV (запятая, точка в числах, время UTC, BOM для Excel). top — сделки по топ-коинам: добавляются монета и значение из отчёта. */
 export function tradesCsv(trades: Trade[], top: boolean): string {
-  const head = ['n', 'side', 'leg', 'group', 'signal_utc', 'entry_utc', 'exit_utc', 'entry_price', 'exit_price', 'reason', 'tp_hits', 'pnl_pct', 'pnl_usd', 'margin_usd', 'notional_usd', 'hold_h', 'dg', 'dl', 'ds', 'fills'];
+  const head = ['n', 'side', 'leg', 'group', 'signal_utc', 'entry_utc', 'exit_utc', 'entry_price', 'exit_price', 'reason', 'tp_hits', 'pnl_pct', 'pnl_usd', 'funding_usd', 'margin_usd', 'notional_usd', 'hold_h', 'dg', 'dl', 'ds', 'fills'];
   if (top) head.push('symbol', 'coin', 'top_value');
   const rows = trades.map((t) => {
     const r: unknown[] = [
       t.n, t.side, t.leg ?? 1, t.group ?? '', fmtTs(t.signal_ts), fmtTs(t.entry_ts), fmtTs(t.exit_ts), round(t.entry, 6), round(t.exit_avg, 6), t.reason, t.tp_hits,
-      round(t.pnl_pct, 4), round(t.pnl_usd, 2), round(t.margin, 2), round(t.notional, 2), round(t.hold_h, 2), round(t.global, 3), round(t.local, 3), round(t.scalp, 3),
+      round(t.pnl_pct, 4), round(t.pnl_usd, 2), round(t.funding_usd, 4), round(t.margin, 2), round(t.notional, 2), round(t.hold_h, 2), round(t.global, 3), round(t.local, 3), round(t.scalp, 3),
       t.fills.map((f) => `${f.label} ${Math.round(f.share * 100)}% @ ${round(f.price, 6)}`).join(' | '),
     ];
     if (top) r.push(t.symbol ?? '', t.coin ?? '', round(t.top_value, 3));

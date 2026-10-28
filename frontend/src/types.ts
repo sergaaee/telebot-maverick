@@ -40,6 +40,10 @@ export interface Params {
   compound: boolean;
   fee: number;
   slip: number;
+  /** фандинг: годовые % (+ лонг платит, шорт получает), период списания в часах и режим (signed — по знаку, cost — платят обе стороны); 0 — не учитывать */
+  funding_apr: number;
+  funding_period_h: 1 | 2 | 4 | 8 | 12 | 24;
+  funding_mode: 'signed' | 'cost';
   cooldown_h: number;
   cool_metric: 'scalp' | 'local' | 'global';
   cool_drop: number | null;
@@ -145,6 +149,9 @@ export interface Fill {
 
 export interface Trade {
   n: number;
+  /** фандинг сделки: % от объёма (+ расход) и в долларах */
+  funding_pct?: number;
+  funding_usd?: number;
   side: 'long' | 'short';
   signal_ts: number;
   entry_ts: number;
@@ -248,6 +255,8 @@ export interface HoldStats {
 }
 
 export interface Stats {
+  /** фандинг за всё время в $: + уплачено, − получено */
+  funding_usd?: number;
   trades: number;
   tp: number;
   sl: number;

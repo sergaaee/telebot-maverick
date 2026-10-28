@@ -608,7 +608,19 @@ def scenario(pg, base, state_url):
     lines = [l for l in raw.split("\r\n") if l]
     check("CSV: UTF-8 с BOM, шапка и строка на каждую сделку таблицы", raw.startswith("\ufeff") and lines[0].lstrip("\ufeff").startswith("n,side,leg,group,signal_utc") and len(lines) - 1 == n_rows and csv_dl.suggested_filename.endswith(".csv"), f"{len(lines) - 1} строк, таблица {n_rows}")
     cols = next(csv.reader([lines[1]]))
-    check("CSV: сторона, цена, причина и метрики заполнены", cols[1] in ("long", "short") and float(cols[7]) > 0 and cols[9] in ("TP", "SL", "BE", "REV", "OPEN") and cols[16] != "" and cols[17] != "" and "@" in cols[19], lines[1][:140])
+    check("CSV: сторона, цена, причина и метрики заполнены", cols[1] in ("long", "short") and float(cols[7]) > 0 and cols[9] in ("TP", "SL", "BE", "REV", "OPEN") and cols[17] != "" and cols[18] != "" and "@" in cols[20], lines[1][:140])
+
+    # --- фандинг
+    tot_before = pg.locator(".card", has_text="Итого").first.inner_text()
+    check("фандинг по умолчанию выключен: карточки нет, период и режим скрыты", pg.locator(".card", has_text="Фандинг").count() == 0 and pg.get_by_test_id("funding-period").count() == 0 and field(pg, "Фандинг, % годовых").locator(".help").count() == 1)
+    num(pg, "Фандинг, % годовых").fill("60")
+    check("при ненулевой ставке появляются период списания и режим (с «?»)", pg.get_by_test_id("funding-period").is_visible() and pg.get_by_test_id("funding-mode").is_visible() and field(pg, "Период списания").locator(".help").count() == 1)
+    pg.get_by_test_id("funding-period").select_option("1")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("с фандингом: карточка «Фандинг» в итогах, в таблице сделок колонка «фандинг $», итог изменился", pg.locator(".card", has_text="Фандинг").count() == 1 and any("фандинг" in h for h in pg.locator("table.trades thead th").all_inner_texts()) and pg.locator(".card", has_text="Итого").first.inner_text() != tot_before, pg.locator(".card", has_text="Фандинг").first.inner_text().replace("\n", " | ") if pg.locator(".card", has_text="Фандинг").count() else "")
+    num(pg, "Фандинг, % годовых").fill("0")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("ставка 0: фандинг не учитывается, итог вернулся к прежнему", pg.locator(".card", has_text="Фандинг").count() == 0 and pg.locator(".card", has_text="Итого").first.inner_text() == tot_before)
 
     # --- Монте-Карло
     while pg.locator(".toast-close").count():           # уведомления перекрывают правую колонку — закрываем, как это сделал бы пользователь

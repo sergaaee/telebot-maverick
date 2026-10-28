@@ -24,7 +24,7 @@ export default function TradesTable({ trades, selected, onSelect, top = false, o
         <thead>
           <tr>
             <th>#</th><th>сторона</th><th>вход (UTC)</th><th>цена</th><th>выход</th><th>цена</th><th>причина</th>
-            <th>тейки</th><th>PnL</th><th>PnL $</th><th>держал</th>{top ? <><th>монета</th><th>в отчёте</th></> : <><th>Local</th><th>Scalp</th><th>Global</th></>}
+            <th>тейки</th><th>PnL</th><th>PnL $</th>{trades.some((t) => t.funding_usd != null) && <th title="Фандинг сделки в $: уплачено (−) / получено (+); уже учтён в PnL">фандинг $</th>}<th>держал</th>{top ? <><th>монета</th><th>в отчёте</th></> : <><th>Local</th><th>Scalp</th><th>Global</th></>}
           </tr>
         </thead>
         <tbody>
@@ -42,6 +42,7 @@ export default function TradesTable({ trades, selected, onSelect, top = false, o
               </td>
               <td className={signClass(t.pnl_pct)}>{fmtPct(t.pnl_pct)}</td>
               <td className={signClass(t.pnl_usd)}>{fmtUsd(t.pnl_usd)}</td>
+              {trades.some((x) => x.funding_usd != null) && <td className={signClass(-(t.funding_usd ?? 0))} title={t.funding_pct != null ? `${t.funding_pct.toFixed(4)}% от объёма` : undefined}>{t.funding_usd != null ? fmtUsd(-t.funding_usd, 2) : '–'}</td>}
               <td>{fmtHold(t.hold_h)}</td>
               {top ? (
                 <>

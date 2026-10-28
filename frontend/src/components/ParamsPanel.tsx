@@ -347,6 +347,23 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         </label>
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
         <Num label="Проскальзывание" help="slip" value={+(p.slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('slip', (v ?? 0) / 100)} />
+        <Num label="Фандинг, % годовых" help="funding_apr" value={p.funding_apr ?? 0} step={1} suffix="%" onChange={(v) => set('funding_apr', v ?? 0)} />
+        {!!p.funding_apr && (
+          <>
+            <label className="field">
+              <Label text="Период списания" help="funding_period_h" />
+              <select value={p.funding_period_h ?? 8} onChange={(e) => set('funding_period_h', Number(e.target.value) as Params['funding_period_h'])} data-testid="funding-period">
+                {[1, 2, 4, 8, 12, 24].map((h) => <option key={h} value={h}>{h} ч</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <Label text="Кто платит" help="funding_mode" />
+              <select value={p.funding_mode ?? 'signed'} onChange={(e) => set('funding_mode', e.target.value as Params['funding_mode'])} data-testid="funding-mode">
+                <option value="signed">по знаку ставки (лонг платит, шорт получает)</option><option value="cost">платят обе стороны</option>
+              </select>
+            </label>
+          </>
+        )}
         <Num label="Пауза после стопа" help="cooldown_h" value={p.cooldown_h} step={1} suffix="ч" onChange={(v) => set('cooldown_h', v ?? 0)} />
         <label className="field check">
           <input type="checkbox" checked={p.sl_hold_strong} onChange={(e) => set('sl_hold_strong', e.target.checked)} />

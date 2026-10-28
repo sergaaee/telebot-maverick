@@ -22,12 +22,12 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
            "recent": [{"side": t["side"], "entry_ts": t["entry_ts"], "exit_ts": t["exit_ts"], "reason": t["reason"], "pnl_usd": t["pnl_usd"], "pnl_pct": t["pnl_pct"],
                        "hold_h": t["hold_h"]} for t in [t for t in res["trades"] if t["reason"] != "OPEN"][-5:]][::-1],
            "settings": {"sl_pct": p["sl_pct"], "tps": p["tps"], "be_after_tp1": p["be_after_tp1"], "leverage": p["leverage"], "pyramid_leverage": p.get("pyramid_leverage"),
-                        "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "pyramid_pct": p.get("pyramid_pct"), "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
+                        "funding_apr": p.get("funding_apr") or 0.0, "funding_period_h": p.get("funding_period_h") or 8, "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "pyramid_pct": p.get("pyramid_pct"), "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
                         "weekdays_only": p.get("weekdays_only", False), "side": p["side"]}}
     if detail:                                             # подробности: статистика, вся история закрытых сделок (последние 300) и полные параметры
         t = res["stats"]["total"]
         keys = ("trades", "winrate", "profit_factor", "total_usd", "return_pct", "sharpe", "max_dd_usd", "max_dd_pct", "max_dd_real_usd", "max_dd_real_pct", "avg_pct",
-                "tp", "sl", "be", "rev", "liq", "wknd", "max_loss_streak", "exposure_pct", "positions", "adds")
+                "tp", "sl", "be", "rev", "liq", "wknd", "max_loss_streak", "exposure_pct", "positions", "adds", "funding_usd")
         out["stats"] = {k: t.get(k) for k in keys}
         out["range"] = res["range"]
         out["params"] = p
@@ -54,7 +54,7 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
             "to_stop_pct": (d * (price / stop - 1) * 100) if price else None,                 # запас до стопа, % от цены (+ — стоп ещё далеко)
             "to_next_tp_pct": (d * (nxt / price - 1) * 100) if (price and nxt) else None,
             "move_pct": d * (price / t["entry"] - 1) * 100 if price else None,
-            "pnl_usd": t["pnl_usd"], "pnl_pct": t["pnl_pct"], "signal_ts": t["signal_ts"],
+            "pnl_usd": t["pnl_usd"], "pnl_pct": t["pnl_pct"], "funding_usd": t.get("funding_usd") or 0.0, "signal_ts": t["signal_ts"],
             "fills": t["fills"], "metrics_at_entry": {"dg": t.get("global"), "dl": t.get("local"), "ds": t.get("scalp")},
         })
     notional = sum(r["notional"] for r in rows)
@@ -64,7 +64,7 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
     first = min(r["entry_ts"] for r in rows)
     out["position"] = {
         "side": side, "opened_ts": first, "hold_h": ((candle_ts or first) - first) / 3.6e6, "legs": rows, "notional": notional, "margin": margin, "avg_entry": avg_entry,
-        "pnl_usd": pnl, "pnl_pct_deposit": pnl / p["deposit"] * 100 if p["deposit"] else None, "pnl_pct_margin": pnl / margin * 100 if margin else None,
+        "pnl_usd": pnl, "funding_usd": sum(r["funding_usd"] for r in rows), "pnl_pct_deposit": pnl / p["deposit"] * 100 if p["deposit"] else None, "pnl_pct_margin": pnl / margin * 100 if margin else None,
         "deadline_ts": tradingweek.window_close(first, p.get("friday_close_before_min") or 0) if p.get("weekdays_only") else None,
     }
     return out
@@ -76,7 +76,7 @@ def compact(view):
     v.pop("recent", None)
     pos = v.get("position")
     if pos:
-        v["position"] = {**{k: pos[k] for k in ("side", "opened_ts", "hold_h", "notional", "margin", "avg_entry", "pnl_usd", "pnl_pct_deposit", "pnl_pct_margin", "deadline_ts")}, "legs_n": len(pos["legs"]),
+        v["position"] = {**{k: pos[k] for k in ("side", "opened_ts", "hold_h", "notional", "margin", "avg_entry", "pnl_usd", "funding_usd", "pnl_pct_deposit", "pnl_pct_margin", "deadline_ts")}, "legs_n": len(pos["legs"]),
                          "danger": any(l["liq_price"] is not None and v.get("price") and ((v["price"] <= l["liq_price"]) if pos["side"] == "long" else (v["price"] >= l["liq_price"])) for l in pos["legs"])}
     return v
 

@@ -158,6 +158,7 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
         {t.max_dd_real_usd != null && (
           <Card label="Реальная просадка" help={HELP.real_dd} value={fmtUsd(-t.max_dd_real_usd)} cls="neg" sub={`${(t.max_dd_real_pct ?? 0).toFixed(1)}% · с открытыми позициями, плечом и доборами`} />
         )}
+        {!!result.params.funding_apr && <Card label="Фандинг" help={HELP.funding_apr} value={fmtUsd(-(t.funding_usd ?? 0))} cls={signClass(-(t.funding_usd ?? 0))} sub={`${result.params.funding_apr}% годовых · ${result.params.funding_period_h} ч · уже в итоге`} />}
         <Card label="Средняя сделка" value={fmtPct(t.avg_pct, 3)} cls={signClass(t.avg_pct)} sub={fmtUsd(t.expectancy_usd, 1)} />
         <Card label="Ср. плюс / минус" value={`${fmtUsd(t.avg_win_usd)} / ${fmtUsd(t.avg_loss_usd)}`} />
         <Card label="Лучшая / худшая" value={`${fmtUsd(t.best_usd)} / ${fmtUsd(t.worst_usd)}`} />

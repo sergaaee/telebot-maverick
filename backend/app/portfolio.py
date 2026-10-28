@@ -82,6 +82,8 @@ def joint_sizing(rows, deposit):
             margin = notional / use if use else 0.0
         c = dict(t)
         c["margin"], c["notional"], c["pnl_usd"] = margin, notional, notional * t["pnl_pct"] / 100
+        if "funding_pct" in t:
+            c["funding_usd"] = notional * t["funding_pct"] / 100
         heapq.heappush(pending, (t["exit_ts"], c["pnl_usd"]))
         out[rows[i]["id"]].append(c)
     return out
