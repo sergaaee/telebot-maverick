@@ -65,6 +65,8 @@ def stats_block(stats, params, rng=None, title="📈 <b>Статистика к�
     ]
     if t.get("adds"):
         lines.append(f"Позиций {t['positions']} · доборов {t['adds']} (сделок считается по ногам)")
+    if params and params.get("funding_apr") and t.get("funding_usd") is not None:
+        lines.append(f"Фандинг {params['funding_apr']:g}% годовых / {params.get('funding_period_h', 8)} ч: {'уплачено' if t['funding_usd'] >= 0 else 'получено'} <b>{usd(abs(t['funding_usd']))}</b> (уже учтён в итоге)")
     return "\n".join(lines)
 
 
@@ -106,6 +108,8 @@ def config_summary(cfg, result=None):
         bits.append("только будни (пн Токио → пт Нью-Йорк)")
     if p.get("liquidation_sim"):
         bits.append(f"ликвидация {p.get('maint_margin_pct', 0.5):g}%")
+    if p.get("funding_apr"):
+        bits.append(f"фандинг {p['funding_apr']:g}% год./{p.get('funding_period_h', 8)} ч" + (" (платят обе стороны)" if p.get("funding_mode") == "cost" else ""))
     if p.get("pyramid_enabled") and p.get("pyramid_leverage"):
         bits.append(f"плечо доборов {p['pyramid_leverage']:g}×")
     return " · ".join(bits)

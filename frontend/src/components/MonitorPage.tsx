@@ -130,6 +130,7 @@ function StatsTab({ e }: { e: MonitorEntry }) {
       <StatCard label="Итого" value={fmtUsd(n('total_usd'))} cls={signClass(n('total_usd'))} sub={t.return_pct != null ? `${fmtPct(t.return_pct as number, 1)} от депозита` : undefined} />
       <StatCard label="Сделок" value={String(n('trades'))} sub={`TP ${n('tp')} · БУ ${n('be')} · SL ${n('sl')} · разворот ${n('rev')}${n('liq') ? ` · ликвид. ${n('liq')}` : ''}${n('wknd') ? ` · пятница ${n('wknd')}` : ''}`} />
       <StatCard label="Winrate" value={`${n('winrate').toFixed(1)}%`} />
+      {!!t.funding_usd && <StatCard label="Фандинг" value={fmtUsd(-(t.funding_usd as number))} />}
       <StatCard label="Profit factor" value={fmtPf((t.profit_factor as number | null) ?? null)} />
       <StatCard label="Коэф. Шарпа" value={t.sharpe == null ? '–' : (t.sharpe as number).toFixed(2)} cls={t.sharpe == null ? '' : signClass(t.sharpe as number)} />
       <StatCard label="Макс. просадка" value={fmtUsd(-n('max_dd_usd'))} cls="neg" sub={t.max_dd_pct != null ? `${(t.max_dd_pct as number).toFixed(1)}% по закрытым` : undefined} />
@@ -150,7 +151,7 @@ function ParamsTab({ e }: { e: MonitorEntry }) {
     ['Подтверждение', `${p.confirm} отчётов подряд`], ['Остывание', p.cool_drop != null ? `откат ${p.cool_drop} (${p.cool_metric})` : p.cool_declines != null ? `${p.cool_declines} отчётов подряд (${p.cool_metric})` : 'выключено'],
     ['Ликвидации (фильтр)', p.liq_hours != null ? `окно ${p.liq_hours} ч, ≤ ${p.liq_frac} пика, перцентиль ${p.liq_pct}` : 'выключено'], ['Тренд', p.trend_enabled ? `EMA ${(p.trend_emas as number[]).join('/')} на ${p.trend_tf}` : 'выключен'],
     ['Выход', `SL ${p.sl_pct}% · TP ${(p.tps as { pct: number; share: number }[]).map((t) => `${t.pct}%×${t.share}`).join(' / ')}${p.be_after_tp1 ? ' · БУ после TP1' : ''}`],
-    ['Размер', `депозит ${fmtUsd(p.deposit as number)} · ${p.trade_pct}% · плечо ${p.leverage}× · ${p.compound ? 'сложный %' : 'фикс. сумма'}`],
+    ['Фандинг', p.funding_apr ? `${p.funding_apr}% годовых · период ${p.funding_period_h ?? 8} ч${p.funding_mode === 'cost' ? ' · платят обе стороны' : ''}` : 'не учитывается'], ['Размер', `депозит ${fmtUsd(p.deposit as number)} · ${p.trade_pct}% · плечо ${p.leverage}× · ${p.compound ? 'сложный %' : 'фикс. сумма'}`],
     ['Пирамидинг', p.pyramid_enabled ? `до ${p.pyramid_max} × ${p.pyramid_pct}%${p.pyramid_avg ? ' с усреднением' : ''}${p.pyramid_leverage ? `, плечо ${p.pyramid_leverage}×` : ''}${p.pyramid_move_pct ? `, движение ≥ ${p.pyramid_move_pct}%` : ''}` : 'выключен'],
     ['Только будни', on('weekdays_only')], ['Моделировать ликвидацию', on('liquidation_sim')], ['Не ставить SL, пока метрики сильны', on('sl_hold_strong')],
     ['Пауза после стопа / между сигналами', `${p.cooldown_h} ч / ${p.signal_gap_h} ч`], ['Топ-коины', on('top_enabled')], ['Создан', e.created ? fmtTs(e.created * 1000) : '–'], ['Уведомлений', String(e.alerts ?? 0)],

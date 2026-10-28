@@ -147,7 +147,8 @@ class MonitorUI:
                f"Цена <code>{fm.price(price)}</code> · средний вход <code>{fm.price(pos['avg_entry'])}</code>"
                + (f" ({fm.pct(d * (price / pos['avg_entry'] - 1) * 100, 2)})" if price else ""),
                f"Объём {fm.usd(pos['notional']).lstrip('+')} · маржа {fm.usd(pos['margin']).lstrip('+')} · результат <b>{fm.usd(pos['pnl_usd'])}</b>"
-               + (f" ({fm.pct(pos['pnl_pct_deposit'], 2)} депозита)" if pos.get("pnl_pct_deposit") is not None else "")]
+               + (f" ({fm.pct(pos['pnl_pct_deposit'], 2)} депозита)" if pos.get("pnl_pct_deposit") is not None else "")
+               + (f" · фандинг {fm.usd(-pos['funding_usd'], 2)}" if pos.get("funding_usd") else "")]
         if pos.get("deadline_ts"):
             out.append(f"📅 Закрытие к концу недели: {fm.ts_str(pos['deadline_ts'])}")
         if pos.get("danger"):
@@ -218,7 +219,8 @@ class MonitorUI:
                         f"Шарп <b>{'–' if t.get('sharpe') is None else f'{t['sharpe']:.2f}'}</b> · просадка {fm.pct(t['max_dd_pct'], 1, sign=False) if t.get('max_dd_pct') is not None else '–'}"
                         + (f" (с открытыми позициями {fm.pct(t['max_dd_real_pct'], 1, sign=False)})" if t.get("max_dd_real_pct") is not None else "") + "\n"
                         f"TP {t['tp']} · БУ {t['be']} · SL {t['sl']} · разворот {t['rev']}" + (f" · ликвид. {t['liq']}" if t.get("liq") else "") + (f" · пятница {t['wknd']}" if t.get("wknd") else "")
-                        + f"\nСерия убытков до {t['max_loss_streak']} · в позиции {t['exposure_pct']:.0f}% времени")
+                        + f"\nСерия убытков до {t['max_loss_streak']} · в позиции {t['exposure_pct']:.0f}% времени"
+                        + (f"\nФандинг: {'уплачено' if t['funding_usd'] >= 0 else 'получено'} <b>{fm.usd(abs(t['funding_usd']))}</b> (учтён в итоге)" if t.get("funding_usd") else ""))
         elif tab == "hist":
             h = (e.get("history") or [])[:HIST_N]
             if not h:

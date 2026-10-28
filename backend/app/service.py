@@ -9,6 +9,7 @@ import time
 
 from .core import backtest, montecarlo, topcoins, trend
 from .core import equity as equity_mod
+from .core import funding as funding_mod
 from .core import tradingweek
 from .core.entries import entries
 
@@ -157,6 +158,7 @@ def _extra_stats(trades, span_ms, deposit=None):
         "tp_reach": [sum(t["tp_hits"] >= k for t in trades) for k in (1, 2, 3)],
         "positions": len({t.get("group", i) for i, t in enumerate(trades)}),
         "adds": sum(1 for t in trades if t.get("leg", 1) > 1) + sum(t.get("adds_n", 0) for t in trades),
+        "funding_usd": sum(t.get("funding_usd") or 0.0 for t in trades),             # сколько фандинга уплачено (+) / получено (−) за всё время
     }
 
 
@@ -320,7 +322,7 @@ def _trade_out(n, t, rep, at=None):
         "local": r[1] if r else None, "scalp": r[2] if r else None, "global": r[7] if r and len(r) > 7 else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
-    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total"):
+    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total", "funding_pct", "funding_usd"):
         if k in t:
             out[k] = t[k]
     return out
@@ -510,7 +512,8 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     skipped = list(kept_skipped)
     new_trades = backtest.run_events([e for e in events if from_ts is None or e[0] >= from_ts] if kept else events, candles, levels, skipped=skipped, resume=resume, **run_kw)
     raw_trades = kept + new_trades
-    trades = [dict(t) for t in raw_trades]           # размер позиции дописывается в копии: снимок хранит сделки без него
+    trades = [dict(t) for t in raw_trades]           # размер позиции и фандинг дописываются в копии: снимок хранит сделки без них
+    funding_mod.apply_funding(trades, eff.get("funding_apr") or 0.0, eff.get("funding_period_h") or 8, eff.get("funding_mode") or "signed")
     if rc:
         try:
             changed = not snap or snap["n_sigs"] != len(sigs) or snap["n_candles"] != len(candles_all)
@@ -522,6 +525,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             log.warning("runcache: снимок не сохранён: %s", e)
 
     apply_sizing(trades, eff["deposit"], eff["trade_pct"], eff["leverage"], eff.get("compound", True), pyr_pct, eff.get("pyramid_leverage"))
+    funding_mod.fill_funding_usd(trades)
     if not mmr:
         for who, lv in (("", eff["leverage"]), (" доборов", lev_add if pyramid else None)):
             if lv and eff["sl_pct"] * lv >= 100:

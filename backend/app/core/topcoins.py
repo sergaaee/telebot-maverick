@@ -5,7 +5,7 @@ build_top() ничего не скачивает: если окна в кеше 
 """
 from bisect import bisect_left, bisect_right
 
-from . import backtest
+from . import backtest, funding
 
 QUOTES = ("USDT", "USDC", "BUSD", "USD")
 PREFIXES = ("", "1000", "10000", "1000000")        # мелкие монеты на фьючерсах торгуются пачками: PEPE -> 1000PEPE
@@ -97,6 +97,7 @@ def build_top(triggers, p, available, covered_of, candles_of, tf_ms, now_ms):
                 tr["reason"] = "TIME"                           # время вышло (N суток) — закрыто по рынку
                 tr["fills"][-1]["label"] = "TIME"
             tr.update(symbol=sym, coin=t["coin"], top_value=t.get("value"), partial=partial, window_end=min(end, last))
+            funding.apply_funding([tr], p.get("funding_apr") or 0.0, p.get("funding_period_h") or 8, p.get("funding_mode") or "signed", notional=p["top_size"])     # те же настройки фандинга, что у основной стратегии
             busy = tr["exit_ts"]
             trades.append(tr)
     trades.sort(key=lambda x: x["entry_ts"])

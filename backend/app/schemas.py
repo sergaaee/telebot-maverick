@@ -34,6 +34,9 @@ class BacktestParams(BaseModel):
     leverage: Optional[float] = Field(None, ge=1, le=125, description="плечо")
     fee: Optional[float] = Field(None, ge=0, le=0.05)
     slip: Optional[float] = Field(None, ge=0, le=0.05)
+    funding_apr: Optional[float] = Field(None, ge=-1000, le=1000, description="фандинг, % годовых (+ лонг платит, шорт получает); 0 — не учитывать")
+    funding_period_h: Optional[Literal[1, 2, 4, 8, 12, 24]] = Field(None, description="период списания фандинга, часов")
+    funding_mode: Optional[Literal["signed", "cost"]] = Field(None, description="signed — по знаку ставки; cost — платят обе стороны")
     cooldown_h: Optional[float] = Field(None, ge=0, le=24 * 365)
     cool_metric: Optional[Literal["scalp", "local", "global"]] = None
     cool_drop: Optional[float] = Field(None, gt=0, le=10)
