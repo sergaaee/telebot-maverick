@@ -127,8 +127,10 @@ def test_catchup_settings_and_arming(auth_env):
     a.put("/api/monitor/configs/1/auto", json={"open": True}, headers=H_)
     a.post("/api/panic", json={"confirm": True}, headers=H_)
     assert db.get_config(1)["catchup"]["armed"] is False and db.get_config(1)["catchup"]["on"] is True         # СТОП ВСЁ снимает «взведено», настройка остаётся
-    for bad in ({"age_min": 0}, {"age_min": 500}, {"move_pct": -1}, {"move_pct": 9}, {"age_min": "много"}):
+    for bad in ({"age_min": 0}, {"age_min": 1441}, {"move_pct": -1}, {"move_pct": 9}, {"age_min": "много"}):
         assert a.put("/api/monitor/configs/1/catchup", json=bad, headers=H_).status_code == 422, bad
+    for ok_age in (1440, 300, 0.5):                                                                                  # потолок — сутки
+        assert a.put("/api/monitor/configs/1/catchup", json={"age_min": ok_age}, headers=H_).json()["catchup"]["age_min"] == ok_age
     assert b.put("/api/monitor/configs/1/catchup", json={"on": True}, headers=H_).status_code == 404
     a.put("/api/monitor/configs/1/catchup", json={"on": False}, headers=H_)
     assert db.get_config(1)["catchup"]["on"] is False

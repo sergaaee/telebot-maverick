@@ -647,7 +647,7 @@ def test_catchup_toggled_on_while_auto_is_already_enabled_fires_immediately(env,
     env.handle_update(tmsg("/catchup"))
     assert "Использование" in env.tg.texts(CHAT)[-1]
     env.handle_update(tmsg(f"/catchup {cid} on 0 0.1"))
-    assert "от 1 до 240" in env.tg.texts(CHAT)[-1] and env.db.get_config(cid)["catchup"]["age_min"] == 120.0
+    assert "от 1 до 1440" in env.tg.texts(CHAT)[-1] and env.db.get_config(cid)["catchup"]["age_min"] == 120.0
 
 
 class LimitBook:

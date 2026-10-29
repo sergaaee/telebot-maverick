@@ -130,13 +130,16 @@ def set_sizing(db, adapter, uid, config_id, **new):
     return {k: params.get(k) for k in SIZING_KEYS}
 
 
+MAX_CATCHUP_AGE_MIN = 1440.0           # «догнать сигнал»: не старше суток
+
+
 def set_catchup(db, adapter, uid, config_id, on=None, age_min=None, move_pct=None):
     """«Догнать свежий сигнал»: при включении автомода (или самой этой опции при уже включённом автомоде) бот один раз входит по последнему сигналу, если он не старше age_min минут
     и цена не ушла в сторону прибыли больше чем на move_pct % от цены сигнала (то есть вход не хуже сигнального). Выключено по умолчанию."""
     c = own_config(db, uid, config_id)
-    for name, v, lo, hi in (("age_min", age_min, 0.0, 240.0), ("move_pct", move_pct, 0.0, 5.0)):
+    for name, v, lo, hi in (("age_min", age_min, 0.0, MAX_CATCHUP_AGE_MIN), ("move_pct", move_pct, 0.0, 5.0)):
         if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not (lo <= v <= hi) or (name == "age_min" and v <= 0)):
-            raise ManageError("Возраст сигнала — от 1 до 240 минут, допустимое движение цены в прибыль — от 0 до 5 %")
+            raise ManageError(f"Возраст сигнала — от 1 до {MAX_CATCHUP_AGE_MIN:g} минут (24 часа), допустимое движение цены в прибыль — от 0 до 5 %")
     cur = c["catchup"]
     new = db.set_catchup(uid, config_id, on, age_min, move_pct)
     if on and not cur["on"] and c["any_open"]:
