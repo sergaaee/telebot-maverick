@@ -160,6 +160,44 @@ class HyperliquidAdapter(ExchangeAdapter):
         """Дополнительные ограничения биржи на размер (минимальное количество и т.п.); исключение, если ордер не пройдёт."""
         return None
 
+    def _round(self, kind, ex, sym, value, price=None):
+        """Округление количества / цены по правилам биржи. ccxt на слишком малом количестве бросает InvalidOrder («must be greater than minimum amount precision») —
+        это не сбой связи, а «объём меньше минимума»: превращаем в понятную ExchangeError, а не в трейсбэк."""
+        try:
+            return float((ex.amount_to_precision if kind == "amount" else ex.price_to_precision)(sym, value))
+        except Exception as e:
+            if kind != "amount":
+                raise ExchangeError(f"{self.label}: цена {value:g} не подходит под шаг цены {sym}: {e}") from e
+            mn = None
+            try:
+                mn = float((((ex.market(sym).get("limits") or {}).get("amount") or {}).get("min")) or 0) or None
+            except Exception:
+                pass
+            hint = f"минимальное количество {mn:g}" + (f" (≈ {mn * price:.2f} $ по текущей цене)" if price else "") if mn else f"биржа отклонила округление: {str(e)[:150]}"
+            raise ExchangeError(f"Объём слишком мал для {sym} на {self.label}: количество {value:.6g} меньше минимального — {hint}. Ордер не отправлен: увеличьте долю или плечо.") from e
+
+    def _split_takes(self, ex, sym, amount, takes):
+        """Тейки (reduce-only) по долям позиции -> [(цена, доля %, количество)]. Часть, которая после округления меньше минимального количества биржи, не теряется и не роняет вход:
+        её количество переходит в следующий тейк (а остаток в конце — в последний), поэтому вся позиция по-прежнему покрыта тейками."""
+        out, carry = [], 0.0
+        for tp_price, share in (takes or []):
+            raw = amount * float(share) / 100 + carry
+            try:
+                part = float(ex.amount_to_precision(sym, raw))
+            except Exception:
+                part = 0.0
+            if part > 0:
+                out.append([tp_price, share, part])
+                carry = 0.0
+            else:
+                carry = raw
+        if carry > 0 and out:
+            try:
+                out[-1][2] = float(ex.amount_to_precision(sym, out[-1][2] + carry))
+            except Exception:
+                pass
+        return [tuple(x) for x in out]
+
     def _call(self, what, fn, *a, **k):
         try:
             return fn(*a, **k)
@@ -193,9 +231,9 @@ class HyperliquidAdapter(ExchangeAdapter):
         if notional < self.min_notional - 1e-9:
             raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера {self.label} ({self.min_notional:g} $).")
         price = self._price(ex, sym)
-        amount = float(ex.amount_to_precision(sym, notional / price))
+        amount = self._round("amount", ex, sym, notional / price, price)
         if amount * price < self.min_notional * 1.01:         # округление вниз (и проскальзывание рыночной цены) увело бы ордер под минимум биржи — берём с небольшим запасом
-            amount = float(ex.amount_to_precision(sym, self.min_notional * 1.03 / price))
+            amount = self._round("amount", ex, sym, self.min_notional * 1.03 / price, price)
             notional = max(notional, amount * price)
             if notional > self.max_usd + 1e-9:
                 raise ExchangeError(f"Объём {notional:.2f} $ с учётом минимума биржи больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
@@ -221,11 +259,9 @@ class HyperliquidAdapter(ExchangeAdapter):
             if stop:
                 o = ex.create_order(sym, "market", exit_side, amount, float(stop), {"stopLossPrice": float(stop), "reduceOnly": True})
                 placed.append({"kind": "stop", "id": o.get("id"), "price": stop})
-            for tp_price, share in (takes or []):
-                part = float(ex.amount_to_precision(sym, amount * float(share) / 100))
-                if part > 0:
-                    o = ex.create_order(sym, "limit", exit_side, part, float(tp_price), {"reduceOnly": True})
-                    placed.append({"kind": "take", "id": o.get("id"), "price": tp_price, "share": share})
+            for tp_price, share, part in self._split_takes(ex, sym, amount, takes):
+                o = ex.create_order(sym, "limit", exit_side, part, float(tp_price), {"reduceOnly": True})
+                placed.append({"kind": "take", "id": o.get("id"), "price": tp_price, "share": share, "amount": part})
         except Exception as e:                              # позиция открыта, а стоп/тейк не встали — без защиты её оставлять нельзя: закрываем
             closed = None
             trade_error("order_fail", e, user=self.user_id, kind="stop_or_takes", symbol=sym, side=side, note="после входа защита не встала — закрываем позицию")
@@ -252,10 +288,10 @@ class HyperliquidAdapter(ExchangeAdapter):
             raise ExchangeError(f"Объём {notional:.2f} $ больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if notional < self.min_notional - 1e-9:
             raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера {self.label} ({self.min_notional:g} $).")
-        px = float(ex.price_to_precision(sym, price)) if hasattr(ex, "price_to_precision") else float(price)
-        amount = float(ex.amount_to_precision(sym, notional / px))
+        px = self._round("price", ex, sym, price) if hasattr(ex, "price_to_precision") else float(price)
+        amount = self._round("amount", ex, sym, notional / px, px)
         if amount * px < self.min_notional * 1.01:
-            amount = float(ex.amount_to_precision(sym, self.min_notional * 1.03 / px))
+            amount = self._round("amount", ex, sym, self.min_notional * 1.03 / px, px)
             if amount * px > self.max_usd + 1e-9:
                 raise ExchangeError(f"Объём {amount * px:.2f} $ с учётом минимума биржи больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if amount <= 0:
@@ -317,7 +353,14 @@ class HyperliquidAdapter(ExchangeAdapter):
             return {"status": "skipped", "note": f"на бирже позиция {pos_side}, а закрывать нужно {side} — не трогаю", "symbol": sym}
         exit_side = "sell" if pos_side == "long" else "buy"
         part = min(1.0, max(0.0, float(share)))
-        amount = size if part >= 0.999 else float(ex.amount_to_precision(sym, size * part))
+        if part >= 0.999:
+            amount = size
+        else:
+            try:
+                amount = float(ex.amount_to_precision(sym, size * part))
+            except Exception as e:
+                self._log("close_part_too_small", "warn", symbol=sym, size=size, share=part, error=str(e)[:200])
+                return {"status": "skipped", "note": f"закрываемая часть ({size * part:.6g}) меньше минимального количества {self.label} — частичное закрытие пропущено, позиция {size:g} осталась", "symbol": sym}
         price = self._price(ex, sym)
         self._log("order_request", kind="close", symbol=sym, side=pos_side, size=size, share=part, amount=amount, price=price)
         o = self._call("закрытие", ex.create_order, sym, "market", exit_side, amount, price, {"reduceOnly": True})

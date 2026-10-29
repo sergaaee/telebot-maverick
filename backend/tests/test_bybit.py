@@ -1,5 +1,6 @@
 """Bybit (только USDT-фьючерсы) и настройки конфига отдельно для каждой биржи: адаптер на имитации ccxt, проверка ключа, база (в том числе миграция старой), manage, API."""
 import json
+import re
 import sqlite3
 
 import pytest
@@ -25,6 +26,12 @@ class FakeBybit(FakeEx):
 
     def market(self, sym):
         return {"limits": {"amount": {"min": 0.001}}}
+
+    def amount_to_precision(self, sym, v):
+        """Как ccxt.bybit: меньше шага 0.001 — исключение InvalidOrder (оно уже стоило трейсбэка на живой бирже), иначе округление вниз."""
+        if v < 0.001 - 1e-12:
+            raise RuntimeError(f"bybit amount of {sym} must be greater than minimum amount precision of 0.001")
+        return f"{int(v * 1000 + 1e-9) / 1000:.3f}"
 
     def set_margin_mode(self, mode, sym, params=None):
         self._rec("margin_mode", mode, sym, params)
@@ -442,3 +449,50 @@ def test_trading_log_hides_bybit_keys_even_inside_error_text(tmp_path, monkeypat
     text = (tmp_path / "t.log").read_text(encoding="utf-8")
     assert KEY not in text and SECRET not in text and "abcdef1234567890" not in text and "bybit" in text and '"api_key": "***"' in text
     tradelog._logger = None
+
+
+def test_amount_below_bybit_minimum_is_a_clear_error_not_a_traceback():
+    """Живая Bybit: ccxt.amount_to_precision бросает InvalidOrder для 6 $ по BTC (минимум 0.001). Раньше это был трейсбэк, теперь — понятная ошибка с минимумом в долларах."""
+    fx = FakeBybit(price=100000.0)
+    a = BybitAdapter(exchange=fx, max_usd=10000)
+    for call in (lambda: a.open_market("BTC/USDT:USDT", "long", 6.0, 6.0), lambda: a.place_limit_entry("BTC/USDT:USDT", "long", 6.0, 99000.0, 6.0)):
+        with pytest.raises(ExchangeError) as e:
+            call()
+        assert "меньше минимального" in str(e.value) and "0.001" in str(e.value) and re.search(r"≈ (100|99)\.00 \$", str(e.value)) and "увеличьте долю или плечо" in str(e.value)
+    assert not [c for c in fx.calls if c[0] == "order"]                                      # ничего не отправлено
+
+
+def test_takes_too_small_for_the_exchange_are_merged_and_never_close_the_position():
+    fx = FakeBybit(price=100000.0)
+    a = BybitAdapter(exchange=fx, max_usd=10000)
+    r = a.open_market("BTC/USDT:USDT", "long", 200.0, 5.0, stop=95000.0, takes=[(101000.0, 33.3), (102000.0, 33.3), (103000.0, 33.4)])       # 0.002 BTC: треть — 0.00067 < 0.001
+    o = [c for c in fx.calls if c[0] == "order"]
+    takes = [c for c in o if c[2] == "limit"]
+    assert r["status"] == "sent" and takes and all(c[4] >= 0.001 for c in takes) and sum(c[4] for c in takes) <= r["amount"] + 1e-9
+    assert not [c for c in o if c[2] == "market" and c[6] == {"reduceOnly": True}]               # позицию из-за мелких тейков не закрывали
+    assert all("amount" in t for t in r["orders"] if t["kind"] == "take")
+    # доли делятся нацело — всё как раньше
+    fx2 = FakeBybit(price=100000.0)
+    BybitAdapter(exchange=fx2, max_usd=10000).open_market("BTC/USDT:USDT", "long", 400.0, 5.0, stop=95000.0, takes=[(101000.0, 25), (102000.0, 25), (103000.0, 50)])
+    assert [c[4] for c in fx2.calls if c[0] == "order" and c[2] == "limit"] == [0.001, 0.001, 0.002]
+    # частичное закрытие меньше минимального количества пропускается, а не падает
+    fx3 = FakeBybit(price=100000.0, position={"contracts": 0.002, "side": "long"})
+    r3 = BybitAdapter(exchange=fx3).close_market("BTC/USDT:USDT", "long", 0.25)
+    assert r3["status"] == "skipped" and "меньше минимального" in r3["note"] and not [c for c in fx3.calls if c[0] == "order"]
+
+
+def test_test_position_size_follows_the_real_minimum_of_the_exchange(auth_env):
+    from app.manage import ManageError, test_open, test_size
+    for price, expect in ((100000.0, (4.4, 25.0)), (50000.0, (2.2, 25.0)), (10000.0, (1.0, 11.0)), (130000.0, (5.0, 29.0))):
+        m, lev = test_size(BybitAdapter(exchange=FakeBybit(price=price)), 1.0)
+        assert (round(m, 2), lev) == expect and m * lev >= 0.001 * price * 1.1 - 1e-6, price     # объём не меньше минимального количества с запасом 10 %
+    with pytest.raises(ManageError, match="не проходит"):
+        test_size(BybitAdapter(exchange=FakeBybit(price=300000.0)), 1.0)
+    assert test_size(HyperliquidAdapter(exchange=FakeEx()), 1.0) == (1.0, 11.0) and test_size(DryRunAdapter(), 1.0) == (1.0, 1.0)             # Hyperliquid и симуляция — как раньше
+    db = auth_env
+    uid = db.check_login("alice", "alice-password")["id"]
+    fx = FakeBybit(price=100000.0)
+    r = test_open(db, BybitAdapter(exchange=fx, max_usd=1000), uid, "long", 1.0)
+    assert r["status"] == "sent" and abs(r["margin"] - 4.4) < 1e-9 and r["leverage"] == 25 and abs(r["notional"] - 110.0) < 1e-6 and r["result"]["amount"] == 0.001
+    with pytest.raises(ManageError, match="Объём слишком мал|не проходит"):                  # ошибка биржи — ManageError, а не необработанное исключение
+        test_open(db, BybitAdapter(exchange=FakeBybit(price=300000.0), max_usd=1000), uid, "long", 1.0)
