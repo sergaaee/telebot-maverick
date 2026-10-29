@@ -796,3 +796,78 @@ def test_pending_entry_survives_bot_restart(env, fake_verify, monkeypatch):
     book.positions = [{"symbol": "BTC/USDC:USDC", "side": "long", "size": 4.0, "entry": 99.5}]
     env2.cycle()
     assert env.db.get_pending(cid) is None and len(book.protected) == 1
+
+
+PYR = dict(pyramid_enabled=True, pyramid_max=2, pyramid_pct=10, pyramid_gap_h=0)
+
+
+def _positions_follow_orders(monkeypatch):
+    """Имитация: рыночный вход создаёт позицию на бирже, а добор требует, чтобы она уже была."""
+    from app import trading
+    H = trading.HyperliquidAdapter
+    book = {"pos": [], "opened": []}
+    monkeypatch.setattr(H, "positions", lambda s: book["pos"])
+
+    def open_market(s, sym, side, notional, lev=1.0, stop=None, takes=None):
+        book["opened"].append((side, round(notional, 2), lev))
+        book["pos"] = [{"symbol": "BTC/USDC:USDC", "side": side, "size": 1.0, "entry": 100.0}]
+        return {"status": "sent"}
+
+    monkeypatch.setattr(H, "open_market", open_market)
+    return book
+
+
+def test_catchup_when_latest_signal_is_an_add_enters_first_leg_and_then_the_add(env, fake_verify, monkeypatch):
+    sent, cid = _signal_while_auto_off(env, fake_verify, monkeypatch, "Добор", **PYR)
+    book = _positions_follow_orders(monkeypatch)
+    env.handle_update(tmsg(f"/catchup {cid} on 120 0.1"))
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert [o[0] for o in book["opened"]] == ["long", "long"]
+    assert book["opened"][0][1] == 400.0 and book["opened"][1][1] == 200.0                     # первая нога: 20% от 1000 × 2×; добор: 10% × 2×
+    texts = " ".join(env.tg.texts(CHAT))
+    assert "добор к позиции, которая по расчёту открыта" in texts and "догонять нечего" not in texts
+    kinds = [x["kind"] for x in env.db.list_auto_log(env.alice["id"], 10) if x["status"] == "sent"]
+    assert kinds[:2] == ["add", "open"]                                                        # журнал новыми сверху: сначала вход, потом добор
+
+
+def test_catchup_of_an_add_respects_age_price_and_limit_entry(env, fake_verify, monkeypatch):
+    sent, cid = _signal_while_auto_off(env, fake_verify, monkeypatch, "Добор-условия", **PYR)
+    book = _positions_follow_orders(monkeypatch)
+    env.handle_update(tmsg(f"/catchup {cid} on 10 0.1"))                                      # сигнал добора старше 10 минут
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert not book["opened"] and any("мин назад, а допустимо не больше 10" in t for t in env.tg.texts(CHAT))
+    env.handle_update(cb(f"a:{cid}:o"))
+    env.handle_update(tmsg(f"/catchup {cid} on 240 0.1"))
+    env.engine.price_fn = lambda sym: 10_000.0                                                # цена ушла в прибыль относительно цены сигнала добора
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert not book["opened"] and any("ушла в сторону прибыли" in t for t in env.tg.texts(CHAT))
+
+
+def test_catchup_with_limit_entry_places_the_order_for_a_signal_still_waiting_in_the_calculation(env, fake_verify, monkeypatch):
+    _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    book = LimitBook(monkeypatch)
+    cid = add_cfg(env, "Лимитка ждёт", entry_limit_pct=0.5, entry_limit_dir="pullback", entry_limit_ttl_h=6.0)
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    assert not book.placed                                                                    # автомод был выключен — ордеров нет
+    env.handle_update(tmsg(f"/catchup {cid} on 120 0.1"))
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    assert len(book.placed) == 1 and book.placed[0][1] == "long" and env.db.get_pending(cid)            # откат в расчёте ещё не случился: догоняем сигнал — ставим лимитку сейчас
+
+
+def test_catchup_of_an_add_with_limit_entry_places_only_the_first_leg_order(env, fake_verify, monkeypatch):
+    _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    book = LimitBook(monkeypatch)
+    cid = add_cfg(env, "Добор лимитка", entry_limit_pct=0.01, entry_limit_dir="breakout", entry_limit_ttl_h=6.0, **PYR)     # вход «по ходу» на 0.01%: в расчёте исполняется сразу, доборы — по рынку
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    env.handle_update(tmsg(f"/catchup {cid} on 120 0.1"))
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.cycle()
+    pend = env.db.get_pending(cid)
+    assert pend and pend["mode"] == "breakout" and not book.opened and not book.placed         # первая нога ждёт цену; добор не ставится
+    assert any("добор не ставлю" in t for t in env.tg.texts(CHAT))
