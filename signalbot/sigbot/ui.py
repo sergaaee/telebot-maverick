@@ -296,7 +296,7 @@ class MonitorUI:
 
     def _s_confirm_del(self, user, cid, live=False):
         c = self._cfg(user, cid)
-        return self._confirm(f"🗑 Удалить конфиг <b>#{c['id']} {esc(c['name'])}</b>? Бот перестанет по нему считать и присылать сигналы. Открытые на бирже позиции это не закрывает.", f"dy:{c['id']}", f"c:{c['id']}")
+        return self._confirm(f"🗑 Удалить конфиг <b>#{c['id']} {esc(c['name'])}</b>? Бот перестанет по нему считать и присылать сигналы. Открытая на бирже позиция останется со своими стопом и тейками, но бот её больше не ведёт (БУ, закрытие по развороту, уведомления); стоящая лимитка на вход будет снята.", f"dy:{c['id']}", f"c:{c['id']}")
 
     def _s_confirm_test(self, user, side, live=False):
         d = self._ad(user).describe()
@@ -415,7 +415,7 @@ class MonitorUI:
             self.svc.forget(c["id"])
             return ("Конфиг на паузе, автомод выключен" if not c["paused"] else "Конфиг возобновлён"), False, f"c:{a[0]}"
         if kind == "dy":
-            name = manage.remove_config(self.db, uid, a[0])
+            name = manage.remove_config(self.db, uid, a[0], self._ad(user))
             return f"Удалён: {name}", False, "m"
         if kind == "e":
             c = self._cfg(user, a[0])

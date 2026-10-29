@@ -387,7 +387,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @app.delete("/api/monitor/configs/{config_id}")
     def monitor_delete(config_id: int, request: Request):
-        _guard(remove_config, db, request.state.user["id"], config_id)
+        _guard(remove_config, db, request.state.user["id"], config_id, _adapter(request, db))
         return {"ok": True}
 
     @app.get("/api/monitor/configs/{config_id}/export")

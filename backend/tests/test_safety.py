@@ -1,4 +1,6 @@
 """Безопасность автоторговли: сторож бота, сверка с биржей перед входом, аварийная кнопка."""
+import pytest
+
 from app import manage, watchdog
 from app.db import Database
 from app.trading import DryRunAdapter, ExchangeAdapter, ExchangeError
@@ -78,3 +80,31 @@ def test_panic_turns_auto_off_first_and_closes_everything(tmp_path):
     assert db.list_auto_log(u["id"], 5)[0]["kind"] == "panic"
     r2 = manage.panic(db, DryRunAdapter(), u["id"])                                                              # без счёта — просто выключает автомод
     assert r2["closed"] == [] and not r2["errors"]
+
+
+def test_removing_a_config_cancels_its_standing_entry_order_but_leaves_positions_alone(tmp_path):
+    db, u, cid = make(tmp_path)
+
+    class Cancel(Ex):
+        def __init__(self, fail=False):
+            super().__init__()
+            self.cancelled, self.fail_cancel = [], fail
+
+        def cancel_order_id(self, order_id, symbol):
+            if self.fail_cancel:
+                raise ExchangeError("таймаут")
+            self.cancelled.append(order_id)
+
+    db.set_pending(cid, u["id"], 1, "BTC/USDT:USDT", "long", "pullback", 99.5, 100.0, 400.0, 200.0, 2.0, "L1", 9e9)
+    bad = Cancel(fail=True)
+    with pytest.raises(manage.ManageError, match="Не удалось снять лимитный ордер"):
+        manage.remove_config(db, u["id"], cid, bad)
+    assert db.get_config(cid) and db.get_pending(cid)                                              # ордер не снялся — конфиг и запись об ордере на месте
+    ok = Cancel()
+    assert manage.remove_config(db, u["id"], cid, ok) == "c"
+    assert ok.cancelled == ["L1"] and db.get_config(cid) is None and db.get_pending(cid) is None
+    assert db.list_auto_log(u["id"], 3)[0]["details"]["cancelled_order"] == "L1"
+    cid2 = db.add_config(u["id"], "без ордера", {"symbol": "BTC/USDT:USDT"})[0]["id"]
+    ok2 = Cancel()
+    manage.remove_config(db, u["id"], cid2, ok2)                                                   # нет ожидающего входа — на бирже ничего не трогаем (позиции остаются)
+    assert ok2.cancelled == [] and db.get_config(cid2) is None
