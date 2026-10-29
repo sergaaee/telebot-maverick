@@ -1,4 +1,4 @@
-import type { ExchangeAccount, ExchangeInfo, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, Portfolio, RunSummary, SavedRun, SyncStatus, TfMode, UiState, WalkForward } from './types';
+import type { ExchangeAccount, ExchangeInfo, ExchangeName, ExchangeOverrides, AddAssetResult, AppConfig, BacktestResult, CandlesResponse, Job, LatestSource, MonitorEntry, MonitorResponse, MonteCarlo, Params, Portfolio, RunSummary, SavedRun, SyncStatus, TfMode, UiState, WalkForward } from './types';
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
 
@@ -140,22 +140,26 @@ export const deleteConfig = (id: number) => request<{ ok: boolean }>(`/api/monit
 
 export const exportBotConfig = (id: number) => request<Record<string, unknown>>(`/api/monitor/configs/${id}/export`);
 
-export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) =>
-  request<{ auto: { open: boolean; manage: boolean; base: 'config' | 'account' } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }, exchange: ExchangeName = 'hyperliquid') =>
+  request<{ auto: { open: boolean; manage: boolean; base: 'config' | 'account' } }>(`/api/monitor/configs/${configId}/auto`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...patch, exchange }) });
+
+/** Настройки конфига для одной биржи; null у ключа — убрать настройку (брать из конфига). */
+export const setExchangeOver = (configId: number, exchange: ExchangeName, patch: { [K in keyof ExchangeOverrides]?: ExchangeOverrides[K] | null }) =>
+  request<{ over: ExchangeOverrides; exchange: ExchangeName }>(`/api/monitor/configs/${configId}/exchange/${exchange}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
 
 export const autoOffAll = () => request<{ disabled: number }>('/api/monitor/auto/off', { method: 'POST' });
 
-export const openTestPosition = (side: 'long' | 'short') =>
+export const openTestPosition = (side: 'long' | 'short', exchange: ExchangeName = 'hyperliquid') =>
   request<{ status: string; result: Record<string, unknown>; margin: number; leverage: number; notional: number; exchange: ExchangeInfo }>('/api/trading/test-position', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true, side, usd: 1 }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true, side, usd: 1, exchange }),
   });
 
-export const closeTestPosition = () =>
-  request<{ status: string; result: Record<string, unknown>; exchange: ExchangeInfo }>('/api/trading/test-position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+export const closeTestPosition = (exchange: ExchangeName = 'hyperliquid') =>
+  request<{ status: string; result: Record<string, unknown>; exchange: ExchangeInfo }>('/api/trading/test-position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ exchange }) });
 
-export const getExchangeAccount = () => request<ExchangeAccount>('/api/exchange/account');
+export const getExchangeAccount = (exchange: ExchangeName = 'hyperliquid') => request<ExchangeAccount>(`/api/exchange/account?exchange=${exchange}`);
 
-export const disconnectExchange = () => request<{ removed: boolean }>('/api/exchange/account', { method: 'DELETE' });
+export const disconnectExchange = (exchange: ExchangeName = 'hyperliquid') => request<{ removed: boolean }>(`/api/exchange/account?exchange=${exchange}`, { method: 'DELETE' });
 
 export const panicStop = () =>
   request<{ auto_off: number; closed: unknown[]; cancelled: number; errors: string[] }>('/api/panic', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true }) });

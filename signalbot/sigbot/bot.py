@@ -10,7 +10,7 @@ import threading
 import time
 from html import escape as esc
 
-from app.db import DbError
+from app.db import EXCHANGES, DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
@@ -20,7 +20,9 @@ from app.monitor import cached_result
 from app.service import ParamError
 from app.secrets_store import SecretError, encrypt
 from app.tradelog import read_tail, trade_error, trade_log
-from app.trading import adapter_for, forget_adapter, mask_address, verify_hyperliquid
+from app.trading import EXCHANGE_LABELS, adapter_for, adapters_for, forget_adapter, mask_address, verify_bybit, verify_hyperliquid
+
+from app.trading import BYBIT_KEY
 
 from .engine import Cancelled, EvalError, fingerprint
 from .ui import MonitorUI
@@ -44,8 +46,9 @@ class SignalService:
         self._stop = threading.Event()
         self.last_cycle = None
         self.ui = MonitorUI(self)
-        self._retry_ids = {r["config_id"] for r in db.list_retries()}      # входы, которые не удались до перезапуска: повторяются при первой проверке конфига
+        self._retry_ids = {(r["config_id"], r["exchange"]) for r in db.list_retries()}      # входы, которые не удались до перезапуска: повторяются при первой проверке конфига
         self._hl = {}                       # user_id -> шаг подключения Hyperliquid (ждём адрес кошелька / ключ API-кошелька)
+        self._by = {}                       # user_id -> шаг подключения Bybit (ждём API-ключ / секрет)
 
     # ---------------- отправка ----------------
     def send(self, chat, text, keyboard=None):
@@ -57,9 +60,12 @@ class SignalService:
     reply = send
 
     # ---------------- входящие ----------------
-    def adapter_for(self, user_id):
-        """Адаптер биржи пользователя: его подключённый счёт Hyperliquid или симуляция (ордера не отправляются)."""
-        return adapter_for(self.db, user_id)
+    def adapter_for(self, user_id, exchange="hyperliquid"):
+        """Адаптер биржи пользователя: его подключённый счёт (Hyperliquid по умолчанию, Bybit) или симуляция (ордера не отправляются)."""
+        return adapter_for(self.db, user_id, exchange)
+
+    def adapters_for(self, user_id):
+        return adapters_for(self.db, user_id)
 
     def forget(self, cfg_id):
         self._fp.pop(cfg_id, None)                                  # следующий цикл пересчитает конфиг
@@ -102,7 +108,7 @@ class SignalService:
         if not user:
             self.send(chat, fm.NOT_LINKED)
             return
-        if self._hl_pending(chat, user, msg, text, cmd):                  # идёт подключение счёта: сообщение — адрес кошелька или ключ
+        if self._hl_pending(chat, user, msg, text, cmd) or self._by_pending(chat, user, msg, text, cmd):         # идёт подключение счёта: сообщение — адрес кошелька / ключ
             return
         doc = msg.get("document")
         if doc:
@@ -271,7 +277,7 @@ class SignalService:
         a = arg.strip().lower()
         if a == "now":
             mode = user.get("digest") if user.get("digest") in digest_mod.PERIOD_H else "daily"
-            self.send(chat, digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, user, self.adapter_for(user["id"]), self.engine.available, mode))
+            self.send(chat, digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, user, self.adapters_for(user["id"]), self.engine.available, mode))
             return
         if a in ("off", "daily", "weekly"):
             self.db.set_digest(user["id"], a)
@@ -283,7 +289,7 @@ class SignalService:
 
     def cmd_export(self, chat, user, arg):
         """Выгрузка в CSV: /export trades (сделки стратегий, расчёт), /export log (журнал автоторговли), /export fills (реальные исполнения на бирже)."""
-        kind = arg.strip().lower()
+        kind, _, which = arg.strip().lower().partition(" ")
         if kind == "trades":
             items = []
             for c in self.db.list_configs(user["id"]):
@@ -295,9 +301,13 @@ class SignalService:
         elif kind in ("log", "autolog"):
             body, name = exporter.autolog_csv(self.db.list_auto_log(user["id"], 500)), "maverick-autolog.csv"
         elif kind == "fills":
-            ad = self.adapter_for(user["id"])
+            exname = self.EX_ALIASES.get(which.strip() or "hl")
+            if not exname:
+                self.send(chat, "Биржа: hl (Hyperliquid) или bybit — например, /export fills bybit.")
+                return
+            ad = self.adapter_for(user["id"], exname)
             if not ad.real:
-                self.send(chat, "Счёт биржи не подключён (/hl) — реальных исполнений нет.")
+                self.send(chat, f"Счёт {EXCHANGE_LABELS[exname]} не подключён ({'/hl' if exname == 'hyperliquid' else '/bybit'}) — реальных исполнений нет.")
                 return
             try:
                 body, name = exporter.fills_csv(ad.fills(500)), "maverick-fills.csv"
@@ -305,7 +315,7 @@ class SignalService:
                 self.send(chat, f"⚠️ Не удалось получить исполнения: {esc(str(e)[:200])}")
                 return
         else:
-            self.send(chat, "Что выгрузить?\n/export trades — сделки стратегий (расчёт)\n/export log — журнал автоторговли\n/export fills — реальные исполнения на бирже")
+            self.send(chat, "Что выгрузить?\n/export trades — сделки стратегий (расчёт)\n/export log — журнал автоторговли\n/export fills [hl|bybit] — реальные исполнения на бирже")
             return
         self.tg.send_document(chat, name, body.encode("utf-8"), caption=name)
 
@@ -317,7 +327,7 @@ class SignalService:
             if u["disabled"] or not u["telegram_id"] or not digest_mod.due(u["digest"], u["digest_ts"], now, hour):
                 continue
             try:
-                text = digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, u, self.adapter_for(u["id"]), self.engine.available, u["digest"], now)
+                text = digest_mod.build_digest(self.db, self.engine.store, self.s.defaults, u, self.adapters_for(u["id"]), self.engine.available, u["digest"], now)
                 self.send(u["telegram_id"], text)
             except Exception:
                 log.exception("сводка для %s", u["login"])
@@ -331,6 +341,7 @@ class SignalService:
     HL_TTL = 600
 
     def start_hl_connect(self, chat, user, testnet=True):
+        self._by.pop(user["id"], None)
         self._hl[user["id"]] = {"step": "wallet", "testnet": bool(testnet), "until": time.time() + self.HL_TTL, "tries": 0}
         net = "тестовая сеть" if testnet else "БОЕВАЯ сеть"
         self.tg.send_message(chat, f"🔌 <b>Подключение Hyperliquid</b> ({net})\n\nШаг 1 из 2: пришлите <b>адрес основного кошелька</b> Hyperliquid (0x… и 40 символов) — это счёт, на котором лежат средства.\n\n"
@@ -339,7 +350,9 @@ class SignalService:
                              keyboard=[[("Отмена", "hlx")]])
 
     def cancel_hl(self, user):
-        return self._hl.pop(user["id"], None) is not None
+        """Отменяет незавершённое подключение счёта (Hyperliquid или Bybit)."""
+        a, b = self._hl.pop(user["id"], None), self._by.pop(user["id"], None)
+        return a is not None or b is not None
 
     def _delete(self, chat, msg):
         mid = (msg or {}).get("message_id")
@@ -407,6 +420,135 @@ class SignalService:
                   )
         return True
 
+    # ---------------- подключение счёта Bybit (только USDT-фьючерсы) ----------------
+    BY_NETS = {"live": "БОЕВАЯ сеть", "testnet": "тестовая сеть (testnet.bybit.com)", "demo": "демо-торговля (виртуальные деньги на боевом аккаунте)"}
+
+    def start_bybit_connect(self, chat, user, net="testnet"):
+        net = net if net in self.BY_NETS else "testnet"
+        self._hl.pop(user["id"], None)
+        self._by[user["id"]] = {"step": "key", "net": net, "until": time.time() + self.HL_TTL, "tries": 0}
+        keys = {"live": "Bybit → профиль → API → Create New Key", "testnet": "testnet.bybit.com → профиль → API → Create New Key",
+                "demo": "на bybit.com переключитесь в Demo Trading → профиль → API → Create New Key"}[net]
+        self.tg.send_message(chat, f"🔌 <b>Подключение Bybit</b> — {self.BY_NETS[net]}. Только <b>USDT-фьючерсы</b> (спот и прочее бот не трогает).\n\n"
+                                   f"Создайте ключ: {keys}. Права: только торговля контрактами (<b>Orders, Positions</b>), <b>БЕЗ права вывода</b> (Withdraw) — ключ с выводом я не приму. Лучше ещё привязать ключ к IP сервера бота.\n\n"
+                                   "Шаг 1 из 2: пришлите <b>API-ключ</b>. Дальше я попрошу секрет. Можно одним сообщением: ключ, пробел, секрет.\n"
+                                   "Ваши сообщения я удалю из чата сразу после обработки; секрет хранится в базе зашифрованным. Отмена — кнопка ниже или /cancel.",
+                             keyboard=[[("Отмена", "byx")]])
+
+    def _by_pending(self, chat, user, msg, text, cmd):
+        """Сообщение в сценарии подключения Bybit: API-ключ, затем секрет. True — сообщение съедено сценарием (команды сценарий отменяют)."""
+        st = self._by.get(user["id"])
+        if not st:
+            return False
+        if time.time() > st["until"]:
+            self._by.pop(user["id"], None)
+            self.send(chat, "⌛ Время подключения вышло. Начните заново: /bybit")
+            return False
+        if cmd:
+            self._by.pop(user["id"], None)
+            if cmd == "/cancel":
+                self.send(chat, "Подключение счёта отменено.")
+                return True
+            return False
+        tokens = text.split()
+        if not tokens:
+            return True
+        deleted = self._delete(chat, msg)                                      # ни ключ, ни секрет в чате не оставляем
+        if st["step"] == "key" and len(tokens) == 1:
+            if not BYBIT_KEY.match(tokens[0]):
+                self.send(chat, "API-ключ Bybit — 10–40 латинских букв и цифр. Пришлите ещё раз или нажмите «Отмена».", keyboard=[[("Отмена", "byx")]])
+                return True
+            st.update(key=tokens[0], step="secret")
+            self.send(chat, "Шаг 2 из 2: пришлите <b>секрет</b> (API Secret). Сообщение с ним я удалю сразу.", keyboard=[[("Отмена", "byx")]])
+            return True
+        key, secret = (tokens[0], tokens[1]) if len(tokens) >= 2 else (st.get("key", ""), tokens[0])
+        st["tries"] += 1
+        try:
+            res = verify_bybit(key, secret, st["net"], user_id=user["id"])
+        except ValueError as e:
+            if st["tries"] >= 5:
+                self._by.pop(user["id"], None)
+                self.send(chat, f"❌ {esc(str(e))}\n\nСлишком много попыток — подключение отменено. Начните заново: /bybit")
+                return True
+            st.update(key=key if BYBIT_KEY.match(key) else "", step="secret" if BYBIT_KEY.match(key) else "key")
+            self.send(chat, f"❌ {esc(str(e))}\n\nПришлите " + ("секрет" if st["step"] == "secret" else "API-ключ и секрет") + " ещё раз (или «Отмена»).", keyboard=[[("Отмена", "byx")]])
+            return True
+        try:
+            enc = encrypt(secret, self.db.path)
+        except SecretError as e:
+            self._by.pop(user["id"], None)
+            self.send(chat, f"⚠️ Не удалось сохранить секрет: {esc(str(e))}")
+            return True
+        net = st["net"]
+        self.db.set_exchange_account(user["id"], "bybit", key, enc, net != "live", None, net=net)
+        forget_adapter(user["id"], "bybit")
+        self._by.pop(user["id"], None)
+        self.db.add_auto_log(user["id"], None, "exchange_connected", None, None, "info", {"exchange": "bybit", "net": net, "key": mask_address(key)})
+        trade_log("account_connected", user=user["id"], exchange="bybit", net=net, api_key=mask_address(key), message_deleted=deleted)
+        eq = res["account"].get("equity")
+        self.send(chat, f"✅ <b>Bybit подключён</b> — {self.BY_NETS[net] if net != 'live' else '<b>БОЕВАЯ сеть</b>'}, USDT-фьючерсы\nAPI-ключ <code>{mask_address(key)}</code>"
+                        + (f"\nКапитал: {fm.num(eq, 2)} $" if eq is not None else "")
+                        + ("\n🧹 Ваши сообщения с ключом и секретом удалены из чата." if deleted else "\n⚠️ Не удалось удалить ваше сообщение с секретом — удалите его вручную (у себя и «у всех»).")
+                        + "\n\nАвтомод на Bybit выключен у всех конфигов: включайте его в /monitor (карточка конфига → Bybit). Настройки размера и лимитного входа для биржи: /ex. "
+                          "Код проверен только на имитации биржи — сначала прогоните его в тестовой сети или демо.")
+        return True
+
+    def cmd_bybit(self, chat, user, arg):
+        """Подключение счёта Bybit (API-ключ и секрет) и состояние счёта."""
+        self.ui.open(chat, user, "xb")
+
+    EX_ALIASES = {"hl": "hyperliquid", "hyper": "hyperliquid", "hyperliquid": "hyperliquid", "by": "bybit", "bb": "bybit", "bybit": "bybit"}
+    EX_KEYS = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage", "entry_limit_pct", "entry_limit_dir", "entry_limit_ttl_h")
+
+    def cmd_ex(self, chat, user, arg):
+        """/ex № [hl|bybit [ключ=значение …| reset]] — настройки конфига отдельно для биржи (поверх параметров конфига): trade_pct, leverage, pyramid_pct, pyramid_leverage,
+        entry_limit_pct, entry_limit_dir (pullback|breakout), entry_limit_ttl_h; «-» вместо значения убирает настройку (брать из конфига), reset — убирает все."""
+        parts = arg.replace(",", ".").split()
+        if not parts or not parts[0].lstrip("#").isdigit():
+            self.send(chat, "Настройки конфига отдельно для биржи:\n/ex № — показать\n/ex № bybit trade_pct=10 leverage=5 — 10% депозита с плечом 5× только на Bybit\n"
+                            "/ex № hl entry_limit_pct=0.3 entry_limit_dir=pullback entry_limit_ttl_h=4 — вход лимиткой на Hyperliquid\n"
+                            "/ex № bybit trade_pct=- — убрать настройку (брать из конфига); /ex № bybit reset — убрать все\n"
+                            f"Ключи: {', '.join(self.EX_KEYS)}.\nСигналы и правила выхода (стоп, тейки, БУ) общие — из конфига.")
+            return
+        c = self._cfg(chat, user, parts[0].lstrip("#"))
+        if not c:
+            return
+        if len(parts) == 1:
+            self.ui.open(chat, user, f"cx:{c['id']}")
+            return
+        name = self.EX_ALIASES.get(parts[1].lower())
+        if not name:
+            self.send(chat, "Биржа: hl (Hyperliquid) или bybit.")
+            return
+        patch = {}
+        for tok in parts[2:]:
+            if tok.lower() == "reset":
+                patch = {k: None for k in self.EX_KEYS}
+                break
+            k, sep, v = tok.partition("=")
+            if not sep or k not in self.EX_KEYS:
+                self.send(chat, f"Не понял «{esc(tok)}». Формат: ключ=значение, ключи: {', '.join(self.EX_KEYS)}.")
+                return
+            if v in ("-", "none", "default"):
+                patch[k] = None
+            elif k == "entry_limit_dir":
+                patch[k] = v
+            else:
+                try:
+                    patch[k] = float(v)
+                except ValueError:
+                    self.send(chat, f"{esc(k)}: нужно число.")
+                    return
+        if not patch:
+            self.ui.open(chat, user, f"cx:{c['id']}")
+            return
+        try:
+            over = manage.set_ex_over(self.db, self.adapter_for(user["id"], name), user["id"], c["id"], name, **patch)
+        except manage.ManageError as e:
+            self.send(chat, f"⚠️ {esc(str(e))}")
+            return
+        self.send(chat, f"✅ <b>#{c['id']} {esc(c['name'])}</b> на {EXCHANGE_LABELS[name]}: " + (fm.over_line(over) if over else "настройки биржи убраны — берётся из конфига") + ". Действует на новые входы на этой бирже; открытые позиции не меняются.")
+
     def cmd_list(self, chat, user, arg):
         self.send(chat, fm.list_message(self.db.list_configs(user["id"])))
 
@@ -414,7 +556,7 @@ class SignalService:
         c = self._cfg(chat, user, arg)
         if c:
             try:
-                manage.remove_config(self.db, user["id"], c["id"], self.adapter_for(user["id"]))
+                manage.remove_config(self.db, user["id"], c["id"], self.adapters_for(user["id"]))
             except manage.ManageError as e:
                 self.send(chat, f"⚠️ {esc(str(e))}")
                 return
@@ -614,8 +756,8 @@ class SignalService:
         if not force and cfg["baseline"] and self._fp.get(cfg["id"]) == fp and not cfg["catchup"]["armed"]:
             return
         res, warn = self._evaluate(p, memo, user)
-        if cfg["id"] in self._retry_ids:                         # вход, который не удался до перезапуска
-            self._retry_ids.discard(cfg["id"])
+        if any(cid == cfg["id"] for cid, _ in self._retry_ids):  # вход, который не удался до перезапуска (на какой-то бирже)
+            self._retry_ids = {x for x in self._retry_ids if x[0] != cfg["id"]}
             self._retry_open(cfg, res, chat)
         label = self.s.sources[p["source"]].label
         upd = {"error": None}
@@ -649,7 +791,7 @@ class SignalService:
         self.db.update_config(cfg["id"], **upd)
         if cfg["catchup"]["armed"]:                                  # «догнать свежий сигнал»: один заход после включения автомода
             self.db.set_catchup(cfg["user_id"], cfg["id"], armed=False)
-            if cfg["auto"]["open"] and cfg["catchup"]["on"]:
+            if cfg["any_open"] and cfg["catchup"]["on"]:
                 self._catch_up(cfg, res, chat)
         self._fp[cfg["id"]] = fp
         # окна свечей топ-коинов для статистики докачиваются в конце цикла, с ограничением по времени (карточка и сигналы от них не зависят)
@@ -679,62 +821,79 @@ class SignalService:
             self.send(chat, fm.ready_cancelled_message(cfg, res, prev))
 
     # ---------------- автомод: действия ----------------
-    def _do(self, cfg, kind, symbol, side, fn, details):
+    def _name(self, cfg, ex):
+        """Имя конфига в сообщениях; с биржей, если она не единственная (Bybit, либо у конфига включён автомод и на другой бирже)."""
+        tag = ex != "hyperliquid" or any(cfg["ex"][x]["open"] or cfg["ex"][x]["manage"] for x in EXCHANGES if x != ex)
+        return f"<b>#{cfg['id']} {esc(cfg['name'])}</b>" + (f" <i>[{EXCHANGE_LABELS.get(ex, ex)}]</i>" if tag else "")
+
+    def _do(self, cfg, kind, symbol, side, fn, details, ad=None, ex="hyperliquid"):
         """Выполняет действие через адаптер биржи и пишет результат в журнал; ошибка адаптера не ломает цикл бота."""
-        trade_log("auto_decision", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side, exchange=self.adapter_for(cfg["user_id"]).name, **details)
+        ad = ad or self.adapter_for(cfg["user_id"], ex)
+        trade_log("auto_decision", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side, exchange=ad.name, target=ex, **details)
         try:
             res = fn()
             status = res.get("status", "sent")
-            trade_log("auto_result", user=cfg["user_id"], config=cfg["id"], kind=kind, status=status, result=res)
+            trade_log("auto_result", user=cfg["user_id"], config=cfg["id"], kind=kind, status=status, result=res, target=ex)
         except Exception as e:                                  # NotConfigured и ошибки биржи
             res, status = {"error": str(e)}, "error"
-            log.warning("автомод %s по %s: %s", kind, cfg["name"], e)
-            trade_error("auto_fail", e, user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side)
-        self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": self.adapter_for(cfg["user_id"]).name})
+            log.warning("автомод %s по %s (%s): %s", kind, cfg["name"], ex, e)
+            trade_error("auto_fail", e, user=cfg["user_id"], config=cfg["id"], name=cfg["name"], kind=kind, symbol=symbol, side=side, target=ex)
+        self.db.add_auto_log(cfg["user_id"], cfg["id"], kind, symbol, side, status, {**details, **res, "exchange": ad.name, "target": ex})
         return status, res
 
-    def _auto_open(self, cfg, res, sig, plan):
-        """Автомод «открывать по сигналу»: вход или добор по новому сигналу (объём — как в плане конфига). Перед ордером состояние сверяется с реальной биржей."""
-        if not cfg["auto"]["open"]:
-            return
-        p = res["params"]
+    def _auto_open(self, cfg, res, sig, plan, only=None):
+        """Автомод «открывать по сигналу»: вход или добор по новому сигналу на КАЖДОЙ бирже, где он включён (объём и лимитный вход — по настройкам конфига для этой биржи).
+        only — только на этих биржах. Сбой одной биржи не мешает другой."""
+        for name in EXCHANGES:
+            if cfg["ex"][name]["open"] and (only is None or name in only):
+                try:
+                    self._open_on(cfg, res, sig, plan, name)
+                except Exception as e:
+                    log.exception("автомод %s: вход по %s", name, cfg["name"])
+                    self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⚠️ {self._name(cfg, name)}: вход не выполнен — {esc(str(e) or type(e).__name__)[:300]}")
+
+    def _open_on(self, cfg, res, sig, plan, ex):
+        """Вход или добор по новому сигналу на одной бирже. Перед ордером состояние сверяется с реальной биржей."""
+        ecfg = cfg["ex"][ex]
+        over = ecfg["over"]
+        p = manage.effective_params(res["params"], over)                      # параметры конфига с настройками этой биржи поверх (размер, лимитный вход)
         add = bool(sig.get("pyramid"))
-        ad = self.adapter_for(cfg["user_id"])
-        base = cfg["auto"].get("base", "config")
-        pend = None if add else self.db.get_pending(cfg["id"])
+        ad = self.adapter_for(cfg["user_id"], ex)
+        base = ecfg.get("base", "config")
+        pend = None if add else self.db.get_pending(cfg["id"], ex)
         if pend:                                            # по конфигу уже ждёт вход (лимитка / вход по ходу)
             if pend["side"] == sig["side"]:
-                trade_log("auto_skipped", "info", user=cfg["user_id"], config=cfg["id"], symbol=p["symbol"], side=sig["side"], reason="вход по прошлому сигналу уже ждёт исполнения")
+                trade_log("auto_skipped", "info", user=cfg["user_id"], config=cfg["id"], symbol=p["symbol"], side=sig["side"], target=ex, reason="вход по прошлому сигналу уже ждёт исполнения")
                 return
             self._cancel_pending(pend, cfg, ad, "пришёл обратный сигнал")
         pre = manage.preflight_open(ad, p["symbol"], sig["side"], add)
         if pre.get("skip"):
-            self._skip_open(cfg, p, sig, add, ad, pre["skip"], retry=pre.get("retry", False))
+            self._skip_open(cfg, p, sig, add, ad, pre["skip"], retry=pre.get("retry", False), ex=ex)
             return
         acc = manage.account_quick(ad, cfg["user_id"], ttl=0) if ad.real else None            # свежий баланс: размер и свободная маржа решают, пройдёт ли ордер
         if acc and pre.get("close_first"):
             acc = {**acc, "free": None}                     # встречная позиция сейчас закроется и освободит маржу — свободную маржу до этого не сверяем
-        sz = manage.size_order(self.engine.order_size, res, add, ad, base, acc)
+        sz = manage.size_order(self.engine.order_size, res, add, ad, base, acc, over)
         if sz.get("skip"):
-            self._skip_open(cfg, p, sig, add, ad, sz["skip"], retry=sz.get("retry", False))
+            self._skip_open(cfg, p, sig, add, ad, sz["skip"], retry=sz.get("retry", False), ex=ex)
             return
         notional, margin = sz["notional"], sz["margin"]
         if pre.get("close_first"):                          # на бирже позиция в обратную сторону: по правилам стратегии это разворот — сначала закрываем её
-            st, r = self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"})
+            st, r = self._do(cfg, "close_reverse", p["symbol"], pre["close_first"], lambda: ad.close_market(p["symbol"], pre["close_first"], 1.0), {"signal_ts": sig["ts"], "note": "разворот перед входом"}, ad=ad, ex=ex)
             if st == "error":                               # встречная позиция не закрылась — открывать новую поверх неё нельзя
-                self._open_failed(cfg, sig, add, f"не удалось закрыть встречную позицию: {r.get('error')}")
+                self._open_failed(cfg, sig, add, f"не удалось закрыть встречную позицию: {r.get('error')}", ex)
                 return
         if p.get("entry_limit_pct") and not add:
-            self._place_entry_order(cfg, p, sig, ad, base, sz, notional, margin)
+            self._place_entry_order(cfg, p, sig, ad, base, sz, notional, margin, ex)
             return
         st, r = self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                          lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
                                                 plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
-                         {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"]})
+                         {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"]}, ad=ad, ex=ex)
         if st == "error":
-            self._open_failed(cfg, sig, add, r.get("error"))
+            self._open_failed(cfg, sig, add, r.get("error"), ex)
         else:
-            self.db.clear_retry(cfg["id"])
+            self.db.clear_retry(cfg["id"], ex)
 
     def _catch_up(self, cfg, res, chat):
         """Автомод включён при включённой опции «догнать сигнал»: входим по ПОСЛЕДНЕМУ сигналу, если он свеж (не старше age_min минут), по расчёту позиция по нему ещё открыта
@@ -801,13 +960,15 @@ class SignalService:
             self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": False, "leg": 1}, plan)
             return
         first_ts = first["signal_ts"] if first is not None else sig["ts"]
-        limit_first = bool(p.get("entry_limit_pct"))
+        opens = [x for x in EXCHANGES if cfg["ex"][x]["open"]]
+        limit_on = {x for x in opens if manage.effective_params(p, cfg["ex"][x]["over"]).get("entry_limit_pct")}      # на этих биржах первая нога — лимиткой, добор к ещё не открытой позиции не ставится
         self.send(chat, f"⏩ {name}: последний сигнал {side_ru} от {fm.ts_str(sig['ts'])} ({age:.0f} мин назад) — добор к позиции, которая по расчёту открыта. Догоняю позицию: сначала первую ногу"
-                        + ("" if first is not None else " (первая нога по расчёту уже закрыта — вхожу текущей открытой частью)") + (f", потом добор. Вход лимиткой: добор не ставлю — добирать можно только в открытую позицию." if limit_first else ", потом добор."))
+                        + ("" if first is not None else " (первая нога по расчёту уже закрыта — вхожу текущей открытой частью)") + (", потом добор." if not limit_on else f", потом добор. Вход лимиткой{'' if len(opens) == 1 else ' (' + ', '.join(EXCHANGE_LABELS[x] for x in sorted(limit_on)) + ')'}: добор не ставлю — добирать можно только в открытую позицию."))
         self._auto_open(cfg, res, {"ts": first_ts, "side": sig["side"], "pyramid": False, "leg": 1}, plan)
-        if limit_first or first is None:
+        market = set(opens) - limit_on
+        if first is None or not market:
             return
-        self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": True, "leg": 2}, plan)
+        self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": True, "leg": 2}, plan, only=market)
 
     def _signal_price(self, symbol, ts):
         """Цена сигнала по свечам: open первой свечи не раньше сигнала (или close последней, если свечи входа ещё нет)."""
@@ -822,16 +983,17 @@ class SignalService:
         return candles[i][1] if i < len(candles) else candles[-1][4]
 
     # ---------------- вход лимитным ордером / по ходу цены ----------------
-    def _place_entry_order(self, cfg, p, sig, ad, base, sz, notional, margin):
+    def _place_entry_order(self, cfg, p, sig, ad, base, sz, notional, margin, ex="hyperliquid"):
         """Сигнал подтверждён, но вход не по рынку, а на X % движения цены от текущей: pullback — лимитный ордер на бирже (откат), breakout — ждём, пока цена дойдёт до уровня по ходу
-        (проверяется каждый цикл), и тогда входим по рынку. Ордер живёт entry_limit_ttl_h часов. Стоп и тейки ставятся после исполнения — от цены исполнения."""
+        (проверяется каждый цикл), и тогда входим по рынку. Ордер живёт entry_limit_ttl_h часов. Стоп и тейки ставятся после исполнения — от цены исполнения.
+        p — параметры с настройками этой биржи (entry_limit_*)."""
         d = 1 if sig["side"] == "long" else -1
         mode, pct, ttl = p.get("entry_limit_dir") or "pullback", p["entry_limit_pct"], p.get("entry_limit_ttl_h") or 4.0
         ref = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
         chat = self.db.get_user(cfg["user_id"])["telegram_id"]
-        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
+        name = self._name(cfg, ex)
         if not ref:
-            self._skip_open(cfg, p, sig, False, ad, "не удалось получить текущую цену — лимитный вход не поставлен", retry=True)
+            self._skip_open(cfg, p, sig, False, ad, "не удалось получить текущую цену — лимитный вход не поставлен", retry=True, ex=ex)
             return
         level = ref * (1 - d * pct / 100) if mode == "pullback" else ref * (1 + d * pct / 100)
         lev = (notional / margin) if margin else p["leverage"]
@@ -839,16 +1001,16 @@ class SignalService:
         details = {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "level": level, "ref": ref, "mode": mode, "pct": pct, "ttl_h": ttl, "size_base": base, "size_note": sz["note"]}
         order_id = None
         if mode == "pullback":
-            st, r = self._do(cfg, "limit_entry", p["symbol"], sig["side"], lambda: ad.place_limit_entry(p["symbol"], sig["side"], notional, level, lev), details)
+            st, r = self._do(cfg, "limit_entry", p["symbol"], sig["side"], lambda: ad.place_limit_entry(p["symbol"], sig["side"], notional, level, lev), details, ad=ad, ex=ex)
             if st == "error":
-                self._open_failed(cfg, sig, False, r.get("error"))
+                self._open_failed(cfg, sig, False, r.get("error"), ex)
                 return
             if st == "dry_run":                              # счёт не подключён: лимитку в симуляции не отслеживаем
                 self.send(chat, f"🧪 {name}: симуляция — поставил бы лимитку на {side_ru} по {fm.price(level)} ({pct:g}% {'ниже' if d == 1 else 'выше'} цены {fm.price(ref)}), ордер не отправлялся.")
                 return
             order_id = r.get("order_id")
-        self.db.set_pending(cfg["id"], cfg["user_id"], sig["ts"], p["symbol"], sig["side"], mode, level, ref, notional, margin, lev, order_id, self.clock() + ttl * 3600)
-        self.db.clear_retry(cfg["id"])
+        self.db.set_pending(cfg["id"], cfg["user_id"], sig["ts"], p["symbol"], sig["side"], mode, level, ref, notional, margin, lev, order_id, self.clock() + ttl * 3600, exchange=ex)
+        self.db.clear_retry(cfg["id"], ex)
         if mode == "pullback":
             self.send(chat, f"⏳ {name}: сигнал на {side_ru} подтверждён — вместо рынка поставил <b>лимитку {fm.price(level)}</b> ({pct:g}% {'ниже' if d == 1 else 'выше'} цены {fm.price(ref)}), объём {fm.usd(notional).lstrip('+')}. "
                           f"Живёт {ttl:g} ч; стоп и тейки встанут после исполнения.")
@@ -857,26 +1019,28 @@ class SignalService:
 
     def _cancel_pending(self, pend, cfg, ad, reason):
         """Снимает ожидающий вход: лимитку отменяем на бирже; если успела частично исполниться — защищаем то, что набралось."""
-        self.db.clear_pending(pend["config_id"])
+        ex = pend.get("exchange", "hyperliquid")
+        self.db.clear_pending(pend["config_id"], ex)
         chat = self.db.get_user(pend["user_id"])["telegram_id"]
-        name = f"<b>#{pend['config_id']} {esc(cfg['name'] if cfg else '?')}</b>"
+        name = self._name(cfg, ex) if cfg else f"<b>#{pend['config_id']} ?</b>"
         filled = 0.0
         if pend["order_id"]:
             try:
                 ad.cancel_order_id(pend["order_id"], pend["symbol"])
                 filled = ad.order_state(pend["order_id"], pend["symbol"]).get("filled") or 0.0
             except Exception as e:
-                trade_error("auto_fail", e, user=pend["user_id"], config=pend["config_id"], kind="cancel_entry", symbol=pend["symbol"], side=pend["side"])
+                trade_error("auto_fail", e, user=pend["user_id"], config=pend["config_id"], kind="cancel_entry", symbol=pend["symbol"], side=pend["side"], target=ex)
                 self.send(chat, f"⚠️ {name}: не удалось отменить лимитку #{pend['order_id']}: {esc(str(e)[:200])}. Проверьте ордера на бирже вручную.")
                 return
-        self.db.add_auto_log(pend["user_id"], pend["config_id"], "cancel_entry", pend["symbol"], pend["side"], "sent", {"reason": reason, "order_id": pend["order_id"], "level": pend["level"]})
+        self.db.add_auto_log(pend["user_id"], pend["config_id"], "cancel_entry", pend["symbol"], pend["side"], "sent", {"reason": reason, "order_id": pend["order_id"], "level": pend["level"], "target": ex})
         self.send(chat, f"🚫 {name}: ожидающий вход по {fm.price(pend['level'])} снят — {esc(reason)}.")
         if filled:
             self._protect_filled(pend, cfg, ad, chat, partial=True)
 
     def _protect_filled(self, pend, cfg, ad, chat, partial=False):
         """Лимитка исполнилась (полностью или частично): берём реальную позицию, ставим стоп и тейки от цены исполнения."""
-        name = f"<b>#{pend['config_id']} {esc(cfg['name'])}</b>"
+        ex = pend.get("exchange", "hyperliquid")
+        name = self._name(cfg, ex)
         base = pend["symbol"].split("/")[0]
         pos = next((x for x in ad.positions() if (x.get("symbol") or "").split("/")[0] == base and x["side"] == pend["side"]), None)
         if not pos:
@@ -886,7 +1050,7 @@ class SignalService:
         entry = pos.get("entry") or pend["level"]
         plan = self.engine.plan(pend["side"], entry, p["tps"], p["sl_pct"])
         st, r = self._do(cfg, "protect", pend["symbol"], pend["side"], lambda: ad.protect(pend["symbol"], pend["side"], pos["size"], plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
-                         {"signal_ts": pend["signal_ts"], "entry": entry, "size": pos["size"], "partial": partial})
+                         {"signal_ts": pend["signal_ts"], "entry": entry, "size": pos["size"], "partial": partial}, ad=ad, ex=ex)
         if st == "error":
             self.send(chat, f"🚨 {name}: лимитка исполнена по {fm.price(entry)}, но стоп/тейки НЕ встали: {esc(str(r.get('error'))[:300])}. Проверьте позицию на бирже!")
             return
@@ -899,21 +1063,22 @@ class SignalService:
             try:
                 self._tick_one(row)
             except Exception:
-                log.exception("ожидающий вход конфига %s", row["config_id"])
+                log.exception("ожидающий вход конфига %s (%s)", row["config_id"], row.get("exchange"))
 
     def _tick_one(self, row):
+        ex = row.get("exchange", "hyperliquid")
         cfg = self.db.get_config(row["config_id"])
         user = self.db.get_user(row["user_id"])
         if not user:
-            self.db.clear_pending(row["config_id"])
+            self.db.clear_pending(row["config_id"], ex)
             return
-        ad = self.adapter_for(row["user_id"])
+        ad = self.adapter_for(row["user_id"], ex)
         chat = user["telegram_id"]
         now = self.clock()
-        if not cfg or cfg["paused"] or not cfg["auto"]["open"]:
+        if not cfg or cfg["paused"] or not cfg["ex"][ex]["open"]:
             self._cancel_pending(row, cfg, ad, "конфиг удалён" if not cfg else "конфиг на паузе" if cfg["paused"] else "автомод «открывать» выключен")
             return
-        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
+        name = self._name(cfg, ex)
         d = 1 if row["side"] == "long" else -1
         if row["order_id"]:                                  # лимитка на бирже
             try:
@@ -922,93 +1087,95 @@ class SignalService:
                 log.warning("состояние ордера %s: %s", row["order_id"], e)
                 return
             if st["status"] == "filled":
-                self.db.clear_pending(row["config_id"])
+                self.db.clear_pending(row["config_id"], ex)
                 self._protect_filled(row, cfg, ad, chat)
             elif st["status"] == "open" and now >= row["expires"]:
                 self._cancel_pending(row, cfg, ad, "не исполнилась за срок жизни ордера")
             elif st["status"] in ("canceled", "unknown"):    # ордера нет: отменён снаружи или исполнился, а статус не отдали — смотрим позицию
-                self.db.clear_pending(row["config_id"])
+                self.db.clear_pending(row["config_id"], ex)
                 base = row["symbol"].split("/")[0]
                 if any((x.get("symbol") or "").split("/")[0] == base and x["side"] == row["side"] for x in ad.positions()):
                     self._protect_filled(row, cfg, ad, chat)
                 else:
-                    self.db.add_auto_log(row["user_id"], row["config_id"], "cancel_entry", row["symbol"], row["side"], "info", {"reason": "ордер снят на бирже", "order_id": row["order_id"]})
+                    self.db.add_auto_log(row["user_id"], row["config_id"], "cancel_entry", row["symbol"], row["side"], "info", {"reason": "ордер снят на бирже", "order_id": row["order_id"], "target": ex})
                     self.send(chat, f"🚫 {name}: лимитки {row['order_id']} на бирже больше нет, позиции нет — вход не состоялся.")
             return
         # вход по ходу: ждём цену
         price = self.engine.price_fn(row["symbol"]) if self.b.live_price else None
         if price and ((price >= row["level"]) if d == 1 else (price <= row["level"])):
-            self.db.clear_pending(row["config_id"])
-            p = cfg["params"]
+            self.db.clear_pending(row["config_id"], ex)
+            p = manage.effective_params(cfg["params"], cfg["ex"][ex]["over"])
             plan = self.engine.plan(row["side"], price, p["tps"], p["sl_pct"])
             sig = {"ts": row["signal_ts"], "side": row["side"], "pyramid": False, "leg": 1}
             self.send(chat, f"▶️ {name}: цена дошла до {fm.price(row['level'])} ({fm.price(price)}) — вхожу по рынку.")
             pre = manage.preflight_open(ad, row["symbol"], row["side"], False)
             if pre.get("skip"):
-                self._skip_open(cfg, p, sig, False, ad, pre["skip"], retry=pre.get("retry", False))
+                self._skip_open(cfg, p, sig, False, ad, pre["skip"], retry=pre.get("retry", False), ex=ex)
                 return
             st, r = self._do(cfg, "open", row["symbol"], row["side"],
                              lambda: ad.open_market(row["symbol"], row["side"], row["notional"], row["leverage"], plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
-                             {"signal_ts": row["signal_ts"], "notional": row["notional"], "margin": row["margin"], "level": row["level"], "mode": "breakout"})
+                             {"signal_ts": row["signal_ts"], "notional": row["notional"], "margin": row["margin"], "level": row["level"], "mode": "breakout"}, ad=ad, ex=ex)
             if st == "error":
-                self._open_failed(cfg, sig, False, r.get("error"))
+                self._open_failed(cfg, sig, False, r.get("error"), ex)
             return
         if now >= row["expires"]:
             self._cancel_pending(row, cfg, ad, "цена не дошла до уровня за срок ожидания")
 
-    def _open_failed(self, cfg, sig, add, reason):
+    def _open_failed(self, cfg, sig, add, reason, ex="hyperliquid"):
         """Вход не удался: запоминаем сигнал, чтобы повторить при перезапуске бота (пока он свеж), и сообщаем владельцу."""
-        self.db.set_retry(cfg["id"], sig["ts"], sig["side"], add, sig.get("leg"), str(reason))
+        self.db.set_retry(cfg["id"], sig["ts"], sig["side"], add, sig.get("leg"), str(reason), exchange=ex)
         tg = self.db.get_user(cfg["user_id"])["telegram_id"]
-        self.send(tg, f"⚠️ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {'добор' if add else 'вход'} {'в лонг' if sig['side'] == 'long' else 'в шорт'} не выполнен: {esc(str(reason)[:300])}\n"
+        self.send(tg, f"⚠️ {self._name(cfg, ex)}: {'добор' if add else 'вход'} {'в лонг' if sig['side'] == 'long' else 'в шорт'} не выполнен: {esc(str(reason)[:300])}\n"
                       f"Сигнал запомнен: после перезапуска бота вход будет повторён, если сигнал ещё свеж (не старше {self.b.max_age_min:g} мин) и позиция по нему не отработала.")
 
     def _retry_open(self, cfg, res, chat):
-        """При запуске бота: повтор входа, который не удался (ошибка биржи, лимит, нехватка маржи). Только если сигнал свеж, автомод включён и по расчёту позиция по сигналу ещё открыта."""
-        r = next((x for x in self.db.list_retries() if x["config_id"] == cfg["id"]), None)
-        if not r:
-            return
-        self.db.clear_retry(cfg["id"])                          # новая неудача запишется заново
+        """При запуске бота: повтор входа, который не удался (ошибка биржи, лимит, нехватка маржи) — отдельно на каждой бирже. Только если сигнал свеж, автомод включён
+        и по расчёту позиция по сигналу ещё открыта."""
         p = res["params"]
-        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
-        age = (self.clock() * 1000 - r["signal_ts"]) / 60000
-        if not cfg["auto"]["open"]:
-            return
-        if age > self.b.max_age_min:
-            self.send(chat, f"⏱ {name}: повтор входа отменён — сигнал устарел ({age:.0f} мин, предел {self.b.max_age_min:g}).")
-            return
-        trade = next((t for t in res["trades"] if t["signal_ts"] == r["signal_ts"] or r["signal_ts"] in (t.get("add_signals") or [])), None)
-        if trade is not None and trade["reason"] != "OPEN":
-            self.send(chat, f"⏱ {name}: повтор входа отменён — по расчёту стратегии позиция по этому сигналу уже закрыта ({trade['reason']}).")
-            return
-        sig = {"ts": r["signal_ts"], "side": r["side"], "pyramid": r["pyramid"], "leg": r["leg"] or 1}
-        entry = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
-        plan = self.engine.plan(sig["side"], entry, p["tps"], p["sl_pct"]) if entry else None
-        trade_log("auto_retry", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], signal_ts=r["signal_ts"], side=r["side"], age_min=round(age, 1), previous_error=r["reason"])
-        self.send(chat, f"🔁 {name}: повторяю {'добор' if r['pyramid'] else 'вход'} {'в лонг' if r['side'] == 'long' else 'в шорт'} по сигналу {fm.ts_str(r['signal_ts'])} (прошлая попытка не удалась: {esc(str(r['reason'])[:120])}).")
-        self._auto_open(cfg, res, sig, plan)
+        for r in [x for x in self.db.list_retries() if x["config_id"] == cfg["id"]]:
+            ex = r["exchange"]
+            self.db.clear_retry(cfg["id"], ex)                  # новая неудача запишется заново
+            name = self._name(cfg, ex)
+            age = (self.clock() * 1000 - r["signal_ts"]) / 60000
+            if not cfg["ex"][ex]["open"]:
+                continue
+            if age > self.b.max_age_min:
+                self.send(chat, f"⏱ {name}: повтор входа отменён — сигнал устарел ({age:.0f} мин, предел {self.b.max_age_min:g}).")
+                continue
+            trade = next((t for t in res["trades"] if t["signal_ts"] == r["signal_ts"] or r["signal_ts"] in (t.get("add_signals") or [])), None)
+            if trade is not None and trade["reason"] != "OPEN":
+                self.send(chat, f"⏱ {name}: повтор входа отменён — по расчёту стратегии позиция по этому сигналу уже закрыта ({trade['reason']}).")
+                continue
+            sig = {"ts": r["signal_ts"], "side": r["side"], "pyramid": r["pyramid"], "leg": r["leg"] or 1}
+            entry = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
+            plan = self.engine.plan(sig["side"], entry, p["tps"], p["sl_pct"]) if entry else None
+            trade_log("auto_retry", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], signal_ts=r["signal_ts"], side=r["side"], age_min=round(age, 1), previous_error=r["reason"], target=ex)
+            self.send(chat, f"🔁 {name}: повторяю {'добор' if r['pyramid'] else 'вход'} {'в лонг' if r['side'] == 'long' else 'в шорт'} по сигналу {fm.ts_str(r['signal_ts'])} (прошлая попытка не удалась: {esc(str(r['reason'])[:120])}).")
+            self._auto_open(cfg, res, sig, plan, only={ex})
 
-    def _skip_open(self, cfg, p, sig, add, ad, reason, retry=False):
+    def _skip_open(self, cfg, p, sig, add, ad, reason, retry=False, ex="hyperliquid"):
         """Вход / добор не выполнен по понятной причине: журнал, лог и сообщение владельцу. retry — причина временная (биржа не ответила, не хватило маржи): сигнал запоминается для повтора при перезапуске."""
-        self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": reason, "exchange": ad.name})
-        trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=reason, retry=retry)
+        self.db.add_auto_log(cfg["user_id"], cfg["id"], "add" if add else "open", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": reason, "exchange": ad.name, "target": ex})
+        trade_log("auto_skipped", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], symbol=p["symbol"], side=sig["side"], reason=reason, retry=retry, target=ex)
         if retry:
-            self.db.set_retry(cfg["id"], sig["ts"], sig["side"], add, sig.get("leg"), reason)
+            self.db.set_retry(cfg["id"], sig["ts"], sig["side"], add, sig.get("leg"), reason, exchange=ex)
         else:
-            self.db.clear_retry(cfg["id"])
-        self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ <b>#{cfg['id']} {esc(cfg['name'])}</b>: {esc(reason)}" + ("\nСигнал запомнен: повторю вход после перезапуска бота, если он ещё свеж." if retry else ""))
+            self.db.clear_retry(cfg["id"], ex)
+        self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⏭ {self._name(cfg, ex)}: {esc(reason)}" + ("\nСигнал запомнен: повторю вход после перезапуска бота, если он ещё свеж." if retry else ""))
 
     def _auto_fill(self, cfg, res, ev):
-        """Автомод «управлять позицией»: после TP1 стоп в безубыток, закрытие к концу недели / по развороту (TP и SL исполняет сама биржа через стоп и лимитки)."""
-        if not cfg["auto"]["manage"]:
-            return
-        sym, side = res["params"]["symbol"], ev["side"]
-        ad = self.adapter_for(cfg["user_id"])
-        if ev.get("tp1_be"):
-            self._do(cfg, "move_stop", sym, side, lambda: ad.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]})
-        if ev["label"] in ("WKND", "REV"):
-            self._do(cfg, "close_weekend" if ev["label"] == "WKND" else "close_reverse", sym, side,
-                     lambda: ad.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]})
+        """Автомод «управлять позицией»: после TP1 стоп в безубыток, закрытие к концу недели / по развороту (TP и SL исполняет сама биржа через стоп и лимитки).
+        Выполняется на каждой бирже, где включено «управлять»."""
+        for ex in EXCHANGES:
+            if not cfg["ex"][ex]["manage"]:
+                continue
+            sym, side = res["params"]["symbol"], ev["side"]
+            ad = self.adapter_for(cfg["user_id"], ex)
+            if ev.get("tp1_be"):
+                self._do(cfg, "move_stop", sym, side, lambda: ad.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]}, ad=ad, ex=ex)
+            if ev["label"] in ("WKND", "REV"):
+                self._do(cfg, "close_weekend" if ev["label"] == "WKND" else "close_reverse", sym, side,
+                         lambda: ad.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]}, ad=ad, ex=ex)
 
     def _send_fills(self, cfg, res, chat, label, upd):
         """Уведомления об исполнениях (TP / SL / БУ / разворот) после отметки fill_ts. У конфига без отметки (создан до этой функции) прошлое не присылаем:

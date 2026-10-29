@@ -541,6 +541,9 @@ export interface MonitorEntry {
   alerts?: number;
   created?: number;
   auto: { open: boolean; manage: boolean; base?: 'config' | 'account' } | null;
+  /** Автомод и собственные настройки конфига для каждой биржи (Hyperliquid — то же, что auto). */
+  ex?: Record<ExchangeName, ExchangeCfg>;
+  pending_entries?: Partial<Record<ExchangeName, { side: 'long' | 'short'; mode: 'pullback' | 'breakout'; level: number; order_id: string | null; expires: number }>>;
   catchup?: { on: boolean; age_min: number; move_pct: number; armed: boolean };
   pending_entry?: { side: 'long' | 'short'; mode: 'pullback' | 'breakout'; level: number; ref: number; order_id: string | null; expires: number } | null;
   paused: boolean;
@@ -550,7 +553,8 @@ export interface MonitorEntry {
   report?: { ts: number; dg: number | null; dl: number; ds: number } | null;
   ready_now?: PendingSignal[];
   recent?: { side: 'long' | 'short'; entry_ts: number; exit_ts: number; reason: Reason; pnl_usd: number; pnl_pct: number; hold_h: number }[];
-  settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; pyramid_pct?: number | null; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side };
+  settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; pyramid_pct?: number | null; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side;
+    entry_limit_pct?: number; entry_limit_dir?: 'pullback' | 'breakout'; entry_limit_ttl_h?: number };
   position: MonitorPositionSummary | null;
   stats?: Record<string, number | null>;
   params?: Record<string, unknown>;
@@ -569,19 +573,37 @@ export interface AutoLogItem {
   details: Record<string, unknown>;
 }
 
+export type ExchangeName = 'hyperliquid' | 'bybit';
+
+/** Настройки конфига ТОЛЬКО для биржи (поверх параметров конфига): размер входа и вход лимитным ордером. Нет ключа — берётся из конфига. */
+export interface ExchangeOverrides {
+  trade_pct?: number;
+  leverage?: number;
+  pyramid_pct?: number;
+  pyramid_leverage?: number;
+  entry_limit_pct?: number;
+  entry_limit_dir?: 'pullback' | 'breakout';
+  entry_limit_ttl_h?: number;
+}
+
+export interface ExchangeCfg { open: boolean; manage: boolean; base: 'config' | 'account'; over: ExchangeOverrides }
+
 export interface ExchangeInfo {
   name: string;
   real: boolean;
   testnet: boolean;
   min_notional: number;
+  label?: string;
+  net?: 'live' | 'testnet' | 'demo';
 }
 
 /** Подключённый счёт на бирже: кто подключён (адрес маскируется, ключ наружу не отдаётся), баланс, позиции, открытые ордера, последние исполнения. */
 export interface ExchangeAccount {
   connected: boolean;
   exchange: ExchangeInfo;
-  wallet: string | null;
+  wallet: string | null;                   // адрес кошелька (Hyperliquid) или API-ключ (Bybit), усечённый
   agent: string | null;
+  net?: string | null;                     // Bybit: live / testnet / demo
   created: number | null;
   verified: number | null;
   error: string | null;
@@ -596,6 +618,8 @@ export interface MonitorResponse {
   log: AutoLogItem[];
   exchange: ExchangeInfo;
   account?: { equity: number | null; free: number | null } | null;
+  exchanges?: Record<ExchangeName, ExchangeInfo>;
+  accounts?: Record<ExchangeName, { equity: number | null; free: number | null } | null>;
   bot?: { state: 'ok' | 'dead' | 'stalled' | 'unknown'; alive_age_s: number | null; cycle_age_s: number | null; dead_min: number; stall_min: number };
   data: { source: string; now: number };
 }

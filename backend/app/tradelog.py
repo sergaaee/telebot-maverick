@@ -17,6 +17,7 @@ from pathlib import Path
 
 HEX64 = re.compile(r"(?i)\b(0x)?[0-9a-f]{64}\b")
 ADDR = re.compile(r"\b0x[0-9a-fA-F]{40}\b")
+KV_SECRET = re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|sign)[\"']?\s*[:=]\s*[\"']?)[A-Za-z0-9+/=_-]{8,}")      # «apiKey=…», «"secret": "…»» в тексте ошибок биржи
 SECRET_KEYS = ("key", "secret", "private", "password", "token")
 _lock = threading.Lock()
 _logger = None
@@ -44,7 +45,7 @@ def scrub(v, depth=0):
     if isinstance(v, (list, tuple)):
         return [scrub(x, depth + 1) for x in v][:50]
     if isinstance(v, str):
-        return ADDR.sub(_mask_addr, HEX64.sub("***", v))[:2000]
+        return ADDR.sub(_mask_addr, KV_SECRET.sub(r"\1***", HEX64.sub("***", v)))[:2000]
     if isinstance(v, float):
         return round(v, 8)
     return v if isinstance(v, (int, bool)) or v is None else scrub(str(v), depth + 1)

@@ -876,6 +876,46 @@ def scenario(pg, base, state_url):
     c_cu = E2E_DB.find_config(tid, "Переименован")["catchup"]
     check("настройки «догнать сигнал» сохраняются в конфиге (включено, 30 мин, 0.1%)", c_cu["on"] and c_cu["age_min"] == 30.0 and c_cu["move_pct"] == 0.1 and card("Переименован").get_by_test_id("mon-catchup-on").is_checked())
     card("Переименован").get_by_test_id("mon-catchup-on").click(); pg.wait_for_timeout(1000)
+    # Bybit (только USDT-фьючерсы): отдельный счёт, свои переключатели и свои настройки конфига для биржи
+    bb_box = pg.get_by_test_id("mon-exchange-bybit")
+    check("блок Bybit: счёт не подключён — инструкция про /bybit, полей ввода ключей на сайте нет; в карточках только Hyperliquid", "/bybit" in bb_box.inner_text() and "USDT-фьючерсы" in bb_box.inner_text() and bb_box.locator("input").count() == 0
+          and card("Переименован").get_by_test_id("mon-auto-bybit").count() == 0)
+    E2E_DB.set_exchange_account(tid, "bybit", "AbCdEfGh12345", "не-шифртекст", True, None, net="demo")
+    pg.get_by_role("button", name="Обновить", exact=True).click(); pg.get_by_test_id("exchange-disconnect-bybit").wait_for(timeout=15000)
+    bb_text = pg.get_by_test_id("mon-exchange-bybit").inner_text()
+    check("блок Bybit: подключённый счёт — демо-торговля, замаскированный ключ, секрета на странице нет", "демо-торговля" in bb_text and "AbCdEf…2345" in bb_text and "не-шифртекст" not in pg.content() and "Bybit" in pg.get_by_test_id("mon-banner").inner_text())
+    cb_ = card("Переименован")
+    check("у карточки появились отдельные переключатели Bybit (выключены по умолчанию) с подсказками", cb_.get_by_test_id("mon-auto-bybit").count() == 1 and not cb_.get_by_test_id("mon-auto-bybit").locator("input").nth(0).is_checked()
+          and not cb_.get_by_test_id("mon-auto-bybit").locator("input").nth(1).is_checked() and cb_.get_by_test_id("mon-auto-bybit").locator(".help").count() == 4 and cb_.get_by_test_id("mon-base-bybit").input_value() == "config")
+    pg.once("dialog", lambda d: d.accept())
+    cb_.get_by_test_id("mon-auto-bybit").locator("input").nth(0).click(); pg.wait_for_timeout(1500)
+    c_bb = E2E_DB.find_config(tid, "Переименован")
+    check("автомод Bybit включается отдельно от Hyperliquid", c_bb["ex"]["bybit"]["open"] and not c_bb["ex"]["hyperliquid"]["open"] and not c_bb["auto"]["open"] and card("Переименован").get_by_test_id("mon-auto-bybit").locator("input").nth(0).is_checked()
+          and not card("Переименован").get_by_test_id("mon-auto").locator("input").nth(0).is_checked())
+    card("Переименован").get_by_test_id("mon-auto-bybit").locator("input").nth(0).click(); pg.wait_for_timeout(1000)
+    card("Переименован").get_by_test_id("mon-exover").locator("summary").click()
+    eb = card("Переименован").get_by_test_id("mon-ex-bybit")
+    check("свои настройки биржи: пусто = как в конфиге (значения конфига — подсказки в полях), есть «?»", eb.get_by_test_id("mon-ex-bybit-pct").input_value() == "" and eb.get_by_test_id("mon-ex-bybit-pct").get_attribute("placeholder") == "10"
+          and eb.get_by_test_id("mon-ex-bybit-lev").get_attribute("placeholder") == "5" and eb.locator(".help").count() == 2 and eb.get_by_test_id("mon-ex-bybit-save").is_disabled() and eb.get_by_test_id("mon-ex-bybit-reset").is_disabled())
+    eb.get_by_test_id("mon-ex-bybit-pct").fill("5"); eb.get_by_test_id("mon-ex-bybit-lev").fill("3")
+    eb.get_by_test_id("mon-ex-bybit-limit").fill("0.3"); eb.get_by_test_id("mon-ex-bybit-dir").select_option("breakout"); eb.get_by_test_id("mon-ex-bybit-ttl").fill("2")
+    eb.get_by_test_id("mon-ex-bybit-save").click(); pg.wait_for_timeout(1800)
+    c_bb = E2E_DB.find_config(tid, "Переименован")
+    check("настройки для Bybit сохранены только для Bybit: размер и лимитный вход; конфиг и Hyperliquid не изменены",
+          c_bb["ex"]["bybit"]["over"] == {"trade_pct": 5.0, "leverage": 3.0, "entry_limit_pct": 0.3, "entry_limit_dir": "breakout", "entry_limit_ttl_h": 2.0} and c_bb["ex"]["hyperliquid"]["over"] == {}
+          and c_bb["params"]["trade_pct"] == 10 and c_bb["params"]["leverage"] == 5 and c_bb["params"].get("entry_limit_pct") in (None, 0, 0.0))
+    eh = card("Переименован").get_by_test_id("mon-ex-hyperliquid")
+    eh.get_by_test_id("mon-ex-hyperliquid-lev").fill("500"); eh.get_by_test_id("mon-ex-hyperliquid-save").click(); pg.wait_for_timeout(1200)
+    check("недопустимое значение для биржи отклоняется с ошибкой, в базе ничего не появилось", E2E_DB.find_config(tid, "Переименован")["ex"]["hyperliquid"]["over"] == {} and pg.locator(".banner.error").count() >= 1)
+    pg.get_by_role("button", name="Обновить", exact=True).click(); pg.wait_for_timeout(1500)
+    eb = card("Переименован").get_by_test_id("mon-ex-bybit")
+    check("после обновления свои настройки Bybit на месте; «как в конфиге» убирает их все", card("Переименован").get_by_test_id("mon-ex-bybit-pct").input_value() == "5" and card("Переименован").get_by_test_id("mon-ex-bybit-dir").input_value() == "breakout")
+    card("Переименован").get_by_test_id("mon-ex-bybit-reset").click(); pg.wait_for_timeout(1500)
+    check("сброс настроек биржи", E2E_DB.find_config(tid, "Переименован")["ex"]["bybit"]["over"] == {} and card("Переименован").get_by_test_id("mon-ex-bybit-pct").input_value() == "")
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("exchange-disconnect-bybit").click(); pg.wait_for_timeout(1500)
+    check("отключение Bybit: ключа в базе нет, блок снова «не подключён», карточки без строки Bybit", E2E_DB.get_exchange_account(tid, "bybit") is None and "не подключён" in pg.get_by_test_id("mon-exchange-bybit").inner_text()
+          and card("Переименован").get_by_test_id("mon-auto-bybit").count() == 0)
     check("кнопка «СТОП ВСЁ» с подсказкой", pg.get_by_test_id("panic").is_visible())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_test_id("panic").click(); pg.get_by_test_id("mon-msg").filter(has_text="СТОП ВСЁ").wait_for(timeout=10000)
@@ -1050,7 +1090,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 4, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 5, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

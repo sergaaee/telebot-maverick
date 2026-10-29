@@ -519,7 +519,7 @@ def test_failed_entry_is_retried_after_restart(env, fake_verify, monkeypatch):
     # перезапуск: лимит поправили -> вход повторяется один раз
     state["fail"] = False
     env2 = _restart(env)
-    assert env2._retry_ids == {cid}
+    assert env2._retry_ids == {(cid, "hyperliquid")}
     env2.cycle()
     assert len(sent) == 1 and sent[0][0][1] == "long" and env.db.list_retries() == []
     assert any("повторяю вход" in t for t in env.tg.texts(CHAT))

@@ -3,9 +3,9 @@ import math
 import threading
 import time
 
-from .db import DbError
+from .db import EXCHANGES, EXCHANGE_OVERRIDES, DbError
 from .tradelog import trade_log
-from .trading import ExchangeError, NotConfigured, TEST_MAX_USD, forget_adapter, mask_address
+from .trading import EXCHANGE_LABELS, ExchangeError, NotConfigured, TEST_MAX_USD, forget_adapter, mask_address
 
 TEST_SYMBOL = "BTC/USDT:USDT"
 
@@ -23,19 +23,78 @@ def own_config(db, uid, config_id):
     return c
 
 
-def set_auto(db, adapter, uid, config_id, open_=None, manage=None, base=None):
+def exchange_name(exchange):
+    exchange = (exchange or "hyperliquid").strip().lower()
+    if exchange not in EXCHANGES:
+        raise ManageError("Неизвестная биржа: " + ", ".join(EXCHANGES))
+    return exchange
+
+
+def effective_params(params, over):
+    """Параметры конфига с настройками биржи поверх (размер входа и вход лимиткой); сигналы и правила выхода остаются из конфига."""
+    return {**params, **{k: v for k, v in (over or {}).items() if k in EXCHANGE_OVERRIDES}}
+
+
+def set_auto(db, adapter, uid, config_id, open_=None, manage=None, base=None, exchange="hyperliquid"):
+    """Автомод конфига на конкретной бирже (по умолчанию Hyperliquid). adapter — адаптер ЭТОЙ биржи (для журнала)."""
+    exchange = exchange_name(exchange)
     own_config(db, uid, config_id)
     was = db.find_config(uid, str(config_id))
     try:
-        new = db.set_auto(uid, config_id, open_, manage, base)
+        new = db.set_auto(uid, config_id, open_, manage, base, exchange=exchange)
     except DbError as e:
         raise ManageError(str(e))
-    if new and new["open"] and not was["auto"]["open"] and was["catchup"]["on"]:       # автомод «открывать» включили при включённом «догнать сигнал» — взводим один заход
+    now = db.find_config(uid, str(config_id))
+    if new and new["open"] and not was["ex"][exchange]["open"] and was["catchup"]["on"]:       # автомод «открывать» включили при включённом «догнать сигнал» — взводим один заход
         db.set_catchup(uid, config_id, armed=True)
-    elif new and not new["open"]:
+    elif new and not new["open"] and not now["any_open"]:
         db.set_catchup(uid, config_id, armed=False)
-    db.add_auto_log(uid, config_id, "auto_toggle", None, None, "info", {"auto": new, "exchange": adapter.name})
-    trade_log("auto_toggle", user=uid, config=config_id, auto=new, exchange=adapter.name, real=adapter.real, testnet=adapter.testnet)
+    db.add_auto_log(uid, config_id, "auto_toggle", None, None, "info", {"auto": new, "exchange": adapter.name if adapter.real else exchange, "target": exchange})
+    trade_log("auto_toggle", user=uid, config=config_id, auto=new, exchange=exchange, real=adapter.real, testnet=adapter.testnet)
+    return new
+
+
+def set_ex_over(db, adapter, uid, config_id, exchange, **patch):
+    """Настройки конфига ТОЛЬКО для одной биржи, поверх параметров конфига: доля депозита и плечо (первого входа и доборов), вход лимитным ордером.
+    Значение None — убрать настройку биржи (брать из конфига). Применяется к НОВЫМ входам на этой бирже; сигналы и правила выхода (стоп, тейки, БУ) — общие, из конфига.
+    -> {ключ: значение} действующих переопределений."""
+    exchange = exchange_name(exchange)
+    c = own_config(db, uid, config_id)
+    bad = [k for k in patch if k not in EXCHANGE_OVERRIDES]
+    if bad:
+        raise ManageError("Для биржи нельзя менять: " + ", ".join(bad))
+    if not patch:
+        raise ManageError("Нечего менять")
+    vals = {k: v for k, v in patch.items() if v is not None}
+    for k, v in vals.items():
+        if k == "entry_limit_dir":
+            if v not in ("pullback", "breakout"):
+                raise ManageError("entry_limit_dir: pullback или breakout")
+        elif isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ManageError(f"{k}: нужно число")
+    from pydantic import ValidationError
+    from .schemas import BacktestParams
+    try:
+        BacktestParams(**vals)
+    except ValidationError as e:
+        err = e.errors()[0]
+        raise ManageError(f"{err['loc'][0]}: {err['msg']}")
+    old = dict(c["ex"][exchange]["over"])
+    merged = {**old, **vals}
+    for k, v in patch.items():
+        if v is None:
+            merged.pop(k, None)
+    eff = effective_params(c["params"], merged)
+    if eff.get("pyramid_enabled"):
+        tp, pp = eff.get("trade_pct") or 0, eff.get("pyramid_pct") or 0
+        if pp and int((100 - tp) // pp) < 1:
+            raise ManageError(f"Пирамидинг: первая нога {tp:g}% депозита, на добор ({pp:g}%) места не остаётся — уменьшите доли")
+    try:
+        new = db.set_ex_over(uid, config_id, exchange, patch)
+    except DbError as e:
+        raise ManageError(str(e))
+    db.add_auto_log(uid, config_id, "exchange_cfg", None, None, "info", {"exchange": exchange, "from": old, "to": new})
+    trade_log("exchange_cfg", user=uid, config=config_id, name=c["name"], exchange=exchange, old=old, new=new)
     return new
 
 
@@ -80,7 +139,7 @@ def set_catchup(db, adapter, uid, config_id, on=None, age_min=None, move_pct=Non
             raise ManageError("Возраст сигнала — от 1 до 240 минут, допустимое движение цены в прибыль — от 0 до 5 %")
     cur = c["catchup"]
     new = db.set_catchup(uid, config_id, on, age_min, move_pct)
-    if on and not cur["on"] and c["auto"]["open"]:
+    if on and not cur["on"] and c["any_open"]:
         new = db.set_catchup(uid, config_id, armed=True)
     elif on is False:
         new = db.set_catchup(uid, config_id, armed=False)
@@ -101,7 +160,8 @@ def set_paused(db, uid, config_id, paused):
     c = own_config(db, uid, config_id)
     if paused:
         db.update_config(c["id"], paused=True)
-        db.set_auto(uid, c["id"], False, False)
+        for name in EXCHANGES:
+            db.set_auto(uid, c["id"], False, False, exchange=name)
     else:
         db.update_config(c["id"], paused=False, baseline=False, last_ts=0)
     db.add_auto_log(uid, c["id"], "pause" if paused else "resume", None, None, "info", {})
@@ -113,17 +173,18 @@ def remove_config(db, uid, config_id, adapter=None):
     """Удаляет конфиг. Позиция, уже открытая на бирже, остаётся (вместе со своими стопом и тейками на бирже), но бот её больше не ведёт. Лимитный ордер на вход, который ещё стоит
     на бирже, снимается: после удаления некому было бы поставить стоп и тейки, если он исполнится. Не удалось снять — ошибка, конфиг остаётся."""
     c = own_config(db, uid, config_id)
-    pend = db.get_pending(c["id"])
-    cancelled = None
-    if pend and pend["order_id"] and adapter is not None and adapter.real:
-        try:
-            adapter.cancel_order_id(pend["order_id"], pend["symbol"])
-            cancelled = pend["order_id"]
-        except (NotConfigured, ExchangeError) as e:
-            raise ManageError(f"Не удалось снять лимитный ордер {pend['order_id']} на бирже: {e}. Конфиг не удалён — снимите ордер вручную или повторите.", 502)
+    cancelled = []
+    for pend in db.pending_of(c["id"]):
+        ad = adapter.get(pend["exchange"]) if isinstance(adapter, dict) else (adapter if pend["exchange"] == "hyperliquid" else None)      # adapter — один адаптер Hyperliquid или словарь {биржа: адаптер}
+        if pend["order_id"] and ad is not None and ad.real:
+            try:
+                ad.cancel_order_id(pend["order_id"], pend["symbol"])
+                cancelled.append(f"{pend['exchange']}:{pend['order_id']}")
+            except (NotConfigured, ExchangeError) as e:
+                raise ManageError(f"Не удалось снять лимитный ордер {pend['order_id']} на {EXCHANGE_LABELS.get(pend['exchange'], pend['exchange'])}: {e}. Конфиг не удалён — снимите ордер вручную или повторите.", 502)
     db.remove_config(c["id"])
-    db.add_auto_log(uid, None, "config_removed", None, None, "info", {"name": c["name"], "cancelled_order": cancelled})
-    trade_log("config_removed", "warn", user=uid, config=c["id"], name=c["name"], cancelled_order=cancelled)
+    db.add_auto_log(uid, None, "config_removed", None, None, "info", {"name": c["name"], "cancelled_order": cancelled[0].split(":", 1)[1] if len(cancelled) == 1 else None, "cancelled_orders": cancelled})
+    trade_log("config_removed", "warn", user=uid, config=c["id"], name=c["name"], cancelled_order=cancelled[0].split(":", 1)[1] if len(cancelled) == 1 else None, cancelled_orders=cancelled)
     return c["name"]
 
 
@@ -174,14 +235,16 @@ def exchange_state(adapter, detail=False):
     return out
 
 
-def account_info(db, adapter, uid):
-    """Подключённый счёт пользователя для веб-интерфейса: кто и где подключён (без ключа!) и всё, что видно на бирже. Сбой биржи не прячет сведения о подключении — он в поле error."""
-    acc = db.get_exchange_account(uid)
-    info = {"connected": bool(acc), "exchange": adapter.describe(), "wallet": None, "agent": None, "created": None, "verified": None, "error": None,
+def account_info(db, adapter, uid, exchange="hyperliquid"):
+    """Подключённый счёт пользователя на бирже для веб-интерфейса: кто и где подключён (без ключа!) и всё, что видно на бирже. Сбой биржи не прячет сведения о подключении — он в поле error.
+    wallet — адрес кошелька (Hyperliquid) или API-ключ (Bybit), всегда в усечённом виде."""
+    exchange = exchange_name(exchange)
+    acc = db.get_exchange_account(uid, exchange)
+    info = {"connected": bool(acc), "exchange": adapter.describe(), "wallet": None, "agent": None, "created": None, "verified": None, "error": None, "net": None,
             "positions": [], "account": {}, "orders": [], "fills": []}
     if not acc:
         return info
-    info.update(wallet=mask_address(acc["wallet"]), agent=mask_address(acc.get("agent_address")), created=acc["created"], verified=acc["verified"])
+    info.update(wallet=mask_address(acc["wallet"]), agent=mask_address(acc.get("agent_address")), created=acc["created"], verified=acc["verified"], net=acc.get("net"))
     try:
         info.update({k: v for k, v in exchange_state(adapter, detail=True).items() if k != "exchange"})
     except ManageError as e:
@@ -189,13 +252,19 @@ def account_info(db, adapter, uid):
     return info
 
 
-def disconnect_account(db, uid):
-    """Отключает счёт: ключ удаляется из базы, автомод у всех конфигов выключается (иначе он молча перешёл бы в симуляцию)."""
-    removed = db.delete_exchange_account(uid)
-    forget_adapter(uid)
-    n = db.disable_all_auto(uid)
-    db.add_auto_log(uid, None, "exchange_disconnected", None, None, "info", {"removed": removed, "auto_off": n})
-    trade_log("account_disconnected", "warn", user=uid, removed=removed, auto_off=n)
+def disconnect_account(db, uid, exchange="hyperliquid"):
+    """Отключает счёт на бирже: ключ удаляется из базы, автомод на этой бирже у всех конфигов выключается (иначе он молча перешёл бы в симуляцию), ожидающие входы снимаются.
+    Позиции и ордера на самой бирже остаются — их закрывает пользователь или «аварийная остановка» (до отключения)."""
+    exchange = exchange_name(exchange)
+    removed = db.delete_exchange_account(uid, exchange)
+    forget_adapter(uid, exchange)
+    n = db.disable_all_auto(uid, exchange)
+    for row in [r for r in db.list_pending() if r["user_id"] == uid and r["exchange"] == exchange]:
+        db.clear_pending(row["config_id"], exchange)
+    for row in [r for r in db.list_retries() if r["exchange"] == exchange and (db.get_config(r["config_id"]) or {}).get("user_id") == uid]:
+        db.clear_retry(row["config_id"], exchange)
+    db.add_auto_log(uid, None, "exchange_disconnected", None, None, "info", {"removed": removed, "auto_off": n, "exchange": exchange})
+    trade_log("account_disconnected", "warn", user=uid, removed=removed, auto_off=n, exchange=exchange)
     return removed
 
 
@@ -222,20 +291,29 @@ def preflight_open(adapter, symbol, side, add):
 
 
 def panic(db, adapter, uid):
-    """Аварийная остановка: автомод выключается у всех конфигов пользователя (сначала — чтобы бот не открыл позицию заново), затем закрываются все позиции
-    на бирже и снимаются все ордера. Ошибки не прерывают процесс: что не удалось — в errors."""
+    """Аварийная остановка: автомод выключается у всех конфигов пользователя на всех биржах (сначала — чтобы бот не открыл позицию заново), затем закрываются все позиции
+    и снимаются все ордера на каждой подключённой бирже. adapter — один адаптер или словарь {биржа: адаптер}. Ошибки не прерывают процесс (у одной биржи сбой не мешает другой):
+    что не удалось — в errors."""
+    adapters = adapter if isinstance(adapter, dict) else {adapter.name: adapter}
+    multi = len(adapters) > 1
     off = db.disable_all_auto(uid)
     db.clear_pending_user(uid)                              # ожидающие входы (лимитки и «вход по ходу») снимаются; сами ордера на бирже закрывает close_all
-    trade_log("panic_start", "warn", user=uid, auto_off=off, exchange=adapter.name, real=adapter.real)
+    trade_log("panic_start", "warn", user=uid, auto_off=off, exchanges=list(adapters), real=[a.real for a in adapters.values()])
     errors, closed, cancelled = [], [], 0
-    try:
-        r = adapter.close_all()
-        closed, cancelled, errors = r.get("closed", []), r.get("cancelled", 0), list(r.get("errors", []))
-    except (NotConfigured, ExchangeError) as e:
-        errors.append(str(e))
-    out = {"auto_off": off, "closed": closed, "cancelled": cancelled, "errors": errors, "exchange": adapter.describe()}
+    for name, ad in adapters.items():
+        pref = f"{EXCHANGE_LABELS.get(name, name)}: " if multi and ad.real else ""
+        try:
+            r = ad.close_all()
+            closed += [{**x, "exchange": name} for x in r.get("closed", [])] if multi else r.get("closed", [])
+            cancelled += r.get("cancelled", 0)
+            errors += [pref + str(e) for e in r.get("errors", [])]
+        except (NotConfigured, ExchangeError) as e:
+            errors.append(pref + str(e))
+    first = next(iter(adapters.values()))
+    real = next((a for a in adapters.values() if a.real), first)
+    out = {"auto_off": off, "closed": closed, "cancelled": cancelled, "errors": errors, "exchange": real.describe(), "exchanges": [a.describe() for a in adapters.values()]}
     db.add_auto_log(uid, None, "panic", None, None, "error" if errors else "ok", out)
-    trade_log("panic_done", "error" if errors else "warn", user=uid, **{k: v for k, v in out.items() if k != "exchange"})
+    trade_log("panic_done", "error" if errors else "warn", user=uid, **{k: v for k, v in out.items() if k not in ("exchange", "exchanges")})
     return out
 
 
@@ -247,8 +325,9 @@ def account_quick(adapter, uid, ttl=15.0):
     if not adapter.real:
         return None
     now = time.monotonic()
+    key = (uid, adapter.name)
     with _acc_lock:
-        hit = _acc.get(uid)
+        hit = _acc.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
     try:
@@ -257,7 +336,7 @@ def account_quick(adapter, uid, ttl=15.0):
     except (NotConfigured, ExchangeError):
         val = None
     with _acc_lock:
-        _acc[uid] = (now, val)
+        _acc[key] = (now, val)
     return val
 
 
@@ -272,17 +351,18 @@ def sizing_warning(auto, deposit, acc):
     return None
 
 
-def size_order(engine_order_size, result, add, adapter, base, acc):
+def size_order(engine_order_size, result, add, adapter, base, acc, over=None):
     """Размер ордера автомода -> {"notional", "margin", "note", "skip"}. base='account': маржа = доля конфига × реальный капитал; иначе — от депозита конфига.
-    Если свободной маржи на бирже не хватает, ордер не отправляется (skip с причиной), а не ждёт отказа биржи."""
+    over — настройки конфига для этой биржи (доля, плечо): поверх параметров конфига. Если свободной маржи на бирже не хватает, ордер не отправляется (skip с причиной), а не ждёт отказа биржи."""
+    kw = {"over": over} if over else {}
     if base == "account" and adapter.real:
         eq = (acc or {}).get("equity")
         if not eq or eq <= 0:
             return {"skip": "размер от баланса счёта: не удалось получить капитал на бирже — ордер не отправлен", "retry": True}
-        notional, margin = engine_order_size(result, add, equity=eq)
+        notional, margin = engine_order_size(result, add, equity=eq, **kw)
         note = f"от баланса счёта {eq:,.2f} $".replace(",", " ")
     else:
-        notional, margin = engine_order_size(result, add)
+        notional, margin = engine_order_size(result, add, **kw)
         note = "от депозита конфига" if base != "account" else "от депозита конфига (счёт не подключён — симуляция)"
     free = (acc or {}).get("free") if adapter.real else None
     if free is not None and margin > free * 0.98 + 1e-9:
