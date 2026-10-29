@@ -108,6 +108,8 @@ def config_summary(cfg, result=None):
         bits.append("только будни (пн Токио → пт Нью-Йорк)")
     if p.get("liquidation_sim"):
         bits.append(f"ликвидация {p.get('maint_margin_pct', 0.5):g}%")
+    if p.get("entry_limit_pct"):
+        bits.append(f"вход {'лимиткой на откат' if (p.get('entry_limit_dir') or 'pullback') == 'pullback' else 'по ходу цены'} {p['entry_limit_pct']:g}% (до {p.get('entry_limit_ttl_h', 4):g} ч)")
     if p.get("funding_apr"):
         bits.append(f"фандинг {p['funding_apr']:g}% год./{p.get('funding_period_h', 8)} ч" + (" (платят обе стороны)" if p.get("funding_mode") == "cost" else ""))
     if p.get("pyramid_enabled") and p.get("pyramid_leverage"):

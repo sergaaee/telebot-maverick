@@ -544,6 +544,10 @@ class SignalService:
         заново, поэтому /pause, /remove и /cancel действуют до того, как до конфига дойдёт очередь."""
         with self._cycle_lock:
             self._beat("bot_cycle_start")
+            try:
+                self._tick_pending()
+            except Exception:
+                log.exception("ожидающие входы")
             forced, self._force = self._force, set()
             users = {u["id"]: u for u in self.db.list_users() if u["telegram_id"] and not u["disabled"]}
             memo = {"eval": {}, "candles": {}, "top": {}}
@@ -692,6 +696,12 @@ class SignalService:
         add = bool(sig.get("pyramid"))
         ad = self.adapter_for(cfg["user_id"])
         base = cfg["auto"].get("base", "config")
+        pend = None if add else self.db.get_pending(cfg["id"])
+        if pend:                                            # по конфигу уже ждёт вход (лимитка / вход по ходу)
+            if pend["side"] == sig["side"]:
+                trade_log("auto_skipped", "info", user=cfg["user_id"], config=cfg["id"], symbol=p["symbol"], side=sig["side"], reason="вход по прошлому сигналу уже ждёт исполнения")
+                return
+            self._cancel_pending(pend, cfg, ad, "пришёл обратный сигнал")
         pre = manage.preflight_open(ad, p["symbol"], sig["side"], add)
         if pre.get("skip"):
             self._skip_open(cfg, p, sig, add, ad, pre["skip"], retry=pre.get("retry", False))
@@ -709,6 +719,9 @@ class SignalService:
             if st == "error":                               # встречная позиция не закрылась — открывать новую поверх неё нельзя
                 self._open_failed(cfg, sig, add, f"не удалось закрыть встречную позицию: {r.get('error')}")
                 return
+        if p.get("entry_limit_pct") and not add:
+            self._place_entry_order(cfg, p, sig, ad, base, sz, notional, margin)
+            return
         st, r = self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                          lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
                                                 plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
@@ -755,6 +768,141 @@ class SignalService:
         plan = self.engine.plan(sig["side"], price, p["tps"], p["sl_pct"])
         self.send(chat, f"⏩ {name}: догоняю сигнал {'в лонг' if sig['side'] == 'long' else 'в шорт'} от {fm.ts_str(sig['ts'])} ({age:.0f} мин назад, цена {price:g}, от цены сигнала {fm.pct(move, 2)}).")
         self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": False, "leg": 1}, plan)
+
+    # ---------------- вход лимитным ордером / по ходу цены ----------------
+    def _place_entry_order(self, cfg, p, sig, ad, base, sz, notional, margin):
+        """Сигнал подтверждён, но вход не по рынку, а на X % движения цены от текущей: pullback — лимитный ордер на бирже (откат), breakout — ждём, пока цена дойдёт до уровня по ходу
+        (проверяется каждый цикл), и тогда входим по рынку. Ордер живёт entry_limit_ttl_h часов. Стоп и тейки ставятся после исполнения — от цены исполнения."""
+        d = 1 if sig["side"] == "long" else -1
+        mode, pct, ttl = p.get("entry_limit_dir") or "pullback", p["entry_limit_pct"], p.get("entry_limit_ttl_h") or 4.0
+        ref = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
+        chat = self.db.get_user(cfg["user_id"])["telegram_id"]
+        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
+        if not ref:
+            self._skip_open(cfg, p, sig, False, ad, "не удалось получить текущую цену — лимитный вход не поставлен", retry=True)
+            return
+        level = ref * (1 - d * pct / 100) if mode == "pullback" else ref * (1 + d * pct / 100)
+        lev = (notional / margin) if margin else p["leverage"]
+        side_ru = "лонг" if d == 1 else "шорт"
+        details = {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "level": level, "ref": ref, "mode": mode, "pct": pct, "ttl_h": ttl, "size_base": base, "size_note": sz["note"]}
+        order_id = None
+        if mode == "pullback":
+            st, r = self._do(cfg, "limit_entry", p["symbol"], sig["side"], lambda: ad.place_limit_entry(p["symbol"], sig["side"], notional, level, lev), details)
+            if st == "error":
+                self._open_failed(cfg, sig, False, r.get("error"))
+                return
+            if st == "dry_run":                              # счёт не подключён: лимитку в симуляции не отслеживаем
+                self.send(chat, f"🧪 {name}: симуляция — поставил бы лимитку на {side_ru} по {fm.price(level)} ({pct:g}% {'ниже' if d == 1 else 'выше'} цены {fm.price(ref)}), ордер не отправлялся.")
+                return
+            order_id = r.get("order_id")
+        self.db.set_pending(cfg["id"], cfg["user_id"], sig["ts"], p["symbol"], sig["side"], mode, level, ref, notional, margin, lev, order_id, self.clock() + ttl * 3600)
+        self.db.clear_retry(cfg["id"])
+        if mode == "pullback":
+            self.send(chat, f"⏳ {name}: сигнал на {side_ru} подтверждён — вместо рынка поставил <b>лимитку {fm.price(level)}</b> ({pct:g}% {'ниже' if d == 1 else 'выше'} цены {fm.price(ref)}), объём {fm.usd(notional).lstrip('+')}. "
+                          f"Живёт {ttl:g} ч; стоп и тейки встанут после исполнения.")
+        else:
+            self.send(chat, f"⏳ {name}: сигнал на {side_ru} подтверждён — жду движения цены {pct:g}% {'вверх' if d == 1 else 'вниз'} до <b>{fm.price(level)}</b> (от {fm.price(ref)}); тогда войду по рынку. Ждать буду {ttl:g} ч.")
+
+    def _cancel_pending(self, pend, cfg, ad, reason):
+        """Снимает ожидающий вход: лимитку отменяем на бирже; если успела частично исполниться — защищаем то, что набралось."""
+        self.db.clear_pending(pend["config_id"])
+        chat = self.db.get_user(pend["user_id"])["telegram_id"]
+        name = f"<b>#{pend['config_id']} {esc(cfg['name'] if cfg else '?')}</b>"
+        filled = 0.0
+        if pend["order_id"]:
+            try:
+                ad.cancel_order_id(pend["order_id"], pend["symbol"])
+                filled = ad.order_state(pend["order_id"], pend["symbol"]).get("filled") or 0.0
+            except Exception as e:
+                trade_error("auto_fail", e, user=pend["user_id"], config=pend["config_id"], kind="cancel_entry", symbol=pend["symbol"], side=pend["side"])
+                self.send(chat, f"⚠️ {name}: не удалось отменить лимитку #{pend['order_id']}: {esc(str(e)[:200])}. Проверьте ордера на бирже вручную.")
+                return
+        self.db.add_auto_log(pend["user_id"], pend["config_id"], "cancel_entry", pend["symbol"], pend["side"], "sent", {"reason": reason, "order_id": pend["order_id"], "level": pend["level"]})
+        self.send(chat, f"🚫 {name}: ожидающий вход по {fm.price(pend['level'])} снят — {esc(reason)}.")
+        if filled:
+            self._protect_filled(pend, cfg, ad, chat, partial=True)
+
+    def _protect_filled(self, pend, cfg, ad, chat, partial=False):
+        """Лимитка исполнилась (полностью или частично): берём реальную позицию, ставим стоп и тейки от цены исполнения."""
+        name = f"<b>#{pend['config_id']} {esc(cfg['name'])}</b>"
+        base = pend["symbol"].split("/")[0]
+        pos = next((x for x in ad.positions() if (x.get("symbol") or "").split("/")[0] == base and x["side"] == pend["side"]), None)
+        if not pos:
+            self.send(chat, f"ℹ️ {name}: лимитка исполнена, но открытой позиции на бирже нет (уже закрыта?) — стоп и тейки не ставлю.")
+            return
+        p = cfg["params"]
+        entry = pos.get("entry") or pend["level"]
+        plan = self.engine.plan(pend["side"], entry, p["tps"], p["sl_pct"])
+        st, r = self._do(cfg, "protect", pend["symbol"], pend["side"], lambda: ad.protect(pend["symbol"], pend["side"], pos["size"], plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
+                         {"signal_ts": pend["signal_ts"], "entry": entry, "size": pos["size"], "partial": partial})
+        if st == "error":
+            self.send(chat, f"🚨 {name}: лимитка исполнена по {fm.price(entry)}, но стоп/тейки НЕ встали: {esc(str(r.get('error'))[:300])}. Проверьте позицию на бирже!")
+            return
+        self.send(chat, f"✅ {name}: {'лимитка исполнена частично' if partial else 'лимитка исполнена'} — {'лонг' if pend['side'] == 'long' else 'шорт'} {pos['size']:g} по {fm.price(entry)}. "
+                        f"Стоп {fm.price(plan['sl'])}, тейков: {len(plan['levels'])}.")
+
+    def _tick_pending(self):
+        """Раз в цикл: ожидающие входы — лимитка исполнилась / истекла / отменена снаружи; вход по ходу — цена дошла до уровня."""
+        for row in self.db.list_pending():
+            try:
+                self._tick_one(row)
+            except Exception:
+                log.exception("ожидающий вход конфига %s", row["config_id"])
+
+    def _tick_one(self, row):
+        cfg = self.db.get_config(row["config_id"])
+        user = self.db.get_user(row["user_id"])
+        if not user:
+            self.db.clear_pending(row["config_id"])
+            return
+        ad = self.adapter_for(row["user_id"])
+        chat = user["telegram_id"]
+        now = self.clock()
+        if not cfg or cfg["paused"] or not cfg["auto"]["open"]:
+            self._cancel_pending(row, cfg, ad, "конфиг удалён" if not cfg else "конфиг на паузе" if cfg["paused"] else "автомод «открывать» выключен")
+            return
+        name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
+        d = 1 if row["side"] == "long" else -1
+        if row["order_id"]:                                  # лимитка на бирже
+            try:
+                st = ad.order_state(row["order_id"], row["symbol"])
+            except Exception as e:
+                log.warning("состояние ордера %s: %s", row["order_id"], e)
+                return
+            if st["status"] == "filled":
+                self.db.clear_pending(row["config_id"])
+                self._protect_filled(row, cfg, ad, chat)
+            elif st["status"] == "open" and now >= row["expires"]:
+                self._cancel_pending(row, cfg, ad, "не исполнилась за срок жизни ордера")
+            elif st["status"] in ("canceled", "unknown"):    # ордера нет: отменён снаружи или исполнился, а статус не отдали — смотрим позицию
+                self.db.clear_pending(row["config_id"])
+                base = row["symbol"].split("/")[0]
+                if any((x.get("symbol") or "").split("/")[0] == base and x["side"] == row["side"] for x in ad.positions()):
+                    self._protect_filled(row, cfg, ad, chat)
+                else:
+                    self.db.add_auto_log(row["user_id"], row["config_id"], "cancel_entry", row["symbol"], row["side"], "info", {"reason": "ордер снят на бирже", "order_id": row["order_id"]})
+                    self.send(chat, f"🚫 {name}: лимитки {row['order_id']} на бирже больше нет, позиции нет — вход не состоялся.")
+            return
+        # вход по ходу: ждём цену
+        price = self.engine.price_fn(row["symbol"]) if self.b.live_price else None
+        if price and ((price >= row["level"]) if d == 1 else (price <= row["level"])):
+            self.db.clear_pending(row["config_id"])
+            p = cfg["params"]
+            plan = self.engine.plan(row["side"], price, p["tps"], p["sl_pct"])
+            sig = {"ts": row["signal_ts"], "side": row["side"], "pyramid": False, "leg": 1}
+            self.send(chat, f"▶️ {name}: цена дошла до {fm.price(row['level'])} ({fm.price(price)}) — вхожу по рынку.")
+            pre = manage.preflight_open(ad, row["symbol"], row["side"], False)
+            if pre.get("skip"):
+                self._skip_open(cfg, p, sig, False, ad, pre["skip"], retry=pre.get("retry", False))
+                return
+            st, r = self._do(cfg, "open", row["symbol"], row["side"],
+                             lambda: ad.open_market(row["symbol"], row["side"], row["notional"], row["leverage"], plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
+                             {"signal_ts": row["signal_ts"], "notional": row["notional"], "margin": row["margin"], "level": row["level"], "mode": "breakout"})
+            if st == "error":
+                self._open_failed(cfg, sig, False, r.get("error"))
+            return
+        if now >= row["expires"]:
+            self._cancel_pending(row, cfg, ad, "цена не дошла до уровня за срок ожидания")
 
     def _open_failed(self, cfg, sig, add, reason):
         """Вход не удался: запоминаем сигнал, чтобы повторить при перезапуске бота (пока он свеж), и сообщаем владельцу."""

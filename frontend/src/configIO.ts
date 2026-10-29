@@ -15,7 +15,7 @@ export function configFileName(p: Params): string {
 const NULLABLE = new Set(['pyramid_leverage', 'only', 'global_min', 'short_global_max', 'liq_source', 'cool_drop', 'cool_declines', 'liq_hours', 'date_from', 'date_to']);
 
 /** Возможности, появившиеся позже: в старом конфиге их нет, и они ДОЛЖНЫ быть выключены (а не браться из умолчаний .env), чтобы результат не менялся. */
-export const LEGACY_OFF = { pyramid_enabled: false, pyramid_avg: false, signal_gap_h: 0, sl_hold_strong: false, pyramid_move_pct: 0, pyramid_move_dir: 'any', pyramid_leverage: null, liquidation_sim: false, weekdays_only: false, friday_close_before_min: 0, global_min: null, short_global_max: null, funding_apr: 0, funding_period_h: 8, funding_mode: 'signed' } as const;
+export const LEGACY_OFF = { pyramid_enabled: false, pyramid_avg: false, signal_gap_h: 0, sl_hold_strong: false, pyramid_move_pct: 0, pyramid_move_dir: 'any', pyramid_leverage: null, liquidation_sim: false, weekdays_only: false, friday_close_before_min: 0, global_min: null, short_global_max: null, entry_limit_pct: 0, entry_limit_dir: 'pullback', entry_limit_ttl_h: 4, funding_apr: 0, funding_period_h: 8, funding_mode: 'signed' } as const;
 
 const kind = (v: unknown) => (Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v);
 

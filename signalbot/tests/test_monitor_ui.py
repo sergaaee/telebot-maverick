@@ -648,3 +648,151 @@ def test_catchup_toggled_on_while_auto_is_already_enabled_fires_immediately(env,
     assert "Использование" in env.tg.texts(CHAT)[-1]
     env.handle_update(tmsg(f"/catchup {cid} on 0 0.1"))
     assert "от 1 до 240" in env.tg.texts(CHAT)[-1] and env.db.get_config(cid)["catchup"]["age_min"] == 120.0
+
+
+class LimitBook:
+    """Имитация лимитных ордеров на бирже для автомода."""
+    def __init__(self, monkeypatch, positions=None):
+        from app import trading
+        self.placed, self.cancelled, self.protected, self.opened = [], [], [], []
+        self.state = {"status": "open", "filled": 0.0, "amount": 4.0, "avg": None}
+        self.positions = positions if positions is not None else []
+        H = trading.HyperliquidAdapter
+        monkeypatch.setattr(H, "positions", lambda s: self.positions)
+        monkeypatch.setattr(H, "place_limit_entry", lambda s, sym, side, notional, price, lev=1.0: self.placed.append((sym, side, notional, price, lev)) or {"status": "sent", "order_id": f"L{len(self.placed)}", "price": price})
+        monkeypatch.setattr(H, "order_state", lambda s, oid, sym: dict(self.state))
+        monkeypatch.setattr(H, "cancel_order_id", lambda s, oid, sym: self.cancelled.append(oid) or {"status": "sent"})
+        monkeypatch.setattr(H, "protect", lambda s, sym, side, amount, stop=None, takes=None: self.protected.append((sym, side, amount, stop, takes)) or {"status": "sent", "orders": []})
+        monkeypatch.setattr(H, "open_market", lambda s, sym, side, notional, lev=1.0, stop=None, takes=None: self.opened.append((sym, side, notional, lev, stop, takes)) or {"status": "sent"})
+
+
+def _limit_env(env, fake_verify, monkeypatch, name, ttl=2.0, **extra):
+    _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    book = LimitBook(monkeypatch)
+    cid = add_cfg(env, name, entry_limit_pct=0.5, entry_limit_dir="pullback", entry_limit_ttl_h=ttl, **extra)
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))
+    return book, cid
+
+
+def test_limit_entry_places_order_then_protects_after_fill(env, fake_verify, monkeypatch):
+    book, cid = _limit_env(env, fake_verify, monkeypatch, "Лимитка")
+    _signal_cycle(env)
+    assert not book.opened and len(book.placed) == 1                                           # по рынку не входим — стоит лимитка
+    sym, side, notional, price, lev = book.placed[0]
+    assert side == "long" and abs(price - 99.5) < 1e-9 and abs(notional - 400.0) < 1e-6 and lev == 2.0                          # цена сигнала 100, откат 0.5%
+    pend = env.db.get_pending(cid)
+    assert pend["order_id"] == "L1" and pend["mode"] == "pullback" and abs(pend["level"] - 99.5) < 1e-9 and pend["expires"] > env.now["t"]
+    assert any("поставил <b>лимитку" in t for t in env.tg.texts(CHAT))
+    env.cycle()                                                                                # ордер ещё открыт: ничего не меняется, повторов нет
+    assert len(book.placed) == 1 and not book.protected and env.db.get_pending(cid)
+    book.state = {"status": "filled", "filled": 4.0, "amount": 4.0, "avg": 99.5}
+    book.positions = [{"symbol": "BTC/USDC:USDC", "side": "long", "size": 4.0, "entry": 99.4}]
+    env.cycle()
+    assert env.db.get_pending(cid) is None and len(book.protected) == 1
+    sym, side, amount, stop, takes = book.protected[0]
+    assert amount == 4.0 and abs(stop - 99.4 * (1 - 0.40)) < 1e-6 and len(takes) == 2 and abs(takes[0][0] - 99.4 * 1.5) < 1e-6        # SL 40%, TP 50%/80% — от цены исполнения 99.4
+    assert any("лимитка исполнена" in t for t in env.tg.texts(CHAT))
+    assert [x["kind"] for x in env.db.list_auto_log(env.alice["id"], 10) if x["kind"] in ("limit_entry", "protect")] == ["protect", "limit_entry"]
+
+
+def test_limit_expires_or_is_cancelled_by_user_actions(env, fake_verify, monkeypatch):
+    book, cid = _limit_env(env, fake_verify, monkeypatch, "Истечёт")
+    _signal_cycle(env)
+    assert env.db.get_pending(cid)
+    env.now["t"] += 3 * 3600                                                                   # прошло больше срока жизни (2 ч)
+    env.cycle()
+    assert book.cancelled == ["L1"] and env.db.get_pending(cid) is None and not book.protected
+    assert any("не исполнилась за срок жизни" in t for t in env.tg.texts(CHAT))
+    # автомод «открывать» выключили, пока ордер стоит -> ордер снимается
+    env.db.set_pending(cid, env.alice["id"], 1, "BTC/USDT:USDT", "long", "pullback", 99.5, 100.0, 400.0, 200.0, 2.0, "L7", env.now["t"] + 3600)
+    env.handle_update(cb(f"a:{cid}:o"))
+    env.cycle()
+    assert "L7" in book.cancelled and env.db.get_pending(cid) is None
+    # частичное исполнение при отмене по сроку: набранное защищаем
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.db.set_pending(cid, env.alice["id"], 1, "BTC/USDT:USDT", "long", "pullback", 99.5, 100.0, 400.0, 200.0, 2.0, "L8", env.now["t"] - 10)
+    book.state = {"status": "open", "filled": 1.0, "amount": 4.0, "avg": 99.5}
+    book.positions = [{"symbol": "BTC/USDC:USDC", "side": "long", "size": 1.0, "entry": 99.5}]
+    env.cycle()
+    assert "L8" in book.cancelled and len(book.protected) == 1 and book.protected[0][2] == 1.0 and any("частично" in t for t in env.tg.texts(CHAT))
+
+
+def test_panic_removes_pending_entries(env, fake_verify, monkeypatch):
+    book, cid = _limit_env(env, fake_verify, monkeypatch, "Паника лимитки")
+    _signal_cycle(env)
+    assert env.db.get_pending(cid)
+    from app import trading
+    monkeypatch.setattr(trading.HyperliquidAdapter, "close_all", lambda self: {"closed": [], "cancelled": 1, "errors": []})
+    env.handle_update(cb("pny"))
+    assert env.db.get_pending(cid) is None
+
+
+def test_breakout_entry_waits_for_price_then_enters_at_market(env, fake_verify, monkeypatch):
+    _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    book = LimitBook(monkeypatch)
+    cid = add_cfg(env, "По ходу", entry_limit_pct=0.5, entry_limit_dir="breakout", entry_limit_ttl_h=2.0)
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    pend = env.db.get_pending(cid)
+    assert not book.placed and not book.opened and pend["mode"] == "breakout" and pend["order_id"] is None and abs(pend["level"] - 100.5) < 1e-9       # лонг по ходу — на 0.5% выше
+    assert any("жду движения цены" in t for t in env.tg.texts(CHAT))
+    env.engine.price_fn = lambda sym: 100.4
+    env.cycle()
+    assert not book.opened and env.db.get_pending(cid)                                          # цена ещё не дошла
+    env.engine.price_fn = lambda sym: 100.6
+    env.cycle()
+    assert len(book.opened) == 1 and book.opened[0][1] == "long" and abs(book.opened[0][4] - 100.6 * 0.6) < 1e-6 and env.db.get_pending(cid) is None
+    assert any("вхожу по рынку" in t for t in env.tg.texts(CHAT))
+
+
+def test_breakout_gives_up_after_ttl_and_dry_run_only_logs(env, fake_verify, monkeypatch):
+    _real_account(env, fake_verify, monkeypatch, equity=1000.0, free=900.0)
+    book = LimitBook(monkeypatch)
+    cid = add_cfg(env, "Не дошла", entry_limit_pct=0.5, entry_limit_dir="breakout", entry_limit_ttl_h=1.0)
+    env.handle_update(cb(f"ay:{cid}:o"))
+    env.handle_update(cb(f"ab:{cid}"))
+    _signal_cycle(env)
+    env.now["t"] += 2 * 3600
+    env.cycle()
+    assert env.db.get_pending(cid) is None and not book.opened and any("цена не дошла до уровня" in t for t in env.tg.texts(CHAT))
+    # счёт не подключён: лимитка только в журнале, ожидающих входов нет
+    from app import trading
+    env.db.delete_exchange_account(env.alice["id"])
+    trading.forget_adapter(env.alice["id"])
+    cid2 = add_cfg(env, "Симуляция лимитки", entry_limit_pct=0.5, entry_limit_ttl_h=1.0)
+    env.handle_update(cb(f"ay:{cid2}:o"))
+    start = T0 + 44 * H
+    append_reports(env.hist, LONG(start, 3), 31)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    from app import monitor
+    monitor._cache.clear()
+    env.cycle()
+    assert env.db.get_pending(cid2) is None and any("симуляция — поставил бы лимитку" in t for t in env.tg.texts(CHAT))
+
+
+def test_opposite_signal_cancels_the_standing_limit(env, fake_verify, monkeypatch):
+    book, cid = _limit_env(env, fake_verify, monkeypatch, "Обратный", ttl=8.0, side="both")
+    _signal_cycle(env)
+    assert env.db.get_pending(cid)["side"] == "long" and env.db.get_pending(cid)["order_id"] == "L1"
+    start = T0 + 38 * H + 3 * H
+    append_reports(env.hist, [(start + i * H // 2, 0.9, 0.5, 0.8) for i in range(3)], 21)                    # теперь подтверждён шорт
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    from app import monitor
+    monitor._cache.clear()
+    env.cycle()
+    assert book.cancelled == ["L1"] and any("пришёл обратный сигнал" in t for t in env.tg.texts(CHAT))
+    pend = env.db.get_pending(cid)
+    assert pend["side"] == "short" and pend["order_id"] == "L2" and abs(pend["level"] - 100.5) < 1e-9 and book.placed[-1][1] == "short"          # шорт — лимитка выше цены на 0.5%
+
+
+def test_pending_entry_survives_bot_restart(env, fake_verify, monkeypatch):
+    book, cid = _limit_env(env, fake_verify, monkeypatch, "Рестарт")
+    _signal_cycle(env)
+    assert env.db.get_pending(cid)["order_id"] == "L1"
+    env2 = _restart(env)                                                                       # перезапуск бота: ожидающий вход сохранён, ордер продолжает отслеживаться
+    book.state = {"status": "filled", "filled": 4.0, "amount": 4.0, "avg": 99.5}
+    book.positions = [{"symbol": "BTC/USDC:USDC", "side": "long", "size": 4.0, "entry": 99.5}]
+    env2.cycle()
+    assert env.db.get_pending(cid) is None and len(book.protected) == 1

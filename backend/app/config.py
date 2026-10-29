@@ -137,6 +137,8 @@ def load_settings() -> Settings:
         confirm=_num("CONFIRM", 4, int), tps=_tps(), be_after_tp1=_bool("BE_AFTER_TP1"), sl_pct=_num("SL_PCT", 2.0),
         size=_num("ORDER_SIZE", 0.1),
         deposit=_num("DEPOSIT", 10000.0), trade_pct=_num("TRADE_PCT", 10.0), leverage=_num("LEVERAGE", 1.0), compound=_bool("COMPOUND", True), fee=_num("FEE", 0.0005), slip=_num("SLIPPAGE", 0.0),
+        # вход лимитным ордером: % движения цены от цены сигнала (0 — по рынку), сторона (pullback — откат, breakout — по ходу), срок жизни ордера, часов
+        entry_limit_pct=_num("ENTRY_LIMIT_PCT", 0.0), entry_limit_dir=(_opt("ENTRY_LIMIT_DIR") or "pullback").lower(), entry_limit_ttl_h=_num("ENTRY_LIMIT_TTL_H", 4.0),
         # фандинг: годовые %, период списания (часы), режим signed (по знаку) / cost (платят обе стороны); 0 — не учитывается
         funding_apr=_num("FUNDING_APR", 0.0), funding_period_h=_num("FUNDING_PERIOD_H", 8, int), funding_mode=(_opt("FUNDING_MODE") or "signed").lower(),
         cool_metric=(_opt("COOL_METRIC") or "scalp").lower(),

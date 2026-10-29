@@ -183,6 +183,9 @@ class MonitorUI:
                          + f" · плечо {st['leverage']:g}× · {st['trade_pct']:g}% депозита")
         lines.append(f"🤖 Автомод: {_auto(e)}" + ("" if self._ad(user).real else " (симуляция)"))
         a = e.get("auto") or {}
+        pe = self.db.get_pending(c["id"])
+        if pe:
+            lines.append(f"⏳ Ждёт вход: {'лонг' if pe['side'] == 'long' else 'шорт'} по <b>{fm.price(pe['level'])}</b> ({'лимитка на бирже' if pe['order_id'] else 'вход по рынку при касании цены'}), до {fm.ts_str(int(pe['expires'] * 1000))[5:]}")
         cu = c["catchup"]
         lines.append(f"⏩ Догнать свежий сигнал при включении: <b>{'вкл' if cu['on'] else 'выкл'}</b>" + (f" (не старше {cu['age_min']:g} мин, цена не дальше {cu['move_pct']:g}% в прибыль)" if cu["on"] else ""))
         ad = self._ad(user)

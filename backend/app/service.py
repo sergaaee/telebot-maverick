@@ -322,7 +322,7 @@ def _trade_out(n, t, rep, at=None):
         "local": r[1] if r else None, "scalp": r[2] if r else None, "global": r[7] if r and len(r) > 7 else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
-    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total", "funding_pct", "funding_usd"):
+    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total", "funding_pct", "funding_usd", "limit"):
         if k in t:
             out[k] = t[k]
     return out
@@ -389,21 +389,29 @@ def _max_dd_pct(pn, deposit):
     return 100 * dd
 
 
-def _closed_prefix(sim):
+def _closed_prefix(sim, ttl_ms=0):
     """Из снимка прошлого расчёта берёт позиции, результат которых уже не изменится от новых данных: закрыты (не OPEN) строго раньше последних данных, по которым считали
     (safe_ts = меньшее из времени последней свечи и последнего отчёта: отчёт мог бы прийти «задним числом» внутри уже посчитанных свечей).
+    ttl_ms — срок жизни лимитного входа: сигнал новее safe_ts − ttl мог бы исполниться уже на новых свечах, поэтому такие сигналы (и пропуски по ним) заново.
     -> (сделки, пропущенные сигналы, resume для run_events, с какого момента подавать события); пусто — считать с начала."""
     safe_ts, trades = sim["safe_ts"], sim["trades"]
-    bad = next((t for t in trades if t["reason"] == "OPEN" or t["exit_ts"] >= safe_ts), None)
-    if bad is not None:
-        first = min(t["signal_ts"] for t in trades if t["group"] == bad["group"])
-        kept = [t for t in trades if t["group"] < bad["group"]]
-        cut = min(safe_ts, first)
-    else:
-        kept, cut = list(trades), safe_ts
+    limit_ts = safe_ts - ttl_ms
+    order, by_group = [], {}
+    for t in trades:
+        if t["group"] not in by_group:
+            order.append(t["group"])
+        by_group.setdefault(t["group"], []).append(t)
+    kept_groups, cut = [], limit_ts
+    for g in order:
+        ts_ = by_group[g]
+        if any(t["reason"] == "OPEN" or t["exit_ts"] >= safe_ts for t in ts_) or max(t["signal_ts"] for t in ts_) >= limit_ts:
+            cut = min(limit_ts, min(t["signal_ts"] for t in ts_))
+            break
+        kept_groups.append(g)
+    kept = [t for g in kept_groups for t in by_group[g]]
     if not kept:
         return [], [], None, None
-    last = [t for t in kept if t["group"] == kept[-1]["group"]]
+    last = by_group[kept_groups[-1]]
     resume = {"group": kept[-1]["group"], "last_group": last, "last_open_ts": min(t["entry_ts"] for t in last)}
     return kept, [x for x in sim["skipped"] if x[0] < cut], resume, cut
 
@@ -504,11 +512,13 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     events = [e for e in confirmed if allow(*e)] if allow else confirmed
     levels = backtest.normalize_tps(tps)
     hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm) if eff.get("sl_hold_strong") else None
+    entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0} if eff.get("entry_limit_pct") else None
+    lim_ttl_ms = int(entry_limit["ttl_h"] * 3.6e6) if entry_limit else 0
     run_kw = dict(sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"], cooldown_h=extra.get("cooldown_h", 0.0), be_after_tp1=bool(eff.get("be_after_tp1")), pyramid=pyramid,
-                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=hold, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week)
+                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=hold, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week, entry_limit=entry_limit)
     kept, kept_skipped, resume, from_ts = [], [], None, None
     if snap and snap.get("sim"):
-        kept, kept_skipped, resume, from_ts = _closed_prefix(snap["sim"])
+        kept, kept_skipped, resume, from_ts = _closed_prefix(snap["sim"], lim_ttl_ms)
     skipped = list(kept_skipped)
     new_trades = backtest.run_events([e for e in events if from_ts is None or e[0] >= from_ts] if kept else events, candles, levels, skipped=skipped, resume=resume, **run_kw)
     raw_trades = kept + new_trades

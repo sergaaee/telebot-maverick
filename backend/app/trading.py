@@ -62,6 +62,21 @@ class ExchangeAdapter:
         """Аварийно: закрыть все позиции и снять все ордера. -> {"closed": [...], "cancelled": n, "errors": [...]}"""
         return {"closed": [], "cancelled": 0, "errors": []}
 
+    def place_limit_entry(self, symbol, side, notional, price, leverage=1.0):
+        """Лимитный ордер на вход (без стопа и тейков: они ставятся после исполнения, см. protect). -> {"status", "order_id", "amount", "price", ...}"""
+        raise NotImplementedError
+
+    def order_state(self, order_id, symbol):
+        """-> {"status": "open"|"filled"|"canceled"|"unknown", "filled": доля/кол-во, "avg": средняя цена | None}"""
+        raise NotImplementedError
+
+    def cancel_order_id(self, order_id, symbol):
+        raise NotImplementedError
+
+    def protect(self, symbol, side, amount, stop=None, takes=None):
+        """Стоп и тейки (reduce-only) на уже открытую позицию."""
+        raise NotImplementedError
+
 
 class DryRunAdapter(ExchangeAdapter):
     """Ничего не отправляет: возвращает то, что было бы сделано."""
@@ -78,6 +93,9 @@ class DryRunAdapter(ExchangeAdapter):
 
     def close_all(self):
         return {"closed": [], "cancelled": 0, "errors": [], "note": "симуляция: счёт не подключён, закрывать нечего"}
+
+    def place_limit_entry(self, symbol, side, notional, price, leverage=1.0):
+        return {"status": "dry_run", "note": "симуляция: лимитный ордер не отправлялся", "symbol": symbol, "side": side, "notional": notional, "price": price, "leverage": leverage, "order_id": None}
 
 
 class HyperliquidAdapter(ExchangeAdapter):
@@ -167,15 +185,22 @@ class HyperliquidAdapter(ExchangeAdapter):
         self._log("order_ok", kind="entry", symbol=sym, order=order if isinstance(order, dict) and len(str(order)) < 1500 else (order.get("id") if isinstance(order, dict) else str(order)[:300]))
         res = {"status": "sent", "entry_order": order.get("id") if isinstance(order, dict) else None, "symbol": sym, "side": side, "amount": amount, "price": price,
                "notional": amount * price, "leverage": leverage, "orders": []}
+        res["orders"] = self._protect(ex, sym, symbol, side, amount, stop, takes)
+        return res
+
+    def _protect(self, ex, sym, symbol, side, amount, stop, takes):
+        """Стоп и тейки на открытую позицию. Не встали — позицию без защиты не оставляем: закрываем по рынку и сообщаем."""
+        exit_side = "sell" if side == "long" else "buy"
+        placed = []
         try:
             if stop:
                 o = ex.create_order(sym, "market", exit_side, amount, float(stop), {"stopLossPrice": float(stop), "reduceOnly": True})
-                res["orders"].append({"kind": "stop", "id": o.get("id"), "price": stop})
+                placed.append({"kind": "stop", "id": o.get("id"), "price": stop})
             for tp_price, share in (takes or []):
                 part = float(ex.amount_to_precision(sym, amount * float(share) / 100))
                 if part > 0:
                     o = ex.create_order(sym, "limit", exit_side, part, float(tp_price), {"reduceOnly": True})
-                    res["orders"].append({"kind": "take", "id": o.get("id"), "price": tp_price, "share": share})
+                    placed.append({"kind": "take", "id": o.get("id"), "price": tp_price, "share": share})
         except Exception as e:                              # позиция открыта, а стоп/тейк не встали — без защиты её оставлять нельзя: закрываем
             closed = None
             trade_error("order_fail", e, user=self.user_id, kind="stop_or_takes", symbol=sym, side=side, note="после входа защита не встала — закрываем позицию")
@@ -185,7 +210,58 @@ class HyperliquidAdapter(ExchangeAdapter):
             except Exception as e2:
                 closed = f"закрыть не удалось: {e2}"
             raise ExchangeError(f"Вход выполнен, но стоп/тейки не поставлены ({e}); {closed}.") from e
-        return res
+        return placed
+
+    def protect(self, symbol, side, amount, stop=None, takes=None):
+        ex = self._x()
+        sym = self.hl_symbol(symbol)
+        self._log("order_request", kind="protect", symbol=sym, side=side, amount=amount, stop=stop, takes=takes)
+        placed = self._protect(ex, sym, symbol, side, amount, stop, takes)
+        self._log("order_ok", kind="protect", symbol=sym, orders=placed)
+        return {"status": "sent", "symbol": sym, "orders": placed}
+
+    def place_limit_entry(self, symbol, side, notional, price, leverage=1.0):
+        ex = self._x()
+        sym = self.hl_symbol(symbol)
+        if notional > self.max_usd + 1e-9:
+            raise ExchangeError(f"Объём {notional:.2f} $ больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
+        if notional < self.min_notional - 1e-9:
+            raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера Hyperliquid ({self.min_notional:g} $).")
+        px = float(ex.price_to_precision(sym, price)) if hasattr(ex, "price_to_precision") else float(price)
+        amount = float(ex.amount_to_precision(sym, notional / px))
+        if amount * px < self.min_notional * 1.01:
+            amount = float(ex.amount_to_precision(sym, self.min_notional * 1.03 / px))
+            if amount * px > self.max_usd + 1e-9:
+                raise ExchangeError(f"Объём {amount * px:.2f} $ с учётом минимума биржи больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
+        if amount <= 0:
+            raise ExchangeError("Размер позиции после округления равен нулю.")
+        self._log("order_request", kind="limit_entry", symbol=sym, side=side, notional=amount * px, amount=amount, price=px, leverage=leverage)
+        self._call("плечо", ex.set_leverage, int(max(1, round(leverage))), sym, {"marginMode": "isolated"})
+        order = self._call("лимитный вход", ex.create_order, sym, "limit", "buy" if side == "long" else "sell", amount, px)
+        oid = order.get("id") if isinstance(order, dict) else None
+        self._log("order_ok", kind="limit_entry", symbol=sym, order=oid)
+        return {"status": "sent", "order_id": oid, "symbol": sym, "side": side, "amount": amount, "price": px, "notional": amount * px, "leverage": leverage}
+
+    def order_state(self, order_id, symbol):
+        """Состояние ордера. Если биржа не умеет отдавать ордер по id, судим по списку открытых: нет в списке — исполнен или отменён (позицию смотрит вызывающий)."""
+        ex = self._x()
+        sym = self.hl_symbol(symbol)
+        try:
+            o = ex.fetch_order(order_id, sym)
+            st = {"open": "open", "closed": "filled", "canceled": "canceled", "cancelled": "canceled", "rejected": "canceled", "expired": "canceled"}.get(str(o.get("status")), "unknown")
+            return {"status": st, "filled": float(o.get("filled") or 0), "amount": float(o.get("amount") or 0), "avg": float(o["average"]) if o.get("average") else None}
+        except Exception as e:
+            self._log("order_state_fallback", "warn", order=order_id, error=str(e)[:200])
+        opened = self._call("ордера", ex.fetch_open_orders, sym) or []
+        if any(str(x.get("id")) == str(order_id) for x in opened):
+            return {"status": "open", "filled": 0.0, "amount": 0.0, "avg": None}
+        return {"status": "unknown", "filled": 0.0, "amount": 0.0, "avg": None}
+
+    def cancel_order_id(self, order_id, symbol):
+        ex = self._x()
+        self._call("отмена ордера", ex.cancel_order, order_id, self.hl_symbol(symbol))
+        self._log("order_ok", kind="cancel_entry", order=order_id)
+        return {"status": "sent", "order_id": order_id}
 
     def set_stop(self, symbol, side, price):
         """Переставляет стоп на остаток позиции: старые стопы (триггерные reduce-only) снимаются, ставится новый. Тейки-лимитки не трогаются."""

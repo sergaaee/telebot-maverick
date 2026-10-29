@@ -139,7 +139,7 @@ class Engine:
             if s["trend_blocked"] or s["ts"] <= last_ts:
                 continue
             if s["ts"] <= candles_last:
-                if s["taken"]:
+                if s["taken"] or (p.get("entry_limit_pct") and s.get("reason") == backtest.LIMIT_PENDING):          # лимитный вход: подтверждённый сигнал, ордер по которому ещё ждёт, — тоже новый сигнал
                     t = by_signal.get(s["ts"], {})
                     out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid")),
                                 **{k: t[k] for k in ("avg_entry", "avg_tps", "avg_sl") if k in t}})

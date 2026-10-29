@@ -242,6 +242,7 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR, progress=
 
 
 MAX_TPS = 3
+LIMIT_PENDING = "лимитка ждёт исполнения"       # сигнал подтверждён, ордер ещё не исполнен, а данные кончились (в бэктесте — не пропуск, а ожидание)
 
 
 def normalize_tps(tps):
@@ -261,7 +262,7 @@ def normalize_tps(tps):
     return [(p, s / 100) for p, s in levels]
 
 
-def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None, until=None):
+def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None, until=None, no_tp_first=False):
     """Ход позиции, открытой на open свечи i. tps: [(цена, доля)]. Возвращает события [(idx, цена, доля, метка)],
     метки: TP1..TP3, SL, BE (стоп в безубытке), LIQ (ликвидация), WKND (закрытие по расписанию — конец торговой недели), OPEN (данные кончились).
 
@@ -295,7 +296,7 @@ def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None, until=No
             events.append((k, px, remaining, stop_label))
             return events
         be_now = False
-        while k_tp < len(tps):
+        while k_tp < len(tps) and not (no_tp_first and k == i):
             lvl, share = tps[k_tp]
             if not ((h >= lvl) if d == 1 else (l <= lvl)):
                 break
@@ -385,6 +386,7 @@ class AvgPosition:
         self.adds = [(i0, price0, w0)]
         self.done = False
         self.q0 = self.q
+        self.no_tp_k = None              # свеча, в которой тейки не засчитываются (исполнение лимитного входа)
 
     def add(self, i, price, w, lev=None):
         """Добор по open свечи i (все предыдущие свечи уже обработаны): новая средняя цена, количество и вес (вес — объём, т.е. доля × плечо)."""
@@ -437,7 +439,7 @@ class AvgPosition:
                 self.done = True
                 break
             be_now = False
-            while self.k_tp < len(self.levels):
+            while self.k_tp < len(self.levels) and k != self.no_tp_k:
                 lvl = self.A * (1 + d * self.levels[self.k_tp][0] / 100)
                 if not ((h >= lvl) if d == 1 else (l <= lvl)):
                     break
@@ -490,7 +492,7 @@ class AvgPosition:
 
 
 def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None,
-               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None, week=None, resume=None):
+               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None, week=None, resume=None, entry_limit=None):
     """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам. levels — результат normalize_tps. notional (USD) задаёт размер
     позиции в долларах вместо size (в единицах актива).
 
@@ -507,6 +509,11 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
       week={"before_min": X} — режим «только будни»: вход (и добор, и разворот) разрешён с открытия Токио в понедельник до закрытия Нью-Йорка в пятницу (core/tradingweek.py),
         остальные сигналы пропускаются; позиция, оставшаяся открытой, закрывается по open свечи закрытия пятницы (метка WKND), раньше на X минут;
       hold(d, ts_мс) -> bool — «стоп-лосс не ставить, пока метрики сильны» (см. _scan);
+      entry_limit={"pct": X, "dir": "pullback"|"breakout", "ttl_h": H} — первая нога позиции входит НЕ по рынку, а ордером на X % движения цены от цены сигнала (open свечи входа):
+        pullback — лимитка на откат (лонг ниже, шорт выше): исполняется, когда цена дошла до уровня (по уровню, а если свеча открылась за ним — по open); breakout — вход по ходу
+        (лонг выше, шорт ниже, стоп-вход): исполняется при касании уровня, с проскальзыванием. Ордер живёт ttl_h часов (и до конца торгового окна в режиме «только будни»); не исполнился — сигнал
+        пропускается. Пока ордер стоит, повторные сигналы той же стороны игнорируются, обратный — отменяет его. В свече исполнения тейки не засчитываются (порядок внутри свечи неизвестен).
+        Доборы пирамидинга по-прежнему идут по рынку;
       skipped — список, в который дописываются (ts, сторона, причина) пропущенных сигналов;
       resume={"group": номер последней уже закрытой позиции, "last_group": её сделки, "last_open_ts": время её открытия} — продолжение после закрытых позиций: events
         должны начинаться с первого события после них, возвращаются только новые сделки (паузы после стопа и между сигналами учитывают сохранённую позицию)."""
@@ -530,20 +537,41 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         for a, sig_ts in zip(avg_trade["adds"][1:], avg_trade["add_signals"]):
             a["signal_ts"] = sig_ts
 
-    def open_leg(sts, d, side, i, leg_no):
-        entry = candles[i][1] * (1 + d * slip)
+    def open_leg(sts, d, side, i, leg_no, entry_px=None, no_tp_first=False):
+        entry = entry_px if entry_px is not None else candles[i][1] * (1 + d * slip)
         prices = [entry * (1 + d * p / 100) for p, _ in levels]
         sl = entry * (1 - d * sl_pct / 100)
         leg = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry": entry, "tp": prices[-1], "tps": prices,
-               "tp_shares": levels_shares, "sl": sl, "be": be, "leg": leg_no, "group": group, "pyramid": leg_no > 1}
+               "tp_shares": levels_shares, "sl": sl, "be": be, "leg": leg_no, "group": group, "pyramid": leg_no > 1, "_i": i}
         hold_d = (lambda t: hold(d, t)) if hold else None
         lev = leverage if leg_no == 1 else (add_leverage or leverage)
         liq = (entry * (1 - d * (1 / lev - mmr)), entry * (1 - d / lev)) if mmr is not None else None
         until = tradingweek.window_close(candles[i][0], week["before_min"]) if week else None
-        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d, liq, until), candles, fee, size, notional)
+        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d, liq, until, no_tp_first), candles, fee, size, notional)
         trades.append(leg)
         open_legs.append(leg)
         return leg
+
+    lim = entry_limit if (entry_limit and entry_limit.get("pct")) else None
+    pend_state, wait_order = {}, None                   # состояние до открытия ноги (чтобы отмена лимитки его вернула) и «ордер ждёт, а данные кончились»
+
+    def limit_fill(i, d):
+        """Исполнение лимитного входа по сигналу на свече i -> ("fill", k, цена) | ("expired", None, None) | ("wait", None, None) — данные кончились раньше срока ордера."""
+        ref = candles[i][1]
+        pct, mode = lim["pct"] / 100.0, lim.get("dir", "pullback")
+        lvl = ref * (1 - d * pct) if mode == "pullback" else ref * (1 + d * pct)
+        end_ts = candles[i][0] + lim["ttl_h"] * 3.6e6
+        for k in range(i, n):
+            tk = candles[k][0]
+            if tk > end_ts or (week and not tradingweek.in_window(tk, week["before_min"])):
+                return "expired", None, None
+            _, o, h, l, _c = candles[k]
+            if mode == "pullback":
+                if (l <= lvl) if d == 1 else (h >= lvl):
+                    return "fill", k, (min(lvl, o) if d == 1 else max(lvl, o))                        # свеча открылась за уровнем — исполнение по open (лучше уровня)
+            elif (h >= lvl) if d == 1 else (l <= lvl):
+                return "fill", k, (max(lvl, o) * (1 + slip) if d == 1 else min(lvl, o) * (1 - slip))     # стоп-вход: гэп — по open, плюс проскальзывание
+        return "wait", None, None
 
     for sts, d in events:
         side = "long" if d == 1 else "short"
@@ -554,6 +582,23 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         if week and not tradingweek.in_window(candles[i][0], week["before_min"]):
             skip(sts, side, "выходные: вне торгового окна")
             continue
+        if wait_order is not None:                          # ордер ждёт исполнения до конца данных
+            if wait_order == side:
+                skip(sts, side, "лимитка уже стоит")
+                continue
+            wait_order = None                               # обратный сигнал отменил ожидающий ордер
+        pend = [leg for leg in open_legs if leg.get("_i", -1) > i]
+        if pend:                                            # нога ещё не исполнена (лимитка стоит)
+            if pend[0]["side"] == side:
+                skip(sts, side, "лимитка уже стоит")
+                continue
+            for leg in pend:                                # обратный сигнал отменяет лимитку: возвращаем состояние, как будто её не было
+                trades.remove(leg)
+                open_legs.remove(leg)
+                skip(leg["signal_ts"], leg["side"], "лимитка отменена: пришёл обратный сигнал")
+                group, last_group, last_open_ts, last_leg_ts, last_leg_px, adds = pend_state.pop(id(leg))
+                if leg is avg_trade:
+                    avg_pos = avg_trade = None
         if avg_pos is not None and open_legs:
             if avg_pos.advance(i):                          # позиция закрылась сама до этого сигнала
                 fin_avg()
@@ -611,23 +656,40 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
                     rest = 1.0 - sum(e[2] for e in kept)
                     _finalize(cur, kept + [(i, o * (1 - slip) if cur["side"] == "long" else o * (1 + slip), rest, "REV")], candles, fee, size, notional)
             open_legs.clear()
+        fill_i, fill_px, wait_h = i, None, 0.0
+        if lim:
+            kind, fk, fpx = limit_fill(i, d)
+            if kind == "expired":
+                skip(sts, side, f"лимитка не исполнилась за {lim['ttl_h']:g} ч")
+                continue
+            if kind == "wait":
+                skip(sts, side, LIMIT_PENDING)
+                wait_order = side
+                continue
+            fill_i, fill_px, wait_h = fk, fpx, (candles[fk][0] - candles[i][0]) / 3.6e6
+        saved = (group, last_group, last_open_ts, last_leg_ts, last_leg_px, adds)
         group += 1
         adds = 0
         if avg:
-            entry = candles[i][1] * (1 + d * slip)
+            entry = fill_px if fill_px is not None else candles[i][1] * (1 + d * slip)
             hold_d = (lambda t, d=d: hold(d, t)) if hold else None
-            avg_pos = AvgPosition(candles, d, i, entry, pyramid["w0"], levels, sl_pct, slip, be, hold_d, leverage, mmr,
-                                  tradingweek.window_close(candles[i][0], week["before_min"]) if week else None)
-            avg_trade = {"side": side, "signal_ts": sts, "entry_ts": candles[i][0], "entry_first": entry, "be": be, "leg": 1, "group": group,
-                         "pyramid": False, "add_signals": [], "tp_shares": levels_shares, "_j": n, "_events": []}
+            avg_pos = AvgPosition(candles, d, fill_i, entry, pyramid["w0"], levels, sl_pct, slip, be, hold_d, leverage, mmr,
+                                  tradingweek.window_close(candles[fill_i][0], week["before_min"]) if week else None)
+            if lim:
+                avg_pos.no_tp_k = fill_i
+            avg_trade = {"side": side, "signal_ts": sts, "entry_ts": candles[fill_i][0], "entry_first": entry, "be": be, "leg": 1, "group": group,
+                         "pyramid": False, "add_signals": [], "tp_shares": levels_shares, "_j": n, "_events": [], "_i": fill_i}
             trades.append(avg_trade)
             open_legs.append(avg_trade)
             leg = avg_trade
         else:
-            leg = open_leg(sts, d, side, i, 1)
+            leg = open_leg(sts, d, side, fill_i, 1, entry_px=fill_px, no_tp_first=bool(lim))
+        if lim:
+            leg["limit"] = {"level": fill_px, "ref": candles[i][1], "dir": lim.get("dir", "pullback"), "wait_h": wait_h}
+            pend_state[id(leg)] = saved
         last_group = [leg]
-        last_open_ts = last_leg_ts = candles[i][0]
-        last_leg_px = candles[i][1]
+        last_open_ts = last_leg_ts = candles[fill_i][0]
+        last_leg_px = fill_px if fill_px is not None else candles[i][1]
     if avg_pos is not None and "exit_ts" not in avg_trade:  # данные кончились, пока позиция открыта
         avg_pos.advance(n)
         fin_avg()

@@ -347,6 +347,18 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         </label>
         <Num label="Комиссия за сторону" help="fee" value={+(p.fee * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('fee', (v ?? 0) / 100)} />
         <Num label="Проскальзывание" help="slip" value={+(p.slip * 100).toFixed(4)} step={0.005} suffix="%" onChange={(v) => set('slip', (v ?? 0) / 100)} />
+        <Num label="Вход лимиткой, % движения цены" help="entry_limit_pct" value={p.entry_limit_pct ?? 0} step={0.1} suffix="%" onChange={(v) => set('entry_limit_pct', Math.max(0, v ?? 0))} />
+        {!!p.entry_limit_pct && (
+          <>
+            <label className="field">
+              <Label text="Куда ставить" help="entry_limit_dir" />
+              <select value={p.entry_limit_dir ?? 'pullback'} onChange={(e) => set('entry_limit_dir', e.target.value as Params['entry_limit_dir'])} data-testid="limit-dir">
+                <option value="pullback">на откат (лонг ниже, шорт выше)</option><option value="breakout">по ходу (лонг выше, шорт ниже)</option>
+              </select>
+            </label>
+            <Num label="Ордер живёт" help="entry_limit_ttl_h" value={p.entry_limit_ttl_h ?? 4} step={1} suffix="ч" onChange={(v) => set('entry_limit_ttl_h', Math.max(0.1, v ?? 4))} />
+          </>
+        )}
         <Num label="Фандинг, % годовых" help="funding_apr" value={p.funding_apr ?? 0} step={1} suffix="%" onChange={(v) => set('funding_apr', v ?? 0)} />
         {!!p.funding_apr && (
           <>
