@@ -553,25 +553,27 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         return leg
 
     lim = entry_limit if (entry_limit and entry_limit.get("pct")) else None
-    pend_state, wait_order = {}, None                   # состояние до открытия ноги (чтобы отмена лимитки его вернула) и «ордер ждёт, а данные кончились»
+    pend_state, standing = {}, None                     # состояние до открытия ноги (чтобы отмена лимитки его вернула) и «ордер ещё стоит, хотя в расчёте он уже не исполнится»: (сторона, до какого времени | None — до конца данных)
 
     def limit_fill(i, d):
-        """Исполнение лимитного входа по сигналу на свече i -> ("fill", k, цена) | ("expired", None, None) | ("wait", None, None) — данные кончились раньше срока ордера."""
+        """Исполнение лимитного входа по сигналу на свече i -> ("fill", k, цена, None) | ("expired", None, None, до когда ордер стоял) | ("wait", None, None, None) — данные кончились раньше срока ордера."""
         ref = candles[i][1]
         pct, mode = lim["pct"] / 100.0, lim.get("dir", "pullback")
         lvl = ref * (1 - d * pct) if mode == "pullback" else ref * (1 + d * pct)
         end_ts = candles[i][0] + lim["ttl_h"] * 3.6e6
         for k in range(i, n):
             tk = candles[k][0]
-            if tk > end_ts or (week and not tradingweek.in_window(tk, week["before_min"])):
-                return "expired", None, None
+            if tk > end_ts:
+                return "expired", None, None, end_ts
+            if week and not tradingweek.in_window(tk, week["before_min"]):
+                return "expired", None, None, tk
             _, o, h, l, _c = candles[k]
             if mode == "pullback":
                 if (l <= lvl) if d == 1 else (h >= lvl):
-                    return "fill", k, (min(lvl, o) if d == 1 else max(lvl, o))                        # свеча открылась за уровнем — исполнение по open (лучше уровня)
+                    return "fill", k, (min(lvl, o) if d == 1 else max(lvl, o)), None                  # свеча открылась за уровнем — исполнение по open (лучше уровня)
             elif (h >= lvl) if d == 1 else (l <= lvl):
-                return "fill", k, (max(lvl, o) * (1 + slip) if d == 1 else min(lvl, o) * (1 - slip))     # стоп-вход: гэп — по open, плюс проскальзывание
-        return "wait", None, None
+                return "fill", k, (max(lvl, o) * (1 + slip) if d == 1 else min(lvl, o) * (1 - slip)), None     # стоп-вход: гэп — по open, плюс проскальзывание
+        return "wait", None, None, None
 
     for sts, d in events:
         side = "long" if d == 1 else "short"
@@ -582,11 +584,14 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         if week and not tradingweek.in_window(candles[i][0], week["before_min"]):
             skip(sts, side, "выходные: вне торгового окна")
             continue
-        if wait_order is not None:                          # ордер ждёт исполнения до конца данных
-            if wait_order == side:
+        if standing is not None:                            # ордер, который в расчёте не исполнится, но ещё «стоит» (живёт до срока или до конца данных): новых входов по той же стороне пока нет
+            if standing[1] is not None and candles[i][0] >= standing[1]:
+                standing = None                             # ордер уже снят по сроку
+            elif standing[0] == side:
                 skip(sts, side, "лимитка уже стоит")
                 continue
-            wait_order = None                               # обратный сигнал отменил ожидающий ордер
+            else:
+                standing = None                             # обратный сигнал отменил ордер
         pend = [leg for leg in open_legs if leg.get("_i", -1) > i]
         if pend:                                            # нога ещё не исполнена (лимитка стоит)
             if pend[0]["side"] == side:
@@ -658,13 +663,14 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             open_legs.clear()
         fill_i, fill_px, wait_h = i, None, 0.0
         if lim:
-            kind, fk, fpx = limit_fill(i, d)
+            kind, fk, fpx, life_end = limit_fill(i, d)
             if kind == "expired":
                 skip(sts, side, f"лимитка не исполнилась за {lim['ttl_h']:g} ч")
+                standing = (side, life_end)
                 continue
             if kind == "wait":
                 skip(sts, side, LIMIT_PENDING)
-                wait_order = side
+                standing = (side, None)
                 continue
             fill_i, fill_px, wait_h = fk, fpx, (candles[fk][0] - candles[i][0]) / 3.6e6
         saved = (group, last_group, last_open_ts, last_leg_ts, last_leg_px, adds)
