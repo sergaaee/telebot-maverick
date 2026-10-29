@@ -499,6 +499,7 @@ export interface MonitorLeg {
   tps: { n: number; price: number; hit: boolean; share: number }[];
   stop: number;
   stop_kind: 'SL' | 'БУ';
+  stop_held?: boolean;                     // «не ставить SL, пока метрики сильны»: стопа сейчас нет (ни в расчёте, ни на бирже)
   tp_hits: number;
   liq_price: number | null;
   to_stop_pct: number | null;

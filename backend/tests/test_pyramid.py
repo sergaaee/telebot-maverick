@@ -233,6 +233,10 @@ def test_sl_hold_strong_via_api(client):  # noqa: F811
     assert none["trades"] == []
     _, only_local = post(client, **{**strict, "only": "local", "sl_hold_strong": True})
     assert only_local["trades"] and not any(t["reason"] == "SL" for t in only_local["trades"])
+    # для бота: состояние «метрики сильны» по ПОСЛЕДНЕМУ отчёту (по нему на бирже ставят / снимают стоп); без опции поля нет
+    assert held["hold_now"]["long"] is True and held["hold_now"]["short"] is False and held["hold_now"]["report_ts"] > 0 and stopped["hold_now"] is None
+    _, cooled = post(client, local_min=0.5, scalp_min=5, sl_pct=1, side="long", sl_hold_strong=True)               # Scalp слабый: условие входа не выполнено
+    assert cooled["hold_now"]["long"] is False
 
 
 # ---------------- усреднение позиции (pyramid_avg) ----------------
