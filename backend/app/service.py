@@ -401,11 +401,20 @@ def _closed_prefix(sim, ttl_ms=0):
         if t["group"] not in by_group:
             order.append(t["group"])
         by_group.setdefault(t["group"], []).append(t)
-    kept_groups, cut = [], limit_ts
+    cut = limit_ts
+    if ttl_ms:                                          # ордер, не исполнившийся в расчёте, всё ещё «стоит» до срока и гасит повторные сигналы: не режем по его середине
+        stale = [x[0] for x in sim["skipped"] if str(x[2]).startswith("лимитка не исполнилась")]
+        moved = True
+        while moved:
+            moved = False
+            for ts_ in stale:
+                if ts_ < cut < ts_ + ttl_ms:
+                    cut, moved = ts_, True
+    kept_groups = []
     for g in order:
         ts_ = by_group[g]
-        if any(t["reason"] == "OPEN" or t["exit_ts"] >= safe_ts for t in ts_) or max(t["signal_ts"] for t in ts_) >= limit_ts:
-            cut = min(limit_ts, min(t["signal_ts"] for t in ts_))
+        if any(t["reason"] == "OPEN" or t["exit_ts"] >= safe_ts for t in ts_) or max(max(t["signal_ts"], t["entry_ts"]) for t in ts_) >= cut:      # сигналы, пока ордер ждал исполнения, тоже должны быть до разреза
+            cut = min(cut, min(t["signal_ts"] for t in ts_))
             break
         kept_groups.append(g)
     kept = [t for g in kept_groups for t in by_group[g]]

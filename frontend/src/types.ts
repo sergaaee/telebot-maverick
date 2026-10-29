@@ -433,6 +433,8 @@ export interface SyncStatus {
   reason: string | null;
   running: boolean;
   interval_min: number;
+  /** расписание подгрузки словами («в :02 и :32 каждого часа (UTC)»), если задано; иначе подгрузка по периоду */
+  schedule?: string | null;
   next_run: number | null;
   sources: SyncSource[];
   /** подгрузка свечей по расписанию */

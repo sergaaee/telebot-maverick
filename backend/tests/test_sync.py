@@ -234,3 +234,46 @@ def test_config_candle_sync_defaults(monkeypatch):
     assert s.candles_sync and s.candles_sync_min == 5 and s.candles_sync_symbols == []
     monkeypatch.setenv("CANDLES_SYNC", "false")
     assert not load_settings().candles_sync
+
+
+def test_schedule_runs_at_minutes_02_and_32_of_each_hour_utc():
+    from datetime import datetime, timezone
+    from app.history_sync import next_slot, parse_minutes
+
+    def ts(h, m, s=0, day=5):
+        return datetime(2026, 11, day, h, m, s, tzinfo=timezone.utc).timestamp()
+
+    mins = [2, 32]
+    assert next_slot(ts(10, 0), mins) == ts(10, 2) and next_slot(ts(10, 2), mins) == ts(10, 32)          # ровно в слот — следующий, не тот же самый
+    assert next_slot(ts(10, 2, 1), mins) == ts(10, 32) and next_slot(ts(10, 31, 59), mins) == ts(10, 32)
+    assert next_slot(ts(10, 32), mins) == ts(11, 2) and next_slot(ts(10, 45), mins) == ts(11, 2)
+    assert next_slot(ts(23, 40), mins) == ts(0, 2, day=6)                                                  # через полночь
+    assert next_slot(ts(10, 10), [5]) == ts(11, 5)                                                         # одна минута в часе
+    assert parse_minutes("2,32") == [2, 32] and parse_minutes(" :32 ; 2,2,70,x") == [2, 32] and parse_minutes("") == [] and parse_minutes(None) == []
+
+
+def test_scheduled_sync_waits_for_the_slot_and_reports_it():
+    n = []
+    s = HistorySync([Src("a", "1")], 0.05, exporter=lambda p, c: n.append(1) or 0, at_minutes=[2, 32])
+    s.start()
+    end = time.time() + 5
+    while not n and time.time() < end:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    assert len(n) == 1                                                                                     # при запуске — сразу; следующий запуск — в ближайшую :02/:32, а не через период
+    assert s.next_run and s.next_run > time.time() and int(s.next_run) % 60 == 0 and int(s.next_run // 60) % 60 in (2, 32)
+    snap = s.snapshot()
+    assert snap["schedule"] == "в :02 и :32 каждого часа (UTC)" and snap["interval_min"] == 30.0
+    assert s.trigger() and (time.sleep(0.5) or len(n) == 2)                                                # «Обновить сейчас» работает и с расписанием
+    s.stop()
+    assert HistorySync([Src("a", "1")], 32).snapshot()["schedule"] is None                                 # без расписания — прежнее поведение по периоду
+
+
+def test_settings_default_schedule_and_env_override(monkeypatch):
+    from app.config import load_settings
+    monkeypatch.delenv("HISTORY_SYNC_AT", raising=False)
+    assert load_settings().sync_at == [2, 32]
+    monkeypatch.setenv("HISTORY_SYNC_AT", "5,35")
+    assert load_settings().sync_at == [5, 35]
+    monkeypatch.setenv("HISTORY_SYNC_AT", "")
+    assert load_settings().sync_at == []                                                                   # пусто — по периоду HISTORY_SYNC_MIN

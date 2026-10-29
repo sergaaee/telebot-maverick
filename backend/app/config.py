@@ -8,6 +8,8 @@ ROOT = BACKEND_DIR.parent              # корень репозитория: р
 
 from dotenv import load_dotenv  # noqa: E402
 
+from .history_sync import parse_minutes  # noqa: E402
+
 load_dotenv(BACKEND_DIR / ".env")      # уже заданные переменные окружения не перезаписываются
 load_dotenv(ROOT / ".env")             # совместимость: старый корневой .env тоже читается
 
@@ -102,7 +104,8 @@ class Settings:
     port: int
     cors_origins: list = field(default_factory=list)
     sync_enabled: bool = False       # подгрузка сообщений Telegram на сервере (нужны TG_API_ID/TG_API_HASH)
-    sync_min: float = 32.0           # период подгрузки, минут
+    sync_min: float = 32.0           # период подгрузки, минут (если не задано расписание sync_at)
+    sync_at: list = field(default_factory=lambda: [2, 32])      # минуты часа (UTC), в которые подгружается история; пусто — по периоду sync_min
     auth_enabled: bool = True        # вход на сайт по логину и паролю (пользователей заводят через `python cli.py user add`)
     db_file: Path = Path("maverick.db")   # SQLite: пользователи, сессии, состояние интерфейса, конфиги бота
     session_days: float = 30.0
@@ -170,7 +173,7 @@ def load_settings() -> Settings:
         max_bars=_num("MAX_BARS", 3000, int),
         host=_opt("HOST") or "127.0.0.1",
         port=_num("PORT", 8000, int),
-        sync_enabled=_bool("HISTORY_SYNC", bool(_opt("TG_API_ID") and _opt("TG_API_HASH"))), sync_min=_num("HISTORY_SYNC_MIN", 32.0),
+        sync_enabled=_bool("HISTORY_SYNC", bool(_opt("TG_API_ID") and _opt("TG_API_HASH"))), sync_min=_num("HISTORY_SYNC_MIN", 32.0), sync_at=(parse_minutes(os.getenv("HISTORY_SYNC_AT")) if os.getenv("HISTORY_SYNC_AT") is not None else [2, 32]),
         auth_enabled=_bool("AUTH_ENABLED", True), db_file=_path("DB_FILE", "../data/maverick.db"), session_days=_num("SESSION_DAYS", 30.0),
         cookie_secure=_bool("COOKIE_SECURE", False), bot_username=(_opt("SIGNALBOT_USERNAME") or "").lstrip("@") or None,
         candles_sync=_bool("CANDLES_SYNC", True), candles_sync_min=_num("CANDLES_SYNC_MIN", 5.0),

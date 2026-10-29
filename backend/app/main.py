@@ -83,7 +83,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     jobs = JobManager(runner or default_runner, on_done=on_done, top_runner=top_runner or default_top_runner)
     if sync is None:
-        sync = HistorySync(list(s.sources.values()), s.sync_min, enabled=s.sync_enabled,
+        sync = HistorySync(list(s.sources.values()), s.sync_min, enabled=s.sync_enabled, at_minutes=s.sync_at,
                            disabled_reason=None if s.sync_enabled else "выключено: нет TG_API_ID/TG_API_HASH в .env (или HISTORY_SYNC=false)")
 
     if candle_sync is None:
@@ -104,7 +104,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             wd = Watchdog(db, watchdog.telegram_notify(os.getenv("SIGNALBOT_TOKEN").strip()))        # сторож бота: пишет в Telegram, если бот молчит
             wd.start()
         candle_sync.start()                # свечи: при запуске и затем каждые CANDLES_SYNC_MIN минут
-        sync.start()                       # подгрузка при запуске сервера и затем каждые HISTORY_SYNC_MIN минут
+        sync.start()                       # подгрузка при запуске сервера и затем по расписанию HISTORY_SYNC_AT (по умолчанию :02 и :32 каждого часа)
         yield
         if wd:
             wd.stop()

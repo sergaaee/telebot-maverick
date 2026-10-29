@@ -112,3 +112,23 @@ def test_service_reports_limit_fills_and_skip_reasons(tmp_path):
     assert len(lm["trades"]) < len(mk["trades"])
     # лонг: цена исполнения не выше цены сигнала (лимитка на откат), шорт — не ниже
     assert all((t["entry"] <= t["limit"]["ref"] + 1e-9) if t["side"] == "long" else (t["entry"] >= t["limit"]["ref"] - 1e-9) for t in filled)
+
+
+PYR = {"max": 2, "gap_h": 0.0, "move_pct": 0.0, "move_dir": "any", "avg": False, "w0": 100.0, "w": 100.0}
+
+
+def test_no_add_without_a_position_while_the_first_limit_is_standing_or_after_it_expired():
+    flat = [FLAT] * 20                                                       # откат на 0.5% так и не случился
+    tr, sk = run(flat, [(0, 1), (1 * M, 1), (8 * M, 1)], ttl_h=3 / 60, pyramid=PYR)             # ордер живёт 3 минуты: сигнал в 1-й минуте попадает на «стоящий» ордер
+    reasons = [(ts // M, r) for ts, _, r in sk]
+    assert (0, "лимитка не исполнилась за 0.05 ч") in reasons
+    assert (1, "лимитка уже стоит") in reasons                                                  # добор не берётся ни рынком, ни лимиткой: позиции нет
+    assert tr == [] and not any("добор" in r for _, r in reasons)
+    assert (8, "лимитка не исполнилась за 0.05 ч") in reasons                                   # после снятия ордера следующий сигнал — НОВАЯ попытка первого входа, а не добор
+    # а если первая лимитка исполнилась, следующий сигнал — обычный добор по рынку
+    rows = [FLAT, (99.9, 100.0, 99.4), (99.6, 99.8, 99.5), (99.6, 99.8, 99.5), (99.6, 99.8, 99.5)]
+    tr2, sk2 = run(rows, [(0, 1), (3 * M, 1)], ttl_h=1.0, pyramid=PYR)
+    assert [t.get("leg", 1) for t in tr2] == [1, 2] and tr2[1]["pyramid"] and "limit" not in tr2[1] and abs(tr2[1]["entry"] - 99.6) < 1e-9
+    # сигнал, пока лимитка ещё не исполнилась (но исполнится позже), добором не становится
+    tr3, sk3 = run([FLAT, FLAT, FLAT, (99.9, 100.0, 99.4), (99.6, 99.8, 99.5)], [(0, 1), (1 * M, 1)], ttl_h=1.0, pyramid=PYR)
+    assert len(tr3) == 1 and tr3[0]["signal_ts"] == 0 and any(r == "лимитка уже стоит" for _, _, r in sk3)

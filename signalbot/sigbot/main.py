@@ -80,9 +80,9 @@ def main():
     engine = Engine(s, store, markets, make_price_fn(s.exchange) if b.live_price else None)
     sync = None
     if b.sync:
-        sync = HistorySync(list(s.sources.values()), b.sync_min, enabled=True)
+        sync = HistorySync(list(s.sources.values()), b.sync_min, enabled=True, at_minutes=list(b.sync_at))
         sync.start()
-        log.info("подгрузка сообщений ботов каждые %g мин", b.sync_min)
+        log.info("подгрузка сообщений ботов %s", ("в минуты :" + ", :".join(f"{m:02d}" for m in b.sync_at) + " каждого часа (UTC)") if b.sync_at else f"каждые {b.sync_min:g} мин")
     service = SignalService(s, None, db, engine, b, sync)
     bot = make_bot(b.token)
     dp = build_dispatcher(service)
