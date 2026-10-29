@@ -373,7 +373,11 @@ class MonitorUI:
         exn = _exn(code)
         d = self._ad(user, exn).describe()
         suffix = "" if exn == "hyperliquid" else ":b"
-        body = (f"🧪 <b>Тестовая позиция по BTC · {EXC_LABEL[exn]}</b>\nМаржа 1 $" + (f" × {int(-(-(d['min_notional'] * 1.1) // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
+        if exn == "bybit":
+            size = "Маржа от 1 $ (если минимальный ордер велик — до 5 $), плечо подбирается под минимум биржи: не меньше минимального количества BTC (у Bybit это порядка сотни долларов объёма)"
+        else:
+            size = "Маржа 1 $" + (f" × {int(-(-(d['min_notional'] * 1.1) // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
+        body = (f"🧪 <b>Тестовая позиция по BTC · {EXC_LABEL[exn]}</b>\n{size}"
                 + ".\n" + ("Это <b>реальный</b> ордер на " + esc(EXC_LABEL[exn]) + f" ({_net_text(d).replace('<b>', '').replace('</b>', '')})." if d["real"] else "Биржа не подключена — будет симуляция (запись в журнал).")
                 + "\nПозиция без стопа и тейков; закрывается кнопкой ниже.")
         return body, [[("🧪 Лонг", f"cty:long{suffix}"), ("🧪 Шорт", f"cty:short{suffix}")], [("❌ Закрыть тестовую", f"ctc{suffix}")], [("← К списку", "m")]]
@@ -398,7 +402,7 @@ class MonitorUI:
         exn = _exn(code)
         d = self._ad(user, exn).describe()
         sfx = "" if exn == "hyperliquid" else f":{code}"
-        return self._confirm(f"🧪 Открыть тестовую позицию по BTC ({'лонг' if side == 'long' else 'шорт'}), маржа 1 $?" + (f" Это <b>реальный</b> ордер на {EXC_LABEL[exn]}." if d["real"] else " Биржа не подключена — симуляция."), f"tgo:{side}{sfx}", f"t{sfx}")
+        return self._confirm(f"🧪 Открыть тестовую позицию по BTC ({'лонг' if side == 'long' else 'шорт'}), маржа {'1–5 $ (плечо — под минимум биржи)' if exn == 'bybit' else '1 $'}?" + (f" Это <b>реальный</b> ордер на {EXC_LABEL[exn]}." if d["real"] else " Биржа не подключена — симуляция."), f"tgo:{side}{sfx}", f"t{sfx}")
 
     def _s_confirm_close(self, user, code="h", live=False):
         exn = _exn(code)

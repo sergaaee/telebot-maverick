@@ -640,7 +640,8 @@ export default function MonitorPage() {
     const info = infoOf(testEx);
     const mn = info?.min_notional ?? 0;
     const lev = mn ? Math.ceil(mn * 1.1) : 1;
-    if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): маржа 1 $ × ${lev}× = объём ${lev} $?${info?.real ? ` Это реальный ордер на ${exchangeLabel(info)}.` : ` Счёт ${EX_LABEL[testEx]} не подключён — будет симуляция.`}`)) return;
+    const sizeText = testEx === 'bybit' && info?.real ? 'маржа от 1 $ (до 5 $), плечо подберётся под минимальный ордер биржи (минимальное количество BTC)' : `маржа 1 $ × ${lev}× = объём ${lev} $`;
+    if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): ${sizeText}?${info?.real ? ` Это реальный ордер на ${exchangeLabel(info)}.` : ` Счёт ${EX_LABEL[testEx]} не подключён — будет симуляция.`}`)) return;
     setBusy(true);
     setMsg(null);
     try {

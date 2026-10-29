@@ -194,11 +194,43 @@ def _fail(db, uid, kind, side, e):
     raise ManageError(str(e), 503 if isinstance(e, NotConfigured) else 502)
 
 
+TEST_MAX_LEVERAGE = 25                  # потолок плеча тестовой позиции: если минимум биржи велик, растёт маржа (до TEST_MAX_USD), а не плечо
+
+
+def test_size(adapter, margin):
+    """(маржа, плечо) тестовой позиции: плечо подбирается так, чтобы объём прошёл минимум биржи с запасом 10 % (округление идёт вниз, а биржа проверяет объём по цене с проскальзыванием).
+    Минимум берётся у самой биржи, если она его знает (Bybit: наибольшее из 5 $ и минимального количества × цена — у BTC это порядка сотни долларов); если с маржой
+    margin плечо выходит больше TEST_MAX_LEVERAGE, маржа поднимается, но не выше TEST_MAX_USD. Не помещается — ManageError с цифрами."""
+    need = float(adapter.min_notional or 0)
+    mov = getattr(adapter, "min_order_value", None)
+    if adapter.real and mov:
+        try:
+            need = max(need, float(mov(TEST_SYMBOL)))
+        except (NotConfigured, ExchangeError):
+            raise
+        except Exception:
+            pass
+    need *= 1.1
+    lev = max(1, math.ceil(round(need / margin, 6))) if need else 1
+    if lev > TEST_MAX_LEVERAGE and margin < TEST_MAX_USD:
+        margin = min(TEST_MAX_USD, math.ceil(round(need / TEST_MAX_LEVERAGE * 100, 6)) / 100)
+        lev = max(1, math.ceil(round(need / margin, 6)))
+    if lev > TEST_MAX_LEVERAGE * 2:
+        raise ManageError(f"Минимальный ордер по BTC на {getattr(adapter, 'label', adapter.name)} ≈ {need / 1.1:.0f} $ объёма: тестовая позиция с маржой до {TEST_MAX_USD:g} $ не проходит "
+                          f"(потребовалось бы плечо {lev}×). Проверьте работу биржи входом по сигналу или откройте тестовую позицию вручную.")
+    return margin, float(lev)
+
+
 def test_open(db, adapter, uid, side="long", margin=1.0):
-    """Тестовая позиция по BTC: маржа 1 $ (потолок TEST_MAX_USD), плечо подбирается так, чтобы объём прошёл минимум биржи (Hyperliquid: ордер от 10 $ с запасом → 11×)."""
+    """Тестовая позиция по BTC: маржа 1 $ (потолок TEST_MAX_USD), плечо подбирается так, чтобы объём прошёл минимум биржи (Hyperliquid: ордер от 10 $ с запасом → 11×;
+    Bybit: минимум зависит от цены монеты — если на 1 $ маржи нужно слишком большое плечо, маржа вырастает до TEST_MAX_USD)."""
     if side not in ("long", "short") or not (0 < margin <= TEST_MAX_USD):
         raise ManageError(f"Сторона long/short и маржа от 0 до {TEST_MAX_USD:g} $")
-    lev = max(1, math.ceil(adapter.min_notional * 1.1 / margin)) if adapter.min_notional else 1      # +10%: размер округляется вниз, а биржа проверяет объём по цене с проскальзыванием
+    try:
+        margin, lev = test_size(adapter, margin)
+    except (NotConfigured, ExchangeError) as e:
+        _fail(db, uid, "test_position", side, e)
+    lev = int(lev)
     notional = margin * lev
     try:
         res = adapter.open_market(TEST_SYMBOL, side, notional, float(lev))
