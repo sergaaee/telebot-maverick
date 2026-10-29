@@ -202,7 +202,7 @@ function Details({ id, onChanged, exchange }: { id: number; onChanged: () => voi
       <div className="mon-actions">
         <button type="button" className="ghost" onClick={() => { const n = window.prompt('Новое имя конфига', e.title ?? ''); if (n && n.trim()) void act(() => renameConfig(id, n.trim())); }}>Переименовать</button>
         <button type="button" className="ghost" onClick={() => void exportBotConfig(id).then((c) => downloadText(`maverick-config_${id}.json`, JSON.stringify(c, null, 2), 'application/json')).catch((x) => setErr(String(x)))}>⬇ Скачать конфиг</button>
-        <button type="button" className="ghost bad-text" onClick={() => { if (window.confirm(`Удалить конфиг «${e.title}»? Бот перестанет по нему считать и присылать сигналы. Открытые на бирже позиции это не закрывает.`)) void act(() => deleteConfig(id), true); }}>Удалить</button>
+        <button type="button" className="ghost bad-text" onClick={() => { if (window.confirm(`Удалить конфиг «${e.title}»? Бот перестанет по нему считать и присылать сигналы. Позиция, уже открытая на бирже, останется со своими стопом и тейками, но бот её больше не ведёт (безубыток, закрытие по развороту, уведомления) — закройте её сами, если нужно. Стоящий лимитный ордер на вход будет снят.`)) void act(() => deleteConfig(id), true); }}>Удалить</button>
         {exchange.real === false && <span className="muted small">автомод — симуляция</span>}
         {err && <span className="bad-text small"> {err}</span>}
       </div>

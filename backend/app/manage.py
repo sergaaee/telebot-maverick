@@ -109,11 +109,21 @@ def set_paused(db, uid, config_id, paused):
     return bool(paused)
 
 
-def remove_config(db, uid, config_id):
+def remove_config(db, uid, config_id, adapter=None):
+    """Удаляет конфиг. Позиция, уже открытая на бирже, остаётся (вместе со своими стопом и тейками на бирже), но бот её больше не ведёт. Лимитный ордер на вход, который ещё стоит
+    на бирже, снимается: после удаления некому было бы поставить стоп и тейки, если он исполнится. Не удалось снять — ошибка, конфиг остаётся."""
     c = own_config(db, uid, config_id)
+    pend = db.get_pending(c["id"])
+    cancelled = None
+    if pend and pend["order_id"] and adapter is not None and adapter.real:
+        try:
+            adapter.cancel_order_id(pend["order_id"], pend["symbol"])
+            cancelled = pend["order_id"]
+        except (NotConfigured, ExchangeError) as e:
+            raise ManageError(f"Не удалось снять лимитный ордер {pend['order_id']} на бирже: {e}. Конфиг не удалён — снимите ордер вручную или повторите.", 502)
     db.remove_config(c["id"])
-    db.add_auto_log(uid, None, "config_removed", None, None, "info", {"name": c["name"]})
-    trade_log("config_removed", "warn", user=uid, config=c["id"], name=c["name"])
+    db.add_auto_log(uid, None, "config_removed", None, None, "info", {"name": c["name"], "cancelled_order": cancelled})
+    trade_log("config_removed", "warn", user=uid, config=c["id"], name=c["name"], cancelled_order=cancelled)
     return c["name"]
 
 

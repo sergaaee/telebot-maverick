@@ -412,9 +412,13 @@ class SignalService:
     def cmd_remove(self, chat, user, arg):
         c = self._cfg(chat, user, arg)
         if c:
-            self.db.remove_config(c["id"])
+            try:
+                manage.remove_config(self.db, user["id"], c["id"], self.adapter_for(user["id"]))
+            except manage.ManageError as e:
+                self.send(chat, f"⚠️ {esc(str(e))}")
+                return
             self._fp.pop(c["id"], None)
-            self.send(chat, f"🗑 Конфиг <b>{esc(c['name'])}</b> удалён.")
+            self.send(chat, f"🗑 Конфиг <b>{esc(c['name'])}</b> удалён. Открытая на бирже позиция (если была) осталась со своими стопом и тейками — бот её больше не ведёт.")
 
     def cmd_pause(self, chat, user, arg):
         c = self._cfg(chat, user, arg)
