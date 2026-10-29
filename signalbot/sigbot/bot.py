@@ -14,6 +14,7 @@ from app.db import DbError
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
+from app.core import backtest
 from app import digest as digest_mod, exporter, manage
 from app.monitor import cached_result
 from app.service import ParamError
@@ -737,41 +738,88 @@ class SignalService:
 
     def _catch_up(self, cfg, res, chat):
         """Автомод включён при включённой опции «догнать сигнал»: входим по ПОСЛЕДНЕМУ сигналу, если он свеж (не старше age_min минут), по расчёту позиция по нему ещё открыта
-        и цена не ушла в сторону прибыли больше чем на move_pct % от цены сигнала — иначе вход был бы заметно хуже сигнального. Первая нога позиции; доборы не догоняются."""
+        и цена не ушла в сторону прибыли больше чем на move_pct % от цены сигнала — иначе вход был бы заметно хуже сигнального.
+        Если последний сигнал — ДОБОР к уже открытой по расчёту позиции, догоняется вся позиция: сначала первая нога (по правилам конфига: по рынку или лимиткой), затем сам добор
+        (при входе лимиткой добор не ставится — добирать можно только в уже открытую позицию). Цена сверяется с ценой сигнала добора, возраст — тоже по нему."""
         cu, p = cfg["catchup"], res["params"]
         name = f"<b>#{cfg['id']} {esc(cfg['name'])}</b>"
-        taken = [x for x in res["last_signals"] if x["taken"] and not x["trend_blocked"]]
+        pending_reason = backtest.LIMIT_PENDING if p.get("entry_limit_pct") else None            # лимитный вход: сигнал, по которому ордер в расчёте ещё ждёт исполнения, — тоже действующий
+        taken = [x for x in res["last_signals"] if (x["taken"] or (pending_reason and x.get("reason") == pending_reason)) and not x["trend_blocked"]]
         if not taken:
             self.send(chat, f"⏩ {name}: догонять нечего — среди последних сигналов нет такого, по которому стратегия входила бы.")
             return
         sig = taken[-1]
-        trade = next((t for t in res["trades"] if t["signal_ts"] == sig["ts"]), None)
+        trades = res["trades"]
+        trade = next((t for t in trades if t["signal_ts"] == sig["ts"]), None)
+        avg_owner = next((t for t in trades if sig["ts"] in (t.get("add_signals") or [])), None)       # усреднённая позиция: сигнал добора лежит внутри сделки
+        is_add = (trade is not None and trade.get("leg", 1) > 1) or (trade is None and avg_owner is not None)
         age = (self.clock() * 1000 - sig["ts"]) / 60000
-        why = None
-        if trade is None or trade.get("leg", 1) > 1:
-            why = "последний сигнал — добор к уже открытой позиции, догонять нечего"
+        why, ref_px, first = None, None, None
+        waiting = trade is None and avg_owner is None and pending_reason and sig.get("reason") == pending_reason
+        if trade is None and avg_owner is None and not waiting:
+            why = "по последнему сигналу в расчёте нет сделки"
         elif age > cu["age_min"]:
             why = f"последний сигнал {fm.ts_str(sig['ts'])} — {age:.0f} мин назад, а допустимо не больше {cu['age_min']:g}"
+        elif is_add:
+            held = [t for t in trades if t["reason"] == "OPEN" and t["side"] == sig["side"]]
+            if not held:
+                why = f"по расчёту стратегии позиция с добором от {fm.ts_str(sig['ts'])} уже закрыта"
+            else:
+                first = next((t for t in held if t.get("leg", 1) == 1), None)                        # первая нога ещё открыта в расчёте?
+                if avg_owner is not None:
+                    k = avg_owner["add_signals"].index(sig["ts"]) + 1
+                    ref_px = (avg_owner.get("adds") or [{}] * (k + 1))[k].get("price") or avg_owner["entry"]
+                else:
+                    ref_px = trade["entry"]
+        elif waiting:
+            ref_px = self._signal_price(p["symbol"], sig["ts"])                                       # ордер ещё ждёт в расчёте: цена сигнала — open свечи входа
         elif trade["reason"] != "OPEN":
             why = f"по расчёту стратегии позиция по сигналу {fm.ts_str(sig['ts'])} уже закрыта ({trade['reason']})"
+        else:
+            ref_px = trade["entry"]
         price = self.engine.price_fn(p["symbol"]) if self.b.live_price else None
         move = None
+        if not why and not ref_px:
+            why = "не удалось определить цену сигнала"
         if not why:
             if not price:
                 why = "не удалось получить текущую цену — не могу проверить, не ушла ли она"
             else:
                 d = 1 if sig["side"] == "long" else -1
-                move = d * (price / trade["entry"] - 1) * 100                     # + — цена ушла в сторону прибыли, − — в сторону убытка (вход даже лучше сигнального)
+                move = d * (price / ref_px - 1) * 100                              # + — цена ушла в сторону прибыли, − — в сторону убытка (вход даже лучше сигнального)
                 if move > cu["move_pct"] + 1e-9:
-                    why = f"цена уже ушла в сторону прибыли на {move:.2f}% от цены сигнала ({trade['entry']:g} → {price:g}), допустимо не больше {cu['move_pct']:g}%"
-        trade_log("auto_catchup", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], signal_ts=sig["ts"], side=sig["side"], age_min=round(age, 1), move_pct=None if move is None else round(move, 3), skipped=why)
+                    why = f"цена уже ушла в сторону прибыли на {move:.2f}% от цены сигнала ({ref_px:g} → {price:g}), допустимо не больше {cu['move_pct']:g}%"
+        trade_log("auto_catchup", "warn", user=cfg["user_id"], config=cfg["id"], name=cfg["name"], signal_ts=sig["ts"], side=sig["side"], add=is_add, age_min=round(age, 1), move_pct=None if move is None else round(move, 3), skipped=why)
         if why:
             self.db.add_auto_log(cfg["user_id"], cfg["id"], "catchup", p["symbol"], sig["side"], "skipped", {"signal_ts": sig["ts"], "note": why})
             self.send(chat, f"⏩ {name}: вход по свежему сигналу не выполнен — {esc(why)}.")
             return
         plan = self.engine.plan(sig["side"], price, p["tps"], p["sl_pct"])
-        self.send(chat, f"⏩ {name}: догоняю сигнал {'в лонг' if sig['side'] == 'long' else 'в шорт'} от {fm.ts_str(sig['ts'])} ({age:.0f} мин назад, цена {price:g}, от цены сигнала {fm.pct(move, 2)}).")
-        self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": False, "leg": 1}, plan)
+        side_ru = "в лонг" if sig["side"] == "long" else "в шорт"
+        if not is_add:
+            self.send(chat, f"⏩ {name}: догоняю сигнал {side_ru} от {fm.ts_str(sig['ts'])} ({age:.0f} мин назад, цена {price:g}, от цены сигнала {fm.pct(move, 2)}).")
+            self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": False, "leg": 1}, plan)
+            return
+        first_ts = first["signal_ts"] if first is not None else sig["ts"]
+        limit_first = bool(p.get("entry_limit_pct"))
+        self.send(chat, f"⏩ {name}: последний сигнал {side_ru} от {fm.ts_str(sig['ts'])} ({age:.0f} мин назад) — добор к позиции, которая по расчёту открыта. Догоняю позицию: сначала первую ногу"
+                        + ("" if first is not None else " (первая нога по расчёту уже закрыта — вхожу текущей открытой частью)") + (f", потом добор. Вход лимиткой: добор не ставлю — добирать можно только в открытую позицию." if limit_first else ", потом добор."))
+        self._auto_open(cfg, res, {"ts": first_ts, "side": sig["side"], "pyramid": False, "leg": 1}, plan)
+        if limit_first or first is None:
+            return
+        self._auto_open(cfg, res, {"ts": sig["ts"], "side": sig["side"], "pyramid": True, "leg": 2}, plan)
+
+    def _signal_price(self, symbol, ts):
+        """Цена сигнала по свечам: open первой свечи не раньше сигнала (или close последней, если свечи входа ещё нет)."""
+        try:
+            candles = self.engine.store.candles(symbol)
+        except (KeyError, FileNotFoundError):
+            return None
+        if not candles:
+            return None
+        from bisect import bisect_left
+        i = bisect_left([c[0] for c in candles], ts)
+        return candles[i][1] if i < len(candles) else candles[-1][4]
 
     # ---------------- вход лимитным ордером / по ходу цены ----------------
     def _place_entry_order(self, cfg, p, sig, ad, base, sz, notional, margin):
