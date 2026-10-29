@@ -199,7 +199,7 @@ class MonitorUI:
             out.append("⚠️ Цена за оценочной ценой ликвидации (в расчёте стратегии ликвидация учитывается, только если включена).")
         for l in pos.get("legs") or []:
             tps = " ".join(f"{'✅' if t['hit'] else ''}TP{t['n']} <code>{fm.price(t['price'])}</code>" for t in l["tps"])
-            stop = f"{l['stop_kind']} <code>{fm.price(l['stop'])}</code>" + (f" (запас {l['to_stop_pct']:.2f}%)" if l.get("to_stop_pct") is not None else "")
+            stop = (f"{l['stop_kind']} <s>{fm.price(l['stop'])}</s> <i>(пока не действует: метрики сильны)</i>" if l.get("stop_held") else f"{l['stop_kind']} <code>{fm.price(l['stop'])}</code>" + (f" (запас {l['to_stop_pct']:.2f}%)" if l.get("to_stop_pct") is not None else ""))
             out.append(f"• {l['kind']}{f' ×{l[chr(97) + chr(100) + chr(100) + chr(115) + chr(95) + chr(110)] + 1}' if l.get('adds_n') else ''}: вход <code>{fm.price(l['entry'])}</code> · {stop}\n"
                        f"  {tps} · ликвид. ≈ <code>{fm.price(l['liq_price'])}</code> · {fm.usd(l['pnl_usd'])}")
         return out

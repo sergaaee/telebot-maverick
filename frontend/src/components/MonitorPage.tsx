@@ -9,7 +9,7 @@ import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
   open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту',
-  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки',
+  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
 
@@ -41,7 +41,7 @@ function Leg({ l, side }: { l: MonitorLeg; side: 'long' | 'short' }) {
       <td>{l.kind}{l.adds_n ? ` ×${l.adds_n + 1}` : l.leg > 1 ? ` #${l.leg - 1}` : ''}</td>
       <td title={fmtTs(l.entry_ts)}>{fmtPrice(l.entry)}</td>
       <td title={`маржа ${fmtUsd(l.margin)} × плечо ${l.leverage.toFixed(1)}`}>{fmtUsd(l.notional)}</td>
-      <td title={l.stop_kind === 'БУ' ? 'стоп перенесён в безубыток' : 'стоп-лосс'}>{l.stop_kind} {fmtPrice(l.stop)}<span className="muted"> {l.to_stop_pct != null ? `(${l.to_stop_pct.toFixed(2)}%)` : ''}</span></td>
+      <td title={l.stop_kind === 'БУ' ? 'стоп перенесён в безубыток' : l.stop_held ? 'стоп-лосс пока не действует: метрики сильны (настройка «не ставить SL, пока метрики сильны»); начнёт действовать, когда метрики остынут' : 'стоп-лосс'}>{l.stop_held ? <s className="muted">{l.stop_kind} {fmtPrice(l.stop)}</s> : <>{l.stop_kind} {fmtPrice(l.stop)}</>}{l.stop_held ? <span className="warn-text"> не действует</span> : <span className="muted"> {l.to_stop_pct != null ? `(${l.to_stop_pct.toFixed(2)}%)` : ''}</span>}</td>
       <td>
         {l.tps.map((t) => <span key={t.n} className={t.hit ? 'pos' : ''} title={`${t.share}% позиции${t.hit ? ' — исполнен' : ''}`}>{t.hit ? '✓' : ''}TP{t.n} {fmtPrice(t.price)}{' '}</span>)}
         {l.to_next_tp_pct != null && <span className="muted">(до ближайшего {l.to_next_tp_pct.toFixed(2)}%)</span>}

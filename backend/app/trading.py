@@ -78,6 +78,14 @@ class ExchangeAdapter:
         """Стоп и тейки (reduce-only) на уже открытую позицию."""
         raise NotImplementedError
 
+    def stop_prices(self, symbol, side):
+        """Цены стопов (триггерные reduce-only ордера на закрытие позиции side), стоящих на бирже сейчас."""
+        return []
+
+    def clear_stops(self, symbol, side):
+        """Снимает все стопы позиции (тейки не трогает). -> сколько снято."""
+        return 0
+
 
 class DryRunAdapter(ExchangeAdapter):
     """Ничего не отправляет: возвращает то, что было бы сделано."""
@@ -342,6 +350,25 @@ class HyperliquidAdapter(ExchangeAdapter):
         o = self._call("новый стоп", ex.create_order, sym, "market", exit_side, size, float(price), {"stopLossPrice": float(price), "reduceOnly": True})
         self._log("order_ok", kind="move_stop", symbol=sym, stop=price, removed_old=removed, order=o.get("id") if isinstance(o, dict) else None)
         return {"status": "sent", "symbol": sym, "stop": price, "removed_old": removed, "order": o.get("id") if isinstance(o, dict) else None}
+
+    def stop_prices(self, symbol, side):
+        ex = self._x()
+        sym = self.hl_symbol(symbol)
+        exit_side = "sell" if side == "long" else "buy"
+        return sorted(float(o["triggerPrice"]) for o in (self._open_orders(ex, sym) or []) if o.get("triggerPrice") and o.get("reduceOnly") and o.get("side") == exit_side)
+
+    def clear_stops(self, symbol, side):
+        """Снимает стопы позиции (триггерные reduce-only ордера в сторону закрытия); тейки-лимитки остаются."""
+        ex = self._x()
+        sym = self.hl_symbol(symbol)
+        exit_side = "sell" if side == "long" else "buy"
+        removed = 0
+        for o in self._open_orders(ex, sym) or []:
+            if o.get("triggerPrice") and o.get("reduceOnly") and o.get("side") == exit_side:
+                self._call("снятие стопа", self._cancel, ex, o, sym)
+                removed += 1
+        self._log("order_ok", kind="clear_stops", symbol=sym, removed=removed)
+        return removed
 
     def close_market(self, symbol, side, share=1.0):
         ex = self._x()

@@ -49,6 +49,7 @@ class SignalService:
         self._retry_ids = {(r["config_id"], r["exchange"]) for r in db.list_retries()}      # входы, которые не удались до перезапуска: повторяются при первой проверке конфига
         self._hl = {}                       # user_id -> шаг подключения Hyperliquid (ждём адрес кошелька / ключ API-кошелька)
         self._by = {}                       # user_id -> шаг подключения Bybit (ждём API-ключ / секрет)
+        self._sl_err = {}                   # (конфиг, биржа) -> (текст, время) последней ошибки синхронизации стопа: не повторять сообщение каждые 5 минут
 
     # ---------------- отправка ----------------
     def send(self, chat, text, keyboard=None):
@@ -787,6 +788,7 @@ class SignalService:
             if sent:
                 upd["alerts"] = cfg["alerts"] + sent
             self._send_fills(cfg, res, chat, label, upd)             # исполнения в счётчик «сигналов» (alerts) не входят
+            self._sync_stops(cfg, res, chat)                         # «не ставить SL, пока метрики сильны»: стоп на бирже — как в расчёте сейчас
             self._send_ready(cfg, res, chat, label, upd, entered=sent > 0)
         self.db.update_config(cfg["id"], **upd)
         if cfg["catchup"]["armed"]:                                  # «догнать свежий сигнал»: один заход после включения автомода
@@ -852,6 +854,84 @@ class SignalService:
                     log.exception("автомод %s: вход по %s", name, cfg["name"])
                     self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"⚠️ {self._name(cfg, name)}: вход не выполнен — {esc(str(e) or type(e).__name__)[:300]}")
 
+    def _hold_stop(self, cfg, ex, res, side):
+        """Опция конфига «не ставить SL, пока метрики сильны» на бирже: стоп при входе НЕ ставится, если метрики последнего отчёта всё ещё удовлетворяют условию входа (как в расчёте) и на этой
+        бирже включено «управлять» (иначе потом стоп поставить некому — и он ставится сразу, как обычно). Не удалось определить — стоп ставится (безопасный вариант)."""
+        p = (res or {}).get("params") or {}
+        if not (p.get("sl_hold_strong") and cfg["ex"][ex]["manage"]):
+            return False
+        return bool(((res or {}).get("hold_now") or {}).get("long" if side == "long" else "short"))
+
+    def _eval_quiet(self, cfg):
+        try:
+            return self.engine.evaluate(cfg["params"])
+        except Exception:
+            log.warning("не удалось пересчитать %s для проверки стопа", cfg["name"])
+            return None
+
+    SL_SYNC_MSG_SEC = 3600
+
+    def _sync_stops(self, cfg, res, chat):
+        """«Не ставить SL, пока метрики сильны» на бирже. Каждую проверку конфига сверяем стоп на бирже с тем, что должно быть по расчёту СЕЙЧАС:
+        метрики остыли — стоп ставится (цена уже за ним — позиция закрывается по рынку, как в расчёте закрылась бы по цене открытия); метрики снова сильны — стоп снимается;
+        стоп в безубытке после TP1 от метрик не зависит. Состояния в базе нет — сверка идёт с самой биржей, поэтому после перезапуска бота всё восстанавливается.
+        Работает на биржах, где включено «управлять» и счёт подключён."""
+        p = res["params"]
+        if not p.get("sl_hold_strong") or not res.get("hold_now"):
+            return
+        legs = [t for t in res["trades"] if t["reason"] == "OPEN"]
+        if not legs:
+            return
+        side = legs[0]["side"]
+        d = 1 if side == "long" else -1
+        hold = bool(res["hold_now"]["long" if side == "long" else "short"])
+        prices = [t["entry"] if (t["be"] and t["tp_hits"] >= 1) else t["sl"] for t in legs if (t["be"] and t["tp_hits"] >= 1) or not hold]        # действующие стопы: безубыток всегда, SL — когда метрики остыли
+        want = None if not prices else (max(prices) if d == 1 else min(prices))          # одна позиция на бирже -> один стоп: самый близкий из действующих
+        sym, base = p["symbol"], p["symbol"].split("/")[0]
+        for ex in EXCHANGES:
+            if not cfg["ex"][ex]["manage"]:
+                continue
+            ad = self.adapter_for(cfg["user_id"], ex)
+            if not ad.real:
+                continue
+            try:
+                if not any((x.get("symbol") or "").split("/")[0] == base and x["side"] == side for x in ad.positions()):
+                    continue                                                                # на бирже позиции нет — защищать нечего
+                have = ad.stop_prices(sym, side)
+                name = self._name(cfg, ex)
+                if want is None:
+                    if have:
+                        st, r = self._do(cfg, "sl_sync", sym, side, lambda: {"status": "sent", "removed": ad.clear_stops(sym, side)}, {"action": "снять стоп", "reason": "метрики снова сильны"}, ad=ad, ex=ex)
+                        self._sl_note(cfg, ex, st, r, chat, f"🔓 {name}: метрики снова сильны — стоп снят (как в расчёте).")
+                    continue
+                if len(have) == 1 and abs(have[0] / want - 1) < 5e-4:
+                    continue                                                                # уже стоит где нужно
+                price = self.engine.price_fn(sym) if self.b.live_price else None
+                if price and (d * (price / want - 1)) <= 0:                                  # цена уже за стопом: в расчёте выход по цене открытия
+                    st, r = self._do(cfg, "sl_sync", sym, side, lambda: ad.close_market(sym, side, 1.0), {"action": "закрыть", "reason": "метрики остыли, цена уже за стопом", "stop": want, "price": price}, ad=ad, ex=ex)
+                    self._sl_note(cfg, ex, st, r, chat, f"🛑 {name}: метрики остыли, а цена {fm.price(price)} уже за стопом {fm.price(want)} — позиция закрыта по рынку (как в расчёте).")
+                    continue
+                st, r = self._do(cfg, "sl_sync", sym, side, lambda: ad.set_stop(sym, side, want), {"action": "поставить стоп" if not have else "переставить стоп", "reason": "метрики остыли" if not hold else "безубыток", "stop": want}, ad=ad, ex=ex)
+                self._sl_note(cfg, ex, st, r, chat, f"🛡 {name}: {'метрики остыли — ' if not hold else ''}{'поставил' if not have else 'переставил'} стоп {fm.price(want)} (как в расчёте).")
+            except Exception as e:
+                log.warning("стоп по метрикам %s (%s): %s", cfg["name"], ex, e)
+                self._sl_note(cfg, ex, "error", {"error": str(e)}, chat, "")
+
+    def _sl_note(self, cfg, ex, status, r, chat, ok_text):
+        """Сообщение о синхронизации стопа; об ошибке — не чаще раза в час на одну биржу конфига (проверка идёт каждые 5 минут)."""
+        key = (cfg["id"], ex)
+        errs = self._sl_err
+        if status == "error":
+            msg = str(r.get("error") or "")
+            prev = errs.get(key)
+            if not prev or prev[0] != msg or self.clock() - prev[1] > self.SL_SYNC_MSG_SEC:
+                errs[key] = (msg, self.clock())
+                self.send(chat, f"⚠️ {self._name(cfg, ex)}: не удалось синхронизировать стоп с метриками: {esc(msg[:250])}. Повторю при следующей проверке; проверьте позицию на бирже!")
+            return
+        errs.pop(key, None)
+        if status != "skipped" and ok_text:
+            self.send(chat, ok_text)
+
     def _open_on(self, cfg, res, sig, plan, ex):
         """Вход или добор по новому сигналу на одной бирже. Перед ордером состояние сверяется с реальной биржей."""
         ecfg = cfg["ex"][ex]
@@ -886,14 +966,18 @@ class SignalService:
         if p.get("entry_limit_pct") and not add:
             self._place_entry_order(cfg, p, sig, ad, base, sz, notional, margin, ex)
             return
+        held = self._hold_stop(cfg, ex, res, sig["side"])                           # «не ставить SL, пока метрики сильны»: вход только с тейками, стоп поставит синхронизация, когда метрики остынут
         st, r = self._do(cfg, "add" if add else "open", p["symbol"], sig["side"],
                          lambda: ad.open_market(p["symbol"], sig["side"], notional, (notional / margin) if margin else p["leverage"],
-                                                plan["sl"] if plan else None, [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
-                         {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"]}, ad=ad, ex=ex)
+                                                None if held else (plan["sl"] if plan else None), [(l["price"], l["share"]) for l in plan["levels"]] if plan else None),
+                         {"signal_ts": sig["ts"], "notional": notional, "margin": margin, "leg": sig.get("leg", 1), "size_base": base, "size_note": sz["note"], "stop": "не ставится: метрики сильны" if held else "поставлен"}, ad=ad, ex=ex)
         if st == "error":
             self._open_failed(cfg, sig, add, r.get("error"), ex)
         else:
             self.db.clear_retry(cfg["id"], ex)
+            if held and st != "dry_run":
+                self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"🔓 {self._name(cfg, ex)}: {'добор' if add else 'вход'} выполнен БЕЗ стопа — метрики сильны (настройка «не ставить SL, пока метрики сильны»). "
+                                                                           "Стоп встанет, когда метрики остынут; пока его нет, убыток по позиции на бирже не ограничен.")
 
     def _catch_up(self, cfg, res, chat):
         """Автомод включён при включённой опции «догнать сигнал»: входим по ПОСЛЕДНЕМУ сигналу, если он свеж (не старше age_min минут), по расчёту позиция по нему ещё открыта
@@ -1049,13 +1133,14 @@ class SignalService:
         p = cfg["params"]
         entry = pos.get("entry") or pend["level"]
         plan = self.engine.plan(pend["side"], entry, p["tps"], p["sl_pct"])
-        st, r = self._do(cfg, "protect", pend["symbol"], pend["side"], lambda: ad.protect(pend["symbol"], pend["side"], pos["size"], plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
-                         {"signal_ts": pend["signal_ts"], "entry": entry, "size": pos["size"], "partial": partial}, ad=ad, ex=ex)
+        held = bool(p.get("sl_hold_strong")) and self._hold_stop(cfg, ex, self._eval_quiet(cfg), pend["side"])
+        st, r = self._do(cfg, "protect", pend["symbol"], pend["side"], lambda: ad.protect(pend["symbol"], pend["side"], pos["size"], None if held else plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
+                         {"signal_ts": pend["signal_ts"], "entry": entry, "size": pos["size"], "partial": partial, "stop": "не ставится: метрики сильны" if held else "поставлен"}, ad=ad, ex=ex)
         if st == "error":
             self.send(chat, f"🚨 {name}: лимитка исполнена по {fm.price(entry)}, но стоп/тейки НЕ встали: {esc(str(r.get('error'))[:300])}. Проверьте позицию на бирже!")
             return
         self.send(chat, f"✅ {name}: {'лимитка исполнена частично' if partial else 'лимитка исполнена'} — {'лонг' if pend['side'] == 'long' else 'шорт'} {pos['size']:g} по {fm.price(entry)}. "
-                        f"Стоп {fm.price(plan['sl'])}, тейков: {len(plan['levels'])}.")
+                        + (f"Стоп НЕ ставлю — метрики сильны (поставлю, когда остынут), тейков: {len(plan['levels'])}." if held else f"Стоп {fm.price(plan['sl'])}, тейков: {len(plan['levels'])}."))
 
     def _tick_pending(self):
         """Раз в цикл: ожидающие входы — лимитка исполнилась / истекла / отменена снаружи; вход по ходу — цена дошла до уровня."""
@@ -1112,9 +1197,10 @@ class SignalService:
             if pre.get("skip"):
                 self._skip_open(cfg, p, sig, False, ad, pre["skip"], retry=pre.get("retry", False), ex=ex)
                 return
+            held = bool(p.get("sl_hold_strong")) and self._hold_stop(cfg, ex, self._eval_quiet(cfg), row["side"])
             st, r = self._do(cfg, "open", row["symbol"], row["side"],
-                             lambda: ad.open_market(row["symbol"], row["side"], row["notional"], row["leverage"], plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
-                             {"signal_ts": row["signal_ts"], "notional": row["notional"], "margin": row["margin"], "level": row["level"], "mode": "breakout"}, ad=ad, ex=ex)
+                             lambda: ad.open_market(row["symbol"], row["side"], row["notional"], row["leverage"], None if held else plan["sl"], [(l["price"], l["share"]) for l in plan["levels"]]),
+                             {"signal_ts": row["signal_ts"], "notional": row["notional"], "margin": row["margin"], "level": row["level"], "mode": "breakout", "stop": "не ставится: метрики сильны" if held else "поставлен"}, ad=ad, ex=ex)
             if st == "error":
                 self._open_failed(cfg, sig, False, r.get("error"), ex)
             return

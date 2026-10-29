@@ -652,6 +652,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "weekday_split": weekday_split(trades, eff.get("friday_close_before_min") or 0.0),
         "pending": pending_out[-3000:],
         "ready_now": ready_now,
+        "hold_now": ({"long": bool(hold(1, 1 << 62)), "short": bool(hold(-1, 1 << 62)), "report_ts": sigs[-1][0]} if hold is not None else None),     # «SL не ставить, пока метрики сильны»: по ПОСЛЕДНЕМУ отчёту (бот ставит / снимает стоп на бирже)
         "last_signals": last_signals,                  # самые свежие подтверждённые сигналы (для бота: список signals обрезается по первым 5000)
         "equity": equity,
         "monthly": list(monthly.values()),

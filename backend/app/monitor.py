@@ -44,13 +44,14 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
     for t in legs:
         be_on = bool(t["be"] and t["tp_hits"] >= 1)
         stop = t["entry"] if be_on else t["sl"]
+        held = bool(not be_on and p.get("sl_hold_strong") and (res.get("hold_now") or {}).get("long" if t["side"] == "long" else "short"))      # «SL не ставить, пока метрики сильны»: стоп пока не действует
         lev = (t["notional"] / t["margin"]) if t.get("margin") else p["leverage"]
         nxt = next((x for i, x in enumerate(t["tps"], 1) if i > t["tp_hits"]), None)
         rows.append({
             "leg": t.get("leg", 1), "kind": "усреднённая" if t.get("avg") else ("добор" if t.get("pyramid") else "вход"), "adds_n": t.get("adds_n", 0),
             "entry_ts": t["entry_ts"], "entry": t["entry"], "notional": t["notional"], "margin": t["margin"], "leverage": lev,
             "tps": [{"n": i, "price": x, "hit": i <= t["tp_hits"], "share": sh} for i, (x, sh) in enumerate(zip(t["tps"], t["tp_shares"]), 1)],
-            "stop": stop, "stop_kind": "БУ" if be_on else "SL", "tp_hits": t["tp_hits"],
+            "stop": stop, "stop_kind": "БУ" if be_on else "SL", "stop_held": held, "tp_hits": t["tp_hits"],
             "liq_price": t["entry"] * (1 - d * (1 / lev - mmr)) if lev else None,
             "to_stop_pct": (d * (price / stop - 1) * 100) if price else None,                 # запас до стопа, % от цены (+ — стоп ещё далеко)
             "to_next_tp_pct": (d * (nxt / price - 1) * 100) if (price and nxt) else None,
