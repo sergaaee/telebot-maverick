@@ -94,6 +94,22 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     value TEXT NOT NULL,
     PRIMARY KEY (user_id, key)
 );
+CREATE TABLE IF NOT EXISTS pending_entries (
+    config_id INTEGER PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    signal_ts INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    level REAL NOT NULL,
+    ref REAL NOT NULL,
+    notional REAL NOT NULL,
+    margin REAL NOT NULL,
+    leverage REAL NOT NULL,
+    order_id TEXT,
+    created REAL NOT NULL,
+    expires REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS auto_retry (
     config_id INTEGER PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
     signal_ts INTEGER NOT NULL,
@@ -336,6 +352,31 @@ class Database:
     def set_pref(self, user_id, key, value):
         with self.conn() as c:
             c.execute("INSERT INTO user_prefs(user_id, key, value) VALUES (?,?,?) ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (user_id, key, json.dumps(value, ensure_ascii=False)))
+
+    # ---------------- ожидающие входы: лимитный ордер на вход / ожидание цены для входа по ходу ----------------
+    def set_pending(self, config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, expires):
+        with self.conn() as c:
+            c.execute("INSERT INTO pending_entries(config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                      "ON CONFLICT(config_id) DO UPDATE SET user_id=excluded.user_id, signal_ts=excluded.signal_ts, symbol=excluded.symbol, side=excluded.side, mode=excluded.mode, level=excluded.level, "
+                      "ref=excluded.ref, notional=excluded.notional, margin=excluded.margin, leverage=excluded.leverage, order_id=excluded.order_id, created=excluded.created, expires=excluded.expires",
+                      (config_id, user_id, int(signal_ts), symbol, side, mode, level, ref, notional, margin, leverage, None if order_id is None else str(order_id), time.time(), expires))
+
+    def get_pending(self, config_id):
+        with self.conn() as c:
+            r = c.execute("SELECT * FROM pending_entries WHERE config_id=?", (config_id,)).fetchone()
+        return dict(r) if r else None
+
+    def list_pending(self):
+        with self.conn() as c:
+            return [dict(r) for r in c.execute("SELECT * FROM pending_entries ORDER BY created")]
+
+    def clear_pending(self, config_id):
+        with self.conn() as c:
+            c.execute("DELETE FROM pending_entries WHERE config_id=?", (config_id,))
+
+    def clear_pending_user(self, user_id):
+        with self.conn() as c:
+            return c.execute("DELETE FROM pending_entries WHERE user_id=?", (user_id,)).rowcount
 
     # ---------------- вход, который не удался: повторить при перезапуске бота ----------------
     def set_retry(self, config_id, signal_ts, side, pyramid=False, leg=None, reason=None):

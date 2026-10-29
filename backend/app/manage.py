@@ -215,6 +215,7 @@ def panic(db, adapter, uid):
     """Аварийная остановка: автомод выключается у всех конфигов пользователя (сначала — чтобы бот не открыл позицию заново), затем закрываются все позиции
     на бирже и снимаются все ордера. Ошибки не прерывают процесс: что не удалось — в errors."""
     off = db.disable_all_auto(uid)
+    db.clear_pending_user(uid)                              # ожидающие входы (лимитки и «вход по ходу») снимаются; сами ордера на бирже закрывает close_all
     trade_log("panic_start", "warn", user=uid, auto_off=off, exchange=adapter.name, real=adapter.real)
     errors, closed, cancelled = [], [], 0
     try:

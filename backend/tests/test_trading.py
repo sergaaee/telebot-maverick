@@ -202,3 +202,53 @@ def test_default_order_limit_is_5000_and_env_overrides(monkeypatch):
     assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 5000.0
     monkeypatch.setenv("TRADE_MAX_USD", "100")                                                   # старое значение из .env продолжает действовать — его нужно поменять там
     assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 100.0
+
+
+class LimitEx(FakeEx):
+    def __init__(self, order=None, **kw):
+        super().__init__(**kw)
+        self.order = order
+
+    def price_to_precision(self, sym, v):
+        return f"{v:.2f}"
+
+    def fetch_order(self, oid, sym=None):
+        self._rec("fetch_order", oid)
+        if self.order is None:
+            raise RuntimeError("fetch_order не поддерживается")
+        return self.order
+
+
+def test_limit_entry_places_only_the_entry_order_and_protect_adds_stop_and_takes_later():
+    fx = LimitEx(price=100.0)
+    a = HyperliquidAdapter(exchange=fx, max_usd=1000)
+    r = a.place_limit_entry("BTC/USDT:USDT", "long", 500.0, 99.5, 5.0)
+    assert r["status"] == "sent" and r["order_id"] == "o1" and abs(r["price"] - 99.5) < 1e-9 and abs(r["amount"] - 500 / 99.5) < 1e-3
+    o = orders(fx)
+    assert len(o) == 1 and o[0][2:4] == ("limit", "buy") and o[0][5] == 99.5 and ("leverage", 5, "BTC/USDC:USDC", {"marginMode": "isolated"}) in fx.calls            # стопа и тейков пока нет
+    p = a.protect("BTC/USDT:USDT", "long", 5.0, stop=98.0, takes=[(104.0, 50), (106.0, 50)])
+    assert [x["kind"] for x in p["orders"]] == ["stop", "take", "take"]
+    o = orders(fx)
+    assert o[1][2:4] == ("market", "sell") and o[1][6] == {"stopLossPrice": 98.0, "reduceOnly": True} and o[2][2:4] == ("limit", "sell") and o[2][4] == 2.5
+    with pytest.raises(ExchangeError, match="больше лимита"):
+        a.place_limit_entry("BTC/USDT:USDT", "long", 5000.0, 99.5, 5.0)
+    with pytest.raises(ExchangeError, match="меньше минимального"):
+        a.place_limit_entry("BTC/USDT:USDT", "short", 5.0, 100.5, 1.0)
+    s = a.place_limit_entry("BTC/USDT:USDT", "short", 500.0, 100.5, 2.0)
+    assert orders(fx)[-1][2:4] == ("limit", "sell") and s["side"] == "short"
+
+
+def test_protect_failure_closes_the_position_and_order_state_maps_statuses():
+    fx = LimitEx(price=100.0, position={"contracts": 5.0, "side": "long"}, fail_on="order")
+    a = HyperliquidAdapter(exchange=fx, max_usd=1000)
+    with pytest.raises(ExchangeError, match="закрыта|закрыть не удалось"):
+        a.protect("BTC/USDT:USDT", "long", 5.0, stop=98.0)
+    for raw, want in (("open", "open"), ("closed", "filled"), ("canceled", "canceled"), ("expired", "canceled"), ("weird", "unknown")):
+        st = HyperliquidAdapter(exchange=LimitEx(order={"status": raw, "filled": 2.0, "amount": 5.0, "average": 99.4})).order_state("o1", "BTC/USDT:USDT")
+        assert st["status"] == want and st["filled"] == 2.0 and st["avg"] == 99.4
+    fb = HyperliquidAdapter(exchange=LimitEx(order=None, open_orders=[{"id": "o1"}]))                                      # биржа не отдаёт ордер по id -> смотрим открытые
+    assert fb.order_state("o1", "BTC/USDT:USDT")["status"] == "open"
+    assert HyperliquidAdapter(exchange=LimitEx(order=None, open_orders=[])).order_state("o1", "BTC/USDT:USDT")["status"] == "unknown"
+    ex = LimitEx()
+    HyperliquidAdapter(exchange=ex).cancel_order_id("o9", "BTC/USDT:USDT")
+    assert ("cancel", "o9") in ex.calls

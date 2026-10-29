@@ -41,6 +41,10 @@ export interface Params {
   fee: number;
   slip: number;
   /** фандинг: годовые % (+ лонг платит, шорт получает), период списания в часах и режим (signed — по знаку, cost — платят обе стороны); 0 — не учитывать */
+  /** вход лимитным ордером на столько % движения цены от цены сигнала (0 — по рынку), сторона и срок жизни ордера, часов */
+  entry_limit_pct: number;
+  entry_limit_dir: 'pullback' | 'breakout';
+  entry_limit_ttl_h: number;
   funding_apr: number;
   funding_period_h: 1 | 2 | 4 | 8 | 12 | 24;
   funding_mode: 'signed' | 'cost';
@@ -149,6 +153,8 @@ export interface Fill {
 
 export interface Trade {
   n: number;
+  /** вход лимитным ордером: уровень, цена сигнала, сторона и сколько часов ждали исполнения */
+  limit?: { level: number; ref: number; dir: 'pullback' | 'breakout'; wait_h: number };
   /** фандинг сделки: % от объёма (+ расход) и в долларах */
   funding_pct?: number;
   funding_usd?: number;
@@ -534,6 +540,7 @@ export interface MonitorEntry {
   created?: number;
   auto: { open: boolean; manage: boolean; base?: 'config' | 'account' } | null;
   catchup?: { on: boolean; age_min: number; move_pct: number; armed: boolean };
+  pending_entry?: { side: 'long' | 'short'; mode: 'pullback' | 'breakout'; level: number; ref: number; order_id: string | null; expires: number } | null;
   paused: boolean;
   error?: string | null;
   price?: number | null;

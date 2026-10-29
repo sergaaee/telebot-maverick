@@ -33,7 +33,7 @@ export default function TradesTable({ trades, selected, onSelect, top = false, o
               <td>{t.n}</td>
               <td className={t.side === 'long' ? 'pos' : 'neg'}>{t.side === 'long' ? 'лонг' : 'шорт'}</td>
               <td>{fmtTs(t.entry_ts)}</td>
-              <td>{fmtPrice(t.entry)}</td>
+              <td title={t.limit ? `${t.limit.dir === 'breakout' ? 'вход по ходу' : 'лимитка на откат'}: сигнал ${fmtPrice(t.limit.ref)} → ${fmtPrice(t.limit.level)}, исполнена через ${fmtHold(t.limit.wait_h)}` : undefined}>{fmtPrice(t.entry)}{t.limit ? ' ⏱' : ''}</td>
               <td>{fmtTs(t.exit_ts)}</td>
               <td>{fmtPrice(t.exit)}</td>
               <td><span className={`tag tag-${t.reason}`}>{t.reason}</span>{t.pyramid && <span className="tag tag-add" title="Добор в открытую позицию"> +{(t.leg ?? 2) - 1}</span>}{!!t.adds_n && <span className="tag tag-add" title={`Усреднение: доборов ${t.adds_n}, средняя цена входа ${fmtPrice(t.entry)} (первый вход ${fmtPrice(t.entry_first ?? t.entry)})`}> ×{t.adds_n + 1}</span>}</td>

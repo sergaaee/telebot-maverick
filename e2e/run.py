@@ -622,6 +622,20 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
     check("ставка 0: фандинг не учитывается, итог вернулся к прежнему", pg.locator(".card", has_text="Фандинг").count() == 0 and pg.locator(".card", has_text="Итого").first.inner_text() == tot_before)
 
+    # --- вход лимиткой
+    check("вход лимиткой по умолчанию выключен: направление и срок скрыты, у поля есть «?»", pg.get_by_test_id("limit-dir").count() == 0 and field(pg, "Вход лимиткой").locator(".help").count() == 1)
+    num(pg, "Вход лимиткой").fill("0.3")
+    check("при ненулевом проценте появляются «куда ставить» и срок жизни ордера (с «?»)", pg.get_by_test_id("limit-dir").is_visible() and field(pg, "Ордер живёт").locator(".help").count() == 1 and field(pg, "Куда ставить").locator(".help").count() == 1)
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    limit_marks = pg.locator("table.trades td", has_text="⏱").count()
+    check("с лимиткой: у части сделок цена входа помечена ⏱ (лимитка исполнена позже сигнала), итог изменился", limit_marks >= 1 and pg.locator(".card", has_text="Итого").first.inner_text() != tot_before, f"помеченных входов: {limit_marks}")
+    pg.get_by_test_id("limit-dir").select_option("breakout")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("режим «по ходу» тоже считается (сделки на месте)", pg.locator("table.trades tbody tr").count() >= 1)
+    num(pg, "Вход лимиткой").fill("0")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("процент 0: вход по рынку, итог вернулся к прежнему", pg.locator("table.trades td", has_text="⏱").count() == 0 and pg.locator(".card", has_text="Итого").first.inner_text() == tot_before)
+
     # --- Монте-Карло
     while pg.locator(".toast-close").count():           # уведомления перекрывают правую колонку — закрываем, как это сделал бы пользователь
         pg.locator(".toast-close").first.click(); pg.wait_for_timeout(150)

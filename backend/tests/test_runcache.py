@@ -59,6 +59,8 @@ CASES = [
     {"side": "both", "pyramid_enabled": True, "pyramid_max": 3, "pyramid_pct": 10, "trade_pct": 20, "pyramid_gap_h": 1},
     {"side": "both", "pyramid_enabled": True, "pyramid_max": 3, "pyramid_pct": 10, "trade_pct": 20, "pyramid_avg": True},
     {"side": "both", "sl_hold_strong": True, "cooldown_h": 2, "signal_gap_h": 1},
+    {"side": "both", "entry_limit_pct": 0.15, "entry_limit_dir": "pullback", "entry_limit_ttl_h": 2},
+    {"side": "both", "entry_limit_pct": 0.1, "entry_limit_dir": "breakout", "entry_limit_ttl_h": 1.5, "pyramid_enabled": True, "pyramid_max": 2, "pyramid_pct": 10, "trade_pct": 20},
     {"side": "both", "weekdays_only": True, "liquidation_sim": True, "leverage": 10, "tps": [{"pct": 1, "share": 50}, {"pct": 2, "share": 50}], "be_after_tp1": True},
 ]
 

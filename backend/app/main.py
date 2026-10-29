@@ -344,7 +344,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         Это расчёт стратегии по свечам, а не позиции на бирже."""
         uid = request.state.user["id"]
         entries = [{**evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn),
-                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "catchup": c["catchup"]} for c in db.list_configs(uid)]
+                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "catchup": c["catchup"], "pending_entry": db.get_pending(c["id"])} for c in db.list_configs(uid)]
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
         return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(), "bot": watchdog.bot_status(db),
