@@ -1,8 +1,9 @@
 """Интерфейс бота в Telegram: повторяет страницу мониторинга сайта — список всех стратегий, карточка стратегии с позицией и уровнями, автомод, пауза, статистика / история / параметры / журнал,
 биржа, тестовая позиция. Экраны — одно сообщение с инлайн-кнопками, которое правится на месте; «live» перерисовывает экран каждые ~20 с, пока он подписан.
 
-Экран описывается строкой (она же callback_data кнопки): «m» список, «c:ID» карточка, «v:ID:stats|hist|params|log» вкладки, «x» биржа, «t» тестовая позиция;
-подтверждения: «ca:ID:o|m» (включить автомод), «cd:ID» (удалить), «cty:long|short», «ctc», «coff». Действия: «a:ID:o|m», «ay:…», «p:ID», «dy:ID», «e:ID», «tgo:…», «tcgo», «offy», «lv:ЭКРАН»."""
+Экран описывается строкой (она же callback_data кнопки): «m» список, «c:ID» карточка, «v:ID:stats|hist|params|log» вкладки, «x» биржа Hyperliquid, «xb» биржа Bybit, «t» тестовая позиция,
+«cx:ID» настройки конфига по биржам, «sz:ID[:h|b]» размер входа (конфига или своя для биржи); подтверждения: «ca:ID:o|m[:b]» (включить автомод), «cd:ID» (удалить), «cty:long|short[:b]», «ctc[:b]», «coff».
+Действия: «a:ID:o|m[:b]», «ay:…», «p:ID», «dy:ID», «e:ID», «tgo:…», «tcgo[:b]», «offy», «lv:ЭКРАН». Необязательный последний элемент «h»/«b» — биржа (по умолчанию Hyperliquid)."""
 import hashlib
 import logging
 import time
@@ -17,7 +18,7 @@ from .transport import TelegramError
 log = logging.getLogger("signalbot")
 LIVE_TTL = 30 * 60
 HIST_N = 10
-LIVE_SCREENS = ("m", "c", "v", "x")                      # подтверждения и тестовая позиция не перерисовываются сами
+LIVE_SCREENS = ("m", "c", "v", "x", "xb", "cx")                      # подтверждения и тестовая позиция не перерисовываются сами
 MAX_BUTTONS = 24
 
 
@@ -50,9 +51,41 @@ def _state(e):
     return "позиции нет"
 
 
-def _auto(e):
-    a = e.get("auto") or {}
+EXC = {"h": "hyperliquid", "b": "bybit"}
+EXC_CODE = {v: k for k, v in EXC.items()}
+EXC_LABEL = {"hyperliquid": "Hyperliquid", "bybit": "Bybit"}
+
+
+def _exn(code):
+    return EXC.get(code or "h", "hyperliquid")
+
+
+def _onoff(a):
     return f"открывать {'✅' if a.get('open') else '⬜'} · управлять {'✅' if a.get('manage') else '⬜'}"
+
+
+def _auto(e):
+    ex = e.get("ex")
+    if not ex:
+        return _onoff(e.get("auto") or {})
+    by = ex.get("bybit") or {}
+    if not (by.get("open") or by.get("manage")):
+        return _onoff(ex["hyperliquid"])                    # автомод только на Hyperliquid — как раньше
+    return " │ ".join(f"{EXC_LABEL[n]}: {_onoff(ex[n])}" for n in ("hyperliquid", "bybit") if ex[n]["open"] or ex[n]["manage"] or n == "hyperliquid")
+
+
+def _any_auto(e):
+    ex = e.get("ex")
+    if ex:
+        return any(a["open"] or a["manage"] for a in ex.values())
+    a = e.get("auto") or {}
+    return bool(a.get("open") or a.get("manage"))
+
+
+def _net_text(d):
+    if d.get("net") == "demo":
+        return "демо-торговля"
+    return "тестовая сеть" if d["testnet"] else "<b>БОЕВАЯ сеть</b>"
 
 
 class MonitorUI:
@@ -68,7 +101,7 @@ class MonitorUI:
     def _entry(self, cfg, detail=False):
         e = evaluate_entry(self.svc.engine.store, self.svc.s.defaults, f"#{cfg['id']} {cfg['name']}", cfg["id"], cfg["params"], cfg["auto"], cfg["paused"],
                            self.svc.engine.available, detail=detail)
-        return {**e, "title": cfg["name"], "baseline": cfg["baseline"], "tf": cfg["tf"], "alerts": cfg["alerts"], "created": cfg["created"]}
+        return {**e, "title": cfg["name"], "baseline": cfg["baseline"], "tf": cfg["tf"], "alerts": cfg["alerts"], "created": cfg["created"], "ex": cfg["ex"]}
 
     def _cfg(self, user, cid):
         c = self.db.find_config(user["id"], str(cid))
@@ -76,21 +109,31 @@ class MonitorUI:
             raise manage.ManageError("Конфиг не найден (удалён?)", 404)
         return c
 
-    def _ad(self, user):
-        return self.svc.adapter_for(user["id"])
+    def _ad(self, user, ex="hyperliquid"):
+        return self.svc.adapter_for(user["id"], ex)
+
+    def _ads(self, user):
+        return self.svc.adapters_for(user["id"])
 
     def _exchange_line(self, user):
-        d = self._ad(user).describe()
-        if not d["real"]:
+        real = [a.describe() for a in self._ads(user).values() if a.real]
+        if not real:
             return "Биржа: не подключена — автомод в <b>симуляции</b> (ордера не отправляются)"
-        return f"Биржа: <b>{esc(d['name'].capitalize())}</b> ({'тестовая сеть' if d['testnet'] else '<b>БОЕВАЯ сеть</b>'})"
+        return "Биржи: " + " · ".join(f"<b>{esc(EXC_LABEL.get(d['name'], d['name']))}</b> ({_net_text(d)})" for d in real)
+
+    @staticmethod
+    def _shown(c, name, real):
+        """Показывать ли биржу в карточке конфига: Hyperliquid всегда, остальные — если счёт подключён или у конфига для неё что-то включено / настроено."""
+        a = c["ex"][name]
+        return name == "hyperliquid" or real or a["open"] or a["manage"] or bool(a["over"])
 
     # ------------------------------------------------------------------ экраны
     def render(self, user, screen, live=False):
         """-> (тело, клавиатура). Тело без строки времени: по нему решаем, менять ли сообщение."""
         kind, *a = screen.split(":")
-        fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
-              "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "sz": self._s_sizing, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect}.get(kind)
+        fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange, "xb": self._s_exchange_bybit, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
+              "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "sz": self._s_sizing, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect,
+              "cx": self._s_exsettings, "cby": self._s_confirm_bybit_live, "cdb": self._s_confirm_disconnect_bybit}.get(kind)
         if fn is None:
             return self._s_list(user, live)
         return fn(user, *a, live=live)
@@ -117,7 +160,7 @@ class MonitorUI:
                 if not e.get("paused"):
                     total += pos["pnl_usd"]
                     opened += 1
-            if (e.get("auto") or {}).get("open") or (e.get("auto") or {}).get("manage"):
+            if _any_auto(e):
                 line += f"\n    🤖 {_auto(e)}"
             if e.get("error"):
                 line += f"\n    ⚠️ {esc(str(e['error'])[:120])}"
@@ -135,7 +178,8 @@ class MonitorUI:
         if pair:
             kb.append(pair)
         kb.append([("🔄 Обновить", "m"), self._live_btn("m", live)])
-        kb.append([("🏦 Биржа", "x"), ("🧪 Тест $1", "t")])
+        kb.append([("🏦 Hyperliquid", "x"), ("🏦 Bybit", "xb")])
+        kb.append([("🧪 Тест $1", "t")])
         kb.append([("⛔ Автомод выкл. везде", "coff"), ("🚨 СТОП ВСЁ", "cpn")])
         return body, kb
 
@@ -181,30 +225,44 @@ class MonitorUI:
         if st:
             lines.append(f"План: SL {st['sl_pct']:g}% · TP " + " / ".join(f"{t['pct']:g}%×{t['share']:g}" for t in st["tps"]) + (" · БУ после TP1" if st["be_after_tp1"] else "")
                          + f" · плечо {st['leverage']:g}× · {st['trade_pct']:g}% депозита")
-        lines.append(f"🤖 Автомод: {_auto(e)}" + ("" if self._ad(user).real else " (симуляция)"))
-        a = e.get("auto") or {}
-        pe = self.db.get_pending(c["id"])
-        if pe:
-            lines.append(f"⏳ Ждёт вход: {'лонг' if pe['side'] == 'long' else 'шорт'} по <b>{fm.price(pe['level'])}</b> ({'лимитка на бирже' if pe['order_id'] else 'вход по рынку при касании цены'}), до {fm.ts_str(int(pe['expires'] * 1000))[5:]}")
+        ads = self._ads(user)
+        shown = [n for n in ("hyperliquid", "bybit") if self._shown(c, n, ads[n].real)]
+        multi = len(shown) > 1
+        for n in shown:
+            a, ad = c["ex"][n], ads[n]
+            lines.append(f"🤖 Автомод{f' · {EXC_LABEL[n]}' if multi else ''}: {_onoff(a)}" + ("" if ad.real else " (симуляция)"))
+            if a["over"]:
+                lines.append(f"⚙️ Свои настройки{f' ({EXC_LABEL[n]})' if multi else ''}: {fm.over_line(a['over'])}")
+        for pe in self.db.pending_of(c["id"]):
+            lines.append(f"⏳ Ждёт вход{f' ({EXC_LABEL[pe["exchange"]]})' if multi else ''}: {'лонг' if pe['side'] == 'long' else 'шорт'} по <b>{fm.price(pe['level'])}</b> "
+                         f"({'лимитка на бирже' if pe['order_id'] else 'вход по рынку при касании цены'}), до {fm.ts_str(int(pe['expires'] * 1000))[5:]}")
         cu = c["catchup"]
         lines.append(f"⏩ Догнать свежий сигнал при включении: <b>{'вкл' if cu['on'] else 'выкл'}</b>" + (f" (не старше {cu['age_min']:g} мин, цена не дальше {cu['move_pct']:g}% в прибыль)" if cu["on"] else ""))
-        ad = self._ad(user)
-        if ad.real:
-            acc = manage.account_quick(ad, user["id"])
-            lines.append(f"💰 База размера входа: <b>{'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}</b>"
-                         + (f" (капитал на бирже {acc['equity']:,.2f} $)".replace(",", " ") if acc and acc.get("equity") is not None else ""))
-            warn = manage.sizing_warning(a, (e.get("settings") or {}).get("deposit"), acc)
-            if warn:
-                lines.append(f"⚠️ {esc(warn)}")
+        for n in shown:
+            a, ad = c["ex"][n], ads[n]
+            if ad.real:
+                acc = manage.account_quick(ad, user["id"])
+                lines.append(f"💰 База размера входа{f' ({EXC_LABEL[n]})' if multi else ''}: <b>{'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}</b>"
+                             + (f" (капитал на бирже {acc['equity']:,.2f} $)".replace(",", " ") if acc and acc.get("equity") is not None else ""))
+                warn = manage.sizing_warning(a, (e.get("settings") or {}).get("deposit"), acc)
+                if warn:
+                    lines.append(f"⚠️ {esc(warn)}")
         if e.get("paused"):
             lines.append("⏸ Конфиг на паузе: бот его не считает, автомод выключен.")
-        kb = [[(f"{'✅' if a.get('open') else '⬜'} Открывать", f"a:{c['id']}:o"), (f"{'✅' if a.get('manage') else '⬜'} Управлять", f"a:{c['id']}:m")],
-              [(f"💰 База: {'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}", f"ab:{c['id']}"), (f"📐 {st['trade_pct']:g}% × {st['leverage']:g}×" if st else "📐 Размер", f"sz:{c['id']}")],
-              [(f"{'✅' if c['catchup']['on'] else '⬜'} ⏩ Догнать сигнал", f"cu:{c['id']}"), ("▶ Возобновить" if c["paused"] else "⏸ Пауза", f"p:{c['id']}")],
-              [("📊 Статистика", f"v:{c['id']}:stats"), ("📜 История", f"v:{c['id']}:hist")],
-              [("⚙️ Параметры", f"v:{c['id']}:params"), ("📋 Журнал", f"v:{c['id']}:log")],
-              [("🔄", f"c:{c['id']}"), self._live_btn(f"c:{c['id']}", live), ("⬇ Конфиг", f"e:{c['id']}"), ("🗑", f"cd:{c['id']}")],
-              [("← К списку", "m")]]
+        kb = []
+        for n in shown:
+            a, k = c["ex"][n], EXC_CODE[n]
+            sfx = "" if k == "h" else f":{k}"
+            tag = f" {EXC_LABEL[n][:5]}" if multi else ""
+            kb.append([(f"{'✅' if a['open'] else '⬜'} Открывать{tag}", f"a:{c['id']}:o{sfx}"), (f"{'✅' if a['manage'] else '⬜'} Управлять{tag}", f"a:{c['id']}:m{sfx}")])
+            kb.append([(f"💰 База{tag}: {'баланс счёта' if a.get('base') == 'account' else 'депозит конфига'}", f"ab:{c['id']}{sfx or ''}"),
+                       (f"📐 Размер{tag}" if n != "hyperliquid" or multi else (f"📐 {st['trade_pct']:g}% × {st['leverage']:g}×" if st else "📐 Размер"), f"sz:{c['id']}{':h' if n == 'hyperliquid' and multi else sfx}")])
+        kb += [[(f"{'✅' if c['catchup']['on'] else '⬜'} ⏩ Догнать сигнал", f"cu:{c['id']}"), ("▶ Возобновить" if c["paused"] else "⏸ Пауза", f"p:{c['id']}")],
+               [("🏦 Настройки по биржам", f"cx:{c['id']}"), (f"📐 Конфиг {st['trade_pct']:g}%×{st['leverage']:g}×" if st else "📐 Конфиг", f"sz:{c['id']}")],
+               [("📊 Статистика", f"v:{c['id']}:stats"), ("📜 История", f"v:{c['id']}:hist")],
+               [("⚙️ Параметры", f"v:{c['id']}:params"), ("📋 Журнал", f"v:{c['id']}:log")],
+               [("🔄", f"c:{c['id']}"), self._live_btn(f"c:{c['id']}", live), ("⬇ Конфиг", f"e:{c['id']}"), ("🗑", f"cd:{c['id']}")],
+               [("← К списку", "m")]]
         return "\n".join(lines), kb
 
     def _s_tab(self, user, cid, tab, live=False):
@@ -252,17 +310,29 @@ class MonitorUI:
                                                        for x in log_) or "пока пусто")
         return body, [[("← Карточка", f"c:{c['id']}"), ("🔄", f"v:{c['id']}:{tab}"), self._live_btn(f"v:{c['id']}:{tab}", live)]]
 
-    def _s_exchange(self, user, live=False):
-        ad = self._ad(user)
-        info = manage.account_info(self.db, ad, user["id"])
+    def _s_exchange(self, user, live=False, exn="hyperliquid"):
+        ad = self._ad(user, exn)
+        info = manage.account_info(self.db, ad, user["id"], exn)
         d = info["exchange"]
+        label = EXC_LABEL[exn]
+        if exn == "bybit":
+            home, other, other_label = "xb", "x", "Hyperliquid"
+        else:
+            home, other, other_label = "x", "xb", "Bybit"
         if not info["connected"]:
-            body = ("🏦 <b>Биржа</b>\nСчёт Hyperliquid не подключён — автомод работает как симуляция (ордера не отправляются).\n"
-                    "Подключение: адрес кошелька и ключ <b>API-кошелька</b> (не основного!) вы присылаете сюда в чат; бот проверит их, сохранит зашифрованными и сразу удалит ваши сообщения.")
-            kb = [[("🔌 Подключить · тестовая сеть", "hl:t")], [("🔌 Подключить · БОЕВАЯ сеть", "chl")], [("← К списку", "m")]]
+            if exn == "bybit":
+                body = ("🏦 <b>Bybit</b> (только USDT-фьючерсы)\nСчёт Bybit не подключён — автомод на Bybit работает как симуляция (ордера не отправляются).\n"
+                        "Подключение: <b>API-ключ и секрет</b> без права вывода средств вы присылаете сюда в чат; бот проверит права ключа, сохранит секрет зашифрованным и сразу удалит ваши сообщения.\n"
+                        "<i>Тестовая сеть и демо-торговля — для проверки без реальных денег; сначала прогоните бота там.</i>")
+                kb = [[("🔌 Тестовая сеть", "by:t"), ("🔌 Демо-торговля", "by:d")], [("🔌 БОЕВАЯ сеть", "cby")], [(f"🏦 {other_label}", other), ("← К списку", "m")]]
+            else:
+                body = ("🏦 <b>Hyperliquid</b>\nСчёт Hyperliquid не подключён — автомод работает как симуляция (ордера не отправляются).\n"
+                        "Подключение: адрес кошелька и ключ <b>API-кошелька</b> (не основного!) вы присылаете сюда в чат; бот проверит их, сохранит зашифрованными и сразу удалит ваши сообщения.")
+                kb = [[("🔌 Подключить · тестовая сеть", "hl:t")], [("🔌 Подключить · БОЕВАЯ сеть", "chl")], [(f"🏦 {other_label}", other), ("← К списку", "m")]]
             return body, kb
-        net = "тестовая сеть" if d["testnet"] else "<b>БОЕВАЯ сеть</b>"
-        lines = [f"🏦 <b>Hyperliquid</b> ({net})", f"Кошелёк <code>{info['wallet']}</code> · API-кошелёк <code>{info['agent'] or '–'}</code>"]
+        net = _net_text(d)
+        who = f"API-ключ <code>{info['wallet']}</code>" if exn == "bybit" else f"Кошелёк <code>{info['wallet']}</code> · API-кошелёк <code>{info['agent'] or '–'}</code>"
+        lines = [f"🏦 <b>{label}</b> ({net})" + (" · USDT-фьючерсы" if exn == "bybit" else ""), who]
         acc = info["account"]
         if info["error"]:
             lines.append(f"⚠️ {esc(str(info['error']))}")
@@ -276,64 +346,112 @@ class MonitorUI:
                 lines.append(f"Открытых ордеров: {len(info['orders'])}")
             for f in info["fills"][:5]:
                 lines.append(f"• {fm.ts_str(int(f['ts']))[5:] if f.get('ts') else ''} {f['side']} {f['amount']:g} @ {fm.price(f['price'])}" + (f" · PnL {f['pnl']}" if f.get("pnl") not in (None, "", "0.0", "0") else ""))
-        return "\n".join(lines), [[("🔄", "x"), self._live_btn("x", live)], [("🔌 Отключить", "cdx")], [("← К списку", "m")]]
+        return "\n".join(lines), [[("🔄", home), self._live_btn(home, live)], [("🔌 Отключить", "cdx" if exn == "hyperliquid" else "cdb"), ("🧪 Тест", "t" if exn == "hyperliquid" else "t:b")], [(f"🏦 {other_label}", other), ("← К списку", "m")]]
 
-    def _s_test(self, user, live=False):
-        d = self._ad(user).describe()
-        body = ("🧪 <b>Тестовая позиция по BTC</b>\nМаржа 1 $" + (f" × {int(-(-(d['min_notional'] * 1.1) // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
-                + ".\n" + ("Это <b>реальный</b> ордер на " + esc(d["name"]) + (" (тестовая сеть)" if d["testnet"] else " (БОЕВАЯ сеть)") + "." if d["real"] else "Биржа не подключена — будет симуляция (запись в журнал).")
+    def _s_exchange_bybit(self, user, live=False):
+        return self._s_exchange(user, live, "bybit")
+
+    def _s_exsettings(self, user, cid, live=False):
+        """Настройки конфига по биржам: автомод, база размера и собственные размер / лимитный вход каждой биржи (поверх параметров конфига)."""
+        c = self._cfg(user, cid)
+        p = c["params"]
+        ads = self._ads(user)
+        lines = [f"🏦 <b>#{c['id']} {esc(c['name'])}</b> · настройки по биржам",
+                 f"Конфиг: {p['trade_pct']:g}% × {p['leverage']:g}×" + (f" · добор {p.get('pyramid_pct') or 0:g}% × {(p.get('pyramid_leverage') or p['leverage']):g}×" if p.get("pyramid_enabled") else "")
+                 + (f" · вход лимиткой {p['entry_limit_pct']:g}% ({'по ходу' if p.get('entry_limit_dir') == 'breakout' else 'на откат'}, {p.get('entry_limit_ttl_h') or 4:g} ч)" if p.get("entry_limit_pct") else " · вход по рынку"), ""]
+        kb = []
+        for n in ("hyperliquid", "bybit"):
+            a, ad, k = c["ex"][n], ads[n], EXC_CODE[n]
+            lines.append(f"<b>{EXC_LABEL[n]}</b> ({'счёт подключён' if ad.real else 'не подключён — симуляция'}): {_onoff(a)}")
+            lines.append(f"   размер: {fm.over_line(a['over'])}" if a["over"] else "   размер и вход — как в конфиге")
+            kb.append([(f"📐 Размер · {EXC_LABEL[n]}", f"sz:{c['id']}:{k}"), (f"{'✅' if a['open'] else '⬜'} Открывать", f"a:{c['id']}:o:{k}"), (f"{'✅' if a['manage'] else '⬜'} Управлять", f"a:{c['id']}:m:{k}")])
+        lines += ["", "<i>Сигналы и правила выхода (стоп, тейки, БУ) общие — из конфига. Лимитный вход и остальное для биржи: /ex " + f"{c['id']} hl|bybit ключ=значение.</i>"]
+        kb.append([("← Карточка", f"c:{c['id']}"), ("🔄", f"cx:{c['id']}")])
+        return "\n".join(lines), kb
+
+    def _s_test(self, user, code="h", live=False):
+        exn = _exn(code)
+        d = self._ad(user, exn).describe()
+        suffix = "" if exn == "hyperliquid" else ":b"
+        body = (f"🧪 <b>Тестовая позиция по BTC · {EXC_LABEL[exn]}</b>\nМаржа 1 $" + (f" × {int(-(-(d['min_notional'] * 1.1) // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
+                + ".\n" + ("Это <b>реальный</b> ордер на " + esc(EXC_LABEL[exn]) + f" ({_net_text(d).replace('<b>', '').replace('</b>', '')})." if d["real"] else "Биржа не подключена — будет симуляция (запись в журнал).")
                 + "\nПозиция без стопа и тейков; закрывается кнопкой ниже.")
-        return body, [[("🧪 Лонг", "cty:long"), ("🧪 Шорт", "cty:short")], [("❌ Закрыть тестовую", "ctc")], [("← К списку", "m")]]
+        return body, [[("🧪 Лонг", f"cty:long{suffix}"), ("🧪 Шорт", f"cty:short{suffix}")], [("❌ Закрыть тестовую", f"ctc{suffix}")], [("← К списку", "m")]]
 
     def _confirm(self, text, yes, back):
         return text, [[("✅ Да", yes), ("Отмена", back)]]
 
-    def _s_confirm_auto(self, user, cid, which, live=False):
+    def _s_confirm_auto(self, user, cid, which, code="h", live=False):
         c = self._cfg(user, cid)
+        exn = _exn(code)
         what = "открывать позиции по сигналу" if which == "o" else "управлять позицией (стоп в БУ, закрытия)"
-        where = f"на {self._ad(user).describe()['name']}" if self._ad(user).real else "(симуляция — только запись в журнал)"
-        return self._confirm(f"🤖 Включить автомод «{what}» для <b>#{c['id']} {esc(c['name'])}</b>?\nБот будет делать это сам {where}.", f"ay:{c['id']}:{which}", f"c:{c['id']}")
+        ad = self._ad(user, exn)
+        where = f"на {EXC_LABEL[exn]}" if ad.real else "(симуляция — только запись в журнал)"
+        sfx = "" if exn == "hyperliquid" else f":{code}"
+        return self._confirm(f"🤖 Включить автомод «{what}» для <b>#{c['id']} {esc(c['name'])}</b> на {EXC_LABEL[exn]}?\nБот будет делать это сам {where}.", f"ay:{c['id']}:{which}{sfx}", f"c:{c['id']}")
 
     def _s_confirm_del(self, user, cid, live=False):
         c = self._cfg(user, cid)
         return self._confirm(f"🗑 Удалить конфиг <b>#{c['id']} {esc(c['name'])}</b>? Бот перестанет по нему считать и присылать сигналы. Открытая на бирже позиция останется со своими стопом и тейками, но бот её больше не ведёт (БУ, закрытие по развороту, уведомления); стоящая лимитка на вход будет снята.", f"dy:{c['id']}", f"c:{c['id']}")
 
-    def _s_confirm_test(self, user, side, live=False):
-        d = self._ad(user).describe()
-        return self._confirm(f"🧪 Открыть тестовую позицию по BTC ({'лонг' if side == 'long' else 'шорт'}), маржа 1 $?" + (f" Это <b>реальный</b> ордер на {esc(d['name'])}." if d["real"] else " Биржа не подключена — симуляция."), f"tgo:{side}", "t")
+    def _s_confirm_test(self, user, side, code="h", live=False):
+        exn = _exn(code)
+        d = self._ad(user, exn).describe()
+        sfx = "" if exn == "hyperliquid" else f":{code}"
+        return self._confirm(f"🧪 Открыть тестовую позицию по BTC ({'лонг' if side == 'long' else 'шорт'}), маржа 1 $?" + (f" Это <b>реальный</b> ордер на {EXC_LABEL[exn]}." if d["real"] else " Биржа не подключена — симуляция."), f"tgo:{side}{sfx}", f"t{sfx}")
 
-    def _s_confirm_close(self, user, live=False):
-        return self._confirm("❌ Закрыть позицию по BTC на бирже целиком (рыночным ордером) и снять висящие ордера?", "tcgo", "t")
+    def _s_confirm_close(self, user, code="h", live=False):
+        exn = _exn(code)
+        sfx = "" if exn == "hyperliquid" else f":{code}"
+        return self._confirm(f"❌ Закрыть позицию по BTC на {EXC_LABEL[exn]} целиком (рыночным ордером) и снять висящие ордера?", f"tcgo{sfx}", f"t{sfx}")
 
     def _s_confirm_hl(self, user, live=False):
         return self._confirm("🔌 Подключить <b>БОЕВУЮ</b> сеть Hyperliquid? Автомод сможет торговать реальными деньгами. Присылайте ключ только API-кошелька с ограниченным сроком действия.", "hl:m", "x")
 
+    def _s_confirm_bybit_live(self, user, live=False):
+        return self._confirm("🔌 Подключить <b>БОЕВОЙ</b> счёт Bybit? Автомод сможет торговать USDT-фьючерсами на реальные деньги. Ключ — только с правом торговли контрактами, без права вывода.", "by:m", "xb")
+
     def _s_confirm_disconnect(self, user, live=False):
-        return self._confirm("🔌 Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxy", "x")
+        return self._confirm("🔌 Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод на Hyperliquid выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxy", "x")
+
+    def _s_confirm_disconnect_bybit(self, user, live=False):
+        return self._confirm("🔌 Отключить счёт Bybit? Сохранённый секрет будет удалён, автомод на Bybit выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxb", "xb")
 
     PCTS = (5, 10, 15, 20, 25, 30, 50, 100)
     LEVS = (1, 2, 3, 5, 10, 15, 20, 25)
 
-    def _s_sizing(self, user, cid, live=False):
+    def _s_sizing(self, user, cid, code="c", live=False):
+        """Размер входа: «c» (по умолчанию) — параметры самого конфига (влияют на расчёт и на все биржи без своих настроек); «h» / «b» — свои настройки для Hyperliquid / Bybit."""
         c = self._cfg(user, cid)
         p = c["params"]
+        exn = EXC.get(code)
+        over = c["ex"][exn]["over"] if exn else {}
+        eff = manage.effective_params(p, over)
         pyr = p.get("pyramid_enabled")
-        d = self._ad(user).describe()
-        body = [f"📐 <b>#{c['id']} {esc(c['name'])}</b> · размер входа",
-                f"Доля депозита на вход: <b>{p['trade_pct']:g}%</b> · плечо: <b>{p['leverage']:g}×</b> → объём {p['trade_pct'] * p['leverage']:g}% депозита"
-                + (f"\nДобор: <b>{p.get('pyramid_pct') or 0:g}%</b> · плечо добора <b>{(p.get('pyramid_leverage') or p['leverage']):g}×</b>" if pyr else ""),
-                "База: " + ("<b>баланс счёта</b> на бирже" if c["auto"].get("base") == "account" else "<b>депозит из конфига</b> " + f"({p['deposit']:g} $)"),
-                "<i>Меняет размер НОВЫХ входов и расчёты по истории; позиции, уже открытые на бирже, не меняются.</i>"
-                + ("" if not d["real"] else "\n<i>Любое другое значение: /size " + f"{c['id']} ПРОЦЕНТ ПЛЕЧО</i>")]
-        kb = [[(f"{'✅' if abs(p['trade_pct'] - v) < 1e-9 else ''}{v}%", f"szp:{c['id']}:{v}") for v in self.PCTS[:4]], [(f"{'✅' if abs(p['trade_pct'] - v) < 1e-9 else ''}{v}%", f"szp:{c['id']}:{v}") for v in self.PCTS[4:]],
-              [(f"{'✅' if abs(p['leverage'] - v) < 1e-9 else ''}{v}×", f"szl:{c['id']}:{v}") for v in self.LEVS[:4]], [(f"{'✅' if abs(p['leverage'] - v) < 1e-9 else ''}{v}×", f"szl:{c['id']}:{v}") for v in self.LEVS[4:]],
-              [("← Карточка", f"c:{c['id']}")]]
-        body.insert(1, "Доля (ряды 1–2) и плечо (ряды 3–4):")
+        suffix = f":{code}" if exn else ""
+        own = lambda k: " (своя)" if k in over else ""
+        title = f"📐 <b>#{c['id']} {esc(c['name'])}</b> · размер входа" + (f" · <b>{EXC_LABEL[exn]}</b>" if exn else " · конфиг")
+        body = [title, "Доля (ряды 1–2) и плечо (ряды 3–4):",
+                f"Доля депозита на вход: <b>{eff['trade_pct']:g}%</b>{own('trade_pct')} · плечо: <b>{eff['leverage']:g}×</b>{own('leverage')} → объём {eff['trade_pct'] * eff['leverage']:g}% депозита"
+                + (f"\nДобор: <b>{eff.get('pyramid_pct') or 0:g}%</b> · плечо добора <b>{(eff.get('pyramid_leverage') or eff['leverage']):g}×</b>" if pyr else "")]
+        if exn:
+            ecfg = c["ex"][exn]
+            body.append("База: " + ("<b>баланс счёта</b> на бирже" if ecfg.get("base") == "account" else "<b>депозит из конфига</b> " + f"({p['deposit']:g} $)"))
+            body.append(f"<i>Только для {EXC_LABEL[exn]}: остальные биржи и расчёт (бэктест) берут размер из конфига ({p['trade_pct']:g}% × {p['leverage']:g}×). Действует на новые входы.</i>")
+        else:
+            body.append("<i>Меняет размер НОВЫХ входов на биржах без своих настроек и расчёты по истории; позиции, уже открытые на бирже, не меняются. Своё значение для биржи: кнопка «Настройки по биржам».</i>")
+        body.append("<i>Любое другое значение: /" + (f"ex {c['id']} {'hl' if exn == 'hyperliquid' else 'bybit'} trade_pct=ПРОЦЕНТ leverage=ПЛЕЧО" if exn else f"size {c['id']} ПРОЦЕНТ ПЛЕЧО") + "</i>")
+        cur_p, cur_l = eff["trade_pct"], eff["leverage"]
+        kb = [[(f"{'✅' if abs(cur_p - v) < 1e-9 else ''}{v}%", f"szp:{c['id']}:{v}{suffix}") for v in self.PCTS[:4]], [(f"{'✅' if abs(cur_p - v) < 1e-9 else ''}{v}%", f"szp:{c['id']}:{v}{suffix}") for v in self.PCTS[4:]],
+              [(f"{'✅' if abs(cur_l - v) < 1e-9 else ''}{v}×", f"szl:{c['id']}:{v}{suffix}") for v in self.LEVS[:4]], [(f"{'✅' if abs(cur_l - v) < 1e-9 else ''}{v}×", f"szl:{c['id']}:{v}{suffix}") for v in self.LEVS[4:]]]
+        if exn:
+            kb.append([("↩ Как в конфиге", f"szr:{c['id']}:{code}")])
+        kb.append([("← Карточка", f"c:{c['id']}"), ("🏦 По биржам", f"cx:{c['id']}")])
         return "\n".join(body), kb
 
     def _s_confirm_panic(self, user, live=False):
-        d = self._ad(user).describe()
-        where = f"на {esc(d['name'].capitalize())} ({'тестовая сеть' if d['testnet'] else '<b>БОЕВАЯ сеть</b>'})" if d["real"] else "(счёт не подключён — закрывать нечего, только выключится автомод)"
+        real = [a.describe() for a in self._ads(user).values() if a.real]
+        where = "на " + ", ".join(f"{esc(EXC_LABEL.get(d['name'], d['name']))} ({_net_text(d)})" for d in real) if real else "(счёт не подключён — закрывать нечего, только выключится автомод)"
         return self._confirm(f"🚨 <b>СТОП ВСЁ</b>\nАвтомод выключится у ВСЕХ конфигов, все позиции {where} закроются по рынку, все ордера (стопы, тейки) снимутся. Продолжить?", "pny", "m")
 
     def _s_confirm_off(self, user, live=False):
@@ -384,38 +502,52 @@ class MonitorUI:
             return None, False, None
         if kind == "a":                                                            # переключатель автомода: включение — через подтверждение, выключение сразу
             c = self._cfg(user, a[0])
+            exn = _exn(a[2] if len(a) > 2 else None)
+            sfx = "" if exn == "hyperliquid" else f":{a[2]}"
             if c["paused"]:
                 return "Конфиг на паузе — сначала возобновите", True, None
-            cur = c["auto"]["open" if a[1] == "o" else "manage"]
+            cur = c["ex"][exn]["open" if a[1] == "o" else "manage"]
             if not cur:
-                return None, False, f"ca:{a[0]}:{a[1]}"
-            manage.set_auto(self.db, self._ad(user), uid, c["id"], open_=False if a[1] == "o" else None, manage=False if a[1] == "m" else None)
-            return "Автомод выключен", False, f"c:{a[0]}"
+                return None, False, f"ca:{a[0]}:{a[1]}{sfx}"
+            manage.set_auto(self.db, self._ad(user, exn), uid, c["id"], open_=False if a[1] == "o" else None, manage=False if a[1] == "m" else None, exchange=exn)
+            return f"Автомод выключен ({EXC_LABEL[exn]})", False, f"c:{a[0]}"
         if kind == "cu":                                                           # опция «догнать свежий сигнал»: параметры — командой /catchup
             c = self._cfg(user, a[0])
             cu = manage.set_catchup(self.db, self._ad(user), uid, c["id"], on=not c["catchup"]["on"])
             return ("Догоняю сигнал: бот проверит последний сигнал при ближайшей проверке" if cu["armed"] else "Включено: сработает при включении автомода «открывать»" if cu["on"] else "Выключено"), False, f"c:{a[0]}"
         if kind == "ab":                                                           # база размера входа: депозит конфига <-> реальный баланс счёта
             c = self._cfg(user, a[0])
-            new = "config" if c["auto"].get("base") == "account" else "account"
-            manage.set_auto(self.db, self._ad(user), uid, c["id"], base=new)
+            exn = _exn(a[1] if len(a) > 1 else None)
+            new = "config" if c["ex"][exn].get("base") == "account" else "account"
+            manage.set_auto(self.db, self._ad(user, exn), uid, c["id"], base=new, exchange=exn)
             return ("Размер входа теперь считается от баланса счёта на бирже" if new == "account" else "Размер входа считается от депозита конфига"), False, f"c:{a[0]}"
-        if kind in ("szp", "szl"):
+        if kind in ("szp", "szl", "szr"):
             c = self._cfg(user, a[0])
+            code = a[2] if kind != "szr" and len(a) > 2 else (a[1] if kind == "szr" and len(a) > 1 else None)
+            exn = EXC.get(code)
+            if exn:                                                                # своя настройка для биржи: расчёт и другие биржи не затрагиваются
+                if kind == "szr":
+                    manage.set_ex_over(self.db, self._ad(user, exn), uid, c["id"], exn, trade_pct=None, leverage=None, pyramid_pct=None, pyramid_leverage=None)
+                    return f"{EXC_LABEL[exn]}: размер как в конфиге", False, f"sz:{a[0]}:{code}"
+                over = manage.set_ex_over(self.db, self._ad(user, exn), uid, c["id"], exn, **({"trade_pct": float(a[1])} if kind == "szp" else {"leverage": float(a[1])}))
+                eff = manage.effective_params(c["params"], over)
+                return f"{EXC_LABEL[exn]}: {eff['trade_pct']:g}% депозита × {eff['leverage']:g}×", False, f"sz:{a[0]}:{code}"
             r = manage.set_sizing(self.db, self._ad(user), uid, c["id"], **({"trade_pct": float(a[1])} if kind == "szp" else {"leverage": float(a[1])}))
             self.svc.forget(c["id"])
             return f"Теперь: {r['trade_pct']:g}% депозита × {r['leverage']:g}×", False, f"sz:{a[0]}"
         if kind == "ay":
             c = self._cfg(user, a[0])
-            manage.set_auto(self.db, self._ad(user), uid, c["id"], open_=True if a[1] == "o" else None, manage=True if a[1] == "m" else None)
-            return ("Автомод включён" + ("" if self._ad(user).real else " (симуляция)")), False, f"c:{a[0]}"
+            exn = _exn(a[2] if len(a) > 2 else None)
+            ad = self._ad(user, exn)
+            manage.set_auto(self.db, ad, uid, c["id"], open_=True if a[1] == "o" else None, manage=True if a[1] == "m" else None, exchange=exn)
+            return (f"Автомод включён ({EXC_LABEL[exn]})" + ("" if ad.real else ", симуляция")), False, f"c:{a[0]}"
         if kind == "p":
             c = self._cfg(user, a[0])
             manage.set_paused(self.db, uid, c["id"], not c["paused"])
             self.svc.forget(c["id"])
             return ("Конфиг на паузе, автомод выключен" if not c["paused"] else "Конфиг возобновлён"), False, f"c:{a[0]}"
         if kind == "dy":
-            name = manage.remove_config(self.db, uid, a[0], self._ad(user))
+            name = manage.remove_config(self.db, uid, a[0], self._ads(user))
             return f"Удалён: {name}", False, "m"
         if kind == "e":
             c = self._cfg(user, a[0])
@@ -424,23 +556,34 @@ class MonitorUI:
             self.svc.tg.send_document(chat, f"maverick-config_{c['id']}.json", body.encode("utf-8"), caption=c["name"])
             return "Файл отправлен", False, None
         if kind == "tgo":
-            r = manage.test_open(self.db, self._ad(user), uid, a[0], 1.0)
-            txt = ("Симуляция: ордер не отправлялся" if r["status"] == "dry_run" else f"Открыта: маржа {r['margin']:g} $ × {r['leverage']}× = объём {r['notional']:g} $")
-            return txt, True, "t"
+            exn = _exn(a[1] if len(a) > 1 else None)
+            r = manage.test_open(self.db, self._ad(user, exn), uid, a[0], 1.0)
+            txt = ("Симуляция: ордер не отправлялся" if r["status"] == "dry_run" else f"{EXC_LABEL[exn]}: открыта, маржа {r['margin']:g} $ × {r['leverage']}× = объём {r['notional']:g} $")
+            return txt, True, "t" if exn == "hyperliquid" else f"t:{a[1]}"
         if kind == "tcgo":
-            r = manage.test_close(self.db, self._ad(user), uid)
-            return ("Симуляция: закрывать нечего" if r["status"] == "dry_run" else "На бирже нет позиции по BTC" if r["status"] == "skipped" else "Позиция по BTC закрыта"), True, "t"
+            exn = _exn(a[0] if a else None)
+            r = manage.test_close(self.db, self._ad(user, exn), uid)
+            return ("Симуляция: закрывать нечего" if r["status"] == "dry_run" else "На бирже нет позиции по BTC" if r["status"] == "skipped" else "Позиция по BTC закрыта"), True, "t" if exn == "hyperliquid" else f"t:{a[0]}"
         if kind == "hl":                                                           # начать подключение счёта: дальше бот ждёт адрес и ключ обычными сообщениями
             self.svc.start_hl_connect(chat, user, testnet=(a[0] != "m"))
             return "Жду адрес кошелька", False, None
         if kind == "hlx":
             self.svc.cancel_hl(user)
             return "Подключение отменено", False, "x"
+        if kind == "by":                                                           # начать подключение Bybit: дальше бот ждёт API-ключ и секрет обычными сообщениями
+            self.svc.start_bybit_connect(chat, user, {"t": "testnet", "d": "demo", "m": "live"}.get(a[0], "testnet"))
+            return "Жду API-ключ", False, None
+        if kind == "byx":
+            self.svc.cancel_hl(user)
+            return "Подключение отменено", False, "xb"
         if kind == "dxy":
-            manage.disconnect_account(self.db, uid)
-            return "Счёт отключён, автомод выключен", False, "x"
+            manage.disconnect_account(self.db, uid, "hyperliquid")
+            return "Счёт Hyperliquid отключён, автомод на нём выключен", False, "x"
+        if kind == "dxb":
+            manage.disconnect_account(self.db, uid, "bybit")
+            return "Счёт Bybit отключён, автомод на нём выключен", False, "xb"
         if kind == "pny":
-            r = manage.panic(self.db, self._ad(user), uid)
+            r = manage.panic(self.db, self._ads(user), uid)
             txt = f"Автомод выкл. у {r['auto_off']}; закрыто позиций {len(r['closed'])}, снято ордеров {r['cancelled']}" + (f"; ОШИБКИ: {len(r['errors'])} — см. /tradelog" if r["errors"] else "")
             if r["errors"]:
                 self.svc.send(chat, "🚨 <b>СТОП ВСЁ: есть ошибки</b>\n" + "\n".join(f"• {esc(str(e)[:200])}" for e in r["errors"]) + "\nПроверьте счёт на бирже вручную.")
@@ -456,7 +599,7 @@ class MonitorUI:
                 return "Live остановлен", False, screen
             self.live[key] = {"screen": screen, "uid": uid, "until": time.time() + LIVE_TTL, "sig": None}
             return f"Live включён на {LIVE_TTL // 60} мин", False, screen
-        if kind in ("c", "v", "ca", "cd", "sz"):
+        if kind in ("c", "v", "ca", "cd", "sz", "cx"):
             self._cfg(user, a[0])                                                  # чужой или удалённый конфиг — сразу понятная ошибка, а не пустой экран
         return None, False, data                                                   # всё остальное — просто экран
 

@@ -23,7 +23,8 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
                        "hold_h": t["hold_h"]} for t in [t for t in res["trades"] if t["reason"] != "OPEN"][-5:]][::-1],
            "settings": {"sl_pct": p["sl_pct"], "tps": p["tps"], "be_after_tp1": p["be_after_tp1"], "leverage": p["leverage"], "pyramid_leverage": p.get("pyramid_leverage"),
                         "funding_apr": p.get("funding_apr") or 0.0, "funding_period_h": p.get("funding_period_h") or 8, "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "pyramid_pct": p.get("pyramid_pct"), "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
-                        "weekdays_only": p.get("weekdays_only", False), "side": p["side"]}}
+                        "weekdays_only": p.get("weekdays_only", False), "side": p["side"],
+                        "pyramid_leverage": p.get("pyramid_leverage"), "entry_limit_pct": p.get("entry_limit_pct") or 0.0, "entry_limit_dir": p.get("entry_limit_dir") or "pullback", "entry_limit_ttl_h": p.get("entry_limit_ttl_h") or 4.0}}
     if detail:                                             # подробности: статистика, вся история закрытых сделок (последние 300) и полные параметры
         t = res["stats"]["total"]
         keys = ("trades", "winrate", "profit_factor", "total_usd", "return_pct", "sharpe", "max_dd_usd", "max_dd_pct", "max_dd_real_usd", "max_dd_real_pct", "avg_pct",

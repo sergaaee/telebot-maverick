@@ -49,7 +49,7 @@ def bot_status(db, now=None):
 
 def recipients(db):
     """Пользователи, которым бот нужен прямо сейчас: Telegram привязан и автомод включён у неактивного на паузе конфига."""
-    uids = {c["user_id"] for c in db.list_configs() if not c["paused"] and (c["auto"]["open"] or c["auto"]["manage"])}
+    uids = {c["user_id"] for c in db.list_configs() if not c["paused"] and (c["any_open"] or c["any_manage"])}
     return [u for u in db.list_users() if u["id"] in uids and u["telegram_id"] and not u["disabled"]]
 
 

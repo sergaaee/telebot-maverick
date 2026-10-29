@@ -27,10 +27,17 @@ from . import manage as manage_mod
 from .manage import (ManageError, account_info, auto_off_all, disconnect_account, own_config, remove_config, set_auto, set_paused, panic, set_catchup, set_sizing, test_close, test_open)
 
 
-def _adapter(request, db):
-    """Адаптер биржи ТЕКУЩЕГО пользователя (его подключённый счёт или симуляция)."""
-    return adapter_for(db, request.state.user["id"])
-from .trading import adapter_for
+def _adapter(request, db, exchange="hyperliquid"):
+    """Адаптер биржи ТЕКУЩЕГО пользователя (его подключённый счёт на этой бирже или симуляция)."""
+    try:
+        return adapter_for(db, request.state.user["id"], manage_mod.exchange_name(exchange))
+    except ManageError as e:
+        raise HTTPException(e.code, str(e))
+
+
+def _adapters(request, db):
+    return adapters_for(db, request.state.user["id"])
+from .trading import adapter_for, adapters_for
 
 
 class LoginIn(BaseModel):
@@ -344,11 +351,14 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         Это расчёт стратегии по свечам, а не позиции на бирже."""
         uid = request.state.user["id"]
         entries = [{**evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn),
-                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "catchup": c["catchup"], "pending_entry": db.get_pending(c["id"])} for c in db.list_configs(uid)]
+                    "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "catchup": c["catchup"], "pending_entry": db.get_pending(c["id"]),
+                    "ex": c["ex"], "pending_entries": {r["exchange"]: r for r in db.pending_of(c["id"])}} for c in db.list_configs(uid)]
         if body.get("runs"):                                      # сохранённые прогоны пользователя — тоже в мониторинг (без автомода)
             entries += [evaluate_entry(store, s.defaults, f"Прогон: {r['name']}", None, r["params"], None, False, available_fn) for r in db.list_runs(uid)]
-        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": _adapter(request, db).describe(), "bot": watchdog.bot_status(db),
-                "account": manage_mod.account_quick(_adapter(request, db), uid),
+        ads = _adapters(request, db)
+        return {"entries": entries, "log": db.list_auto_log(uid, 50), "exchange": ads["hyperliquid"].describe(), "bot": watchdog.bot_status(db),
+                "account": manage_mod.account_quick(ads["hyperliquid"], uid),
+                "exchanges": {n: a.describe() for n, a in ads.items()}, "accounts": {n: manage_mod.account_quick(a, uid) for n, a in ads.items()},
                 "data": {"source": "Binance (свечи)", "now": int(time.time() * 1000)}}
 
     def _guard(fn, *a, **k):
@@ -365,7 +375,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         """Подробности по одной стратегии: позиция по ногам, статистика, история закрытых сделок, параметры и её журнал действий."""
         c = _own(request, config_id)
         e = evaluate_entry(store, s.defaults, f"#{c['id']} {c['name']}", c["id"], c["params"], c["auto"], c["paused"], available_fn, detail=True)
-        return {**e, "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "created": c["created"],
+        return {**e, "title": c["name"], "baseline": c["baseline"], "alerts": c["alerts"], "tf": c["tf"], "created": c["created"], "ex": c["ex"],
                 "log": db.list_auto_log(request.state.user["id"], 30, config_id)}
 
     @app.post("/api/monitor/configs/{config_id}/pause")
@@ -387,7 +397,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @app.delete("/api/monitor/configs/{config_id}")
     def monitor_delete(config_id: int, request: Request):
-        _guard(remove_config, db, request.state.user["id"], config_id, _adapter(request, db))
+        _guard(remove_config, db, request.state.user["id"], config_id, _adapters(request, db))
         return {"ok": True}
 
     @app.get("/api/monitor/configs/{config_id}/export")
@@ -398,9 +408,20 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     @app.put("/api/monitor/configs/{config_id}/auto")
     def set_auto_ep(config_id: int, request: Request, body: dict = Body(...)):
         """Автомод конфига: open — открывать позиции и доборы по сигналу, manage — переставлять стоп (БУ), закрывать и т.д. Выключен, пока явно не включён.
-        base — от чего считать размер входа: config (депозит из конфига, по умолчанию) или account (реальный капитал на бирже)."""
-        new = _guard(set_auto, db, _adapter(request, db), request.state.user["id"], config_id, body.get("open"), body.get("manage"), body.get("base"))
-        return {"auto": new, "exchange": _adapter(request, db).describe()}
+        base — от чего считать размер входа: config (депозит из конфига, по умолчанию) или account (реальный капитал на бирже).
+        exchange — на какой бирже (hyperliquid по умолчанию, bybit): у каждой биржи свои переключатели и свой счёт."""
+        exchange = _guard(manage_mod.exchange_name, body.get("exchange")) if body.get("exchange") is not None else "hyperliquid"
+        ad = _adapter(request, db, exchange)
+        new = _guard(set_auto, db, ad, request.state.user["id"], config_id, body.get("open"), body.get("manage"), body.get("base"), exchange)
+        return {"auto": new, "exchange": ad.describe(), "target": exchange}
+
+    @app.put("/api/monitor/configs/{config_id}/exchange/{exchange}")
+    def exchange_cfg_ep(config_id: int, exchange: str, request: Request, body: dict = Body(...)):
+        """Настройки конфига ТОЛЬКО для этой биржи (поверх параметров конфига): trade_pct, leverage, pyramid_pct, pyramid_leverage, entry_limit_pct, entry_limit_dir, entry_limit_ttl_h.
+        null у ключа — убрать настройку (брать из конфига). Действуют на новые входы на этой бирже; сигналы и правила выхода (стоп, тейки, БУ) общие, из конфига."""
+        exchange = _guard(manage_mod.exchange_name, exchange)
+        patch = {k: body[k] for k in manage_mod.EXCHANGE_OVERRIDES if k in body}
+        return {"over": _guard(manage_mod.set_ex_over, db, _adapter(request, db, exchange), request.state.user["id"], config_id, exchange, **patch), "exchange": exchange}
 
     @app.put("/api/monitor/configs/{config_id}/sizing")
     def sizing_ep(config_id: int, request: Request, body: dict = Body(...)):
@@ -483,16 +504,18 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         prefs = _pf_prefs(uid)
         rows = portfolio.collect(store, s.defaults, db.list_configs(uid), available_fn)
         real = None
-        ad = _adapter(request, db)
-        if ad.real:
+        for ad in _adapters(request, db).values():                  # реальные счета всех подключённых бирж складываются (Hyperliquid в USDC, Bybit в USDT — оба ≈ доллар)
+            if not ad.real:
+                continue
             try:
-                real = {"equity": ad.account().get("equity"), "positions": ad.positions()}
-            except Exception:                      # биржа недоступна — портфель показываем без блока «реальная биржа»
-                real = None
+                one = {"equity": ad.account().get("equity") or 0.0, "positions": ad.positions()}
+            except Exception:                      # биржа недоступна — её в блоке «реальная биржа» нет
+                continue
+            real = one if real is None else {"equity": real["equity"] + one["equity"], "positions": real["positions"] + one["positions"]}
         return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"], sizing=prefs["sizing"], compound=prefs["compound"])
 
     @app.get("/api/export/{kind}.csv")
-    def export_csv(kind: str, request: Request, config_id: int | None = Query(None)):
+    def export_csv(kind: str, request: Request, config_id: int | None = Query(None), exchange: str = Query("hyperliquid")):
         """CSV-выгрузки: trades — сделки стратегий (расчёт; config_id — одной, иначе всех), autolog — журнал автоторговли, fills — реальные исполнения на бирже."""
         uid = request.state.user["id"]
         if kind == "trades":
@@ -507,7 +530,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         elif kind == "autolog":
             body = exporter.autolog_csv(db.list_auto_log(uid, 500, config_id))
         elif kind == "fills":
-            ad = _adapter(request, db)
+            ad = _adapter(request, db, _guard(manage_mod.exchange_name, exchange))
             if not ad.real:
                 raise HTTPException(409, "Счёт биржи не подключён — реальных исполнений нет")
             try:
@@ -541,7 +564,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         """Аварийная кнопка: автомод выключается у всех конфигов, все позиции на бирже закрываются по рынку, все ордера снимаются. Нужно confirm: true."""
         if body.get("confirm") is not True:
             raise HTTPException(422, "Нужно подтверждение (confirm: true)")
-        return panic(db, _adapter(request, db), request.state.user["id"])
+        return panic(db, _adapters(request, db), request.state.user["id"])
 
     @app.post("/api/trading/test-position")
     def test_position(request: Request, body: dict = Body(...)):
@@ -549,22 +572,30 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         Нужно явное подтверждение; без реального адаптера — симуляция. Закрывается кнопкой «Закрыть тестовую»."""
         if body.get("confirm") is not True:
             raise HTTPException(422, "Нужно подтверждение (confirm: true)")
-        return _guard(test_open, db, _adapter(request, db), request.state.user["id"], body.get("side", "long"), float(body.get("usd", 1.0)))
+        return _guard(test_open, db, _adapter(request, db, body.get("exchange") or "hyperliquid"), request.state.user["id"], body.get("side", "long"), float(body.get("usd", 1.0)))
 
     @app.post("/api/trading/test-position/close")
     def test_position_close(request: Request, body: dict = Body(default={})):
         """Закрыть позицию по BTC на бирже целиком (reduce-only по рынку) и снять висящие ордера."""
-        return _guard(test_close, db, _adapter(request, db), request.state.user["id"])
+        return _guard(test_close, db, _adapter(request, db, body.get("exchange") or "hyperliquid"), request.state.user["id"])
 
     @app.get("/api/exchange/account")
-    def exchange_account(request: Request):
-        """Подключённый счёт Hyperliquid пользователя: кто подключён (адрес маскируется, ключ не отдаётся никогда), баланс, позиции, открытые ордера, последние исполнения."""
-        return account_info(db, _adapter(request, db), request.state.user["id"])
+    def exchange_account(request: Request, exchange: str = "hyperliquid"):
+        """Подключённый счёт пользователя на бирже (hyperliquid по умолчанию, bybit): кто подключён (адрес / ключ маскируется, секрет не отдаётся никогда), баланс, позиции, открытые ордера, последние исполнения."""
+        exchange = _guard(manage_mod.exchange_name, exchange)
+        return account_info(db, _adapter(request, db, exchange), request.state.user["id"], exchange)
+
+    @app.get("/api/exchange/accounts")
+    def exchange_accounts(request: Request):
+        """Счета на всех биржах разом: {биржа: то же, что /api/exchange/account}."""
+        uid = request.state.user["id"]
+        return {"accounts": {n: account_info(db, a, uid, n) for n, a in _adapters(request, db).items()}}
 
     @app.delete("/api/exchange/account")
-    def exchange_disconnect(request: Request):
-        """Отключить счёт: ключ удаляется из базы, автомод выключается. Подключить заново можно только через бота (/hl)."""
-        return {"removed": disconnect_account(db, request.state.user["id"])}
+    def exchange_disconnect(request: Request, exchange: str = "hyperliquid"):
+        """Отключить счёт на бирже: ключ удаляется из базы, автомод на этой бирже выключается. Подключить заново можно только через бота (/hl — Hyperliquid, /bybit — Bybit)."""
+        exchange = _guard(manage_mod.exchange_name, exchange)
+        return {"removed": disconnect_account(db, request.state.user["id"], exchange)}
 
     # ---- сохранённые прогоны: именованные снимки «параметры + ключевые цифры», у каждого пользователя свои ----
     @app.get("/api/runs")

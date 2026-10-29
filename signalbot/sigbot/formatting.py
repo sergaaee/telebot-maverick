@@ -84,6 +84,24 @@ def sizing_line(result, add=False):
 
 ONLY_NAMES = {"local": "DL", "scalp": "DS", "global": "DG"}
 
+OVER_NAMES = {"trade_pct": "доля", "leverage": "плечо", "pyramid_pct": "доля добора", "pyramid_leverage": "плечо добора", "entry_limit_pct": "лимитка %", "entry_limit_dir": "лимитка", "entry_limit_ttl_h": "жизнь лимитки, ч"}
+
+
+def over_line(over):
+    """Настройки конфига для биржи одной строкой: «доля 10% · плечо 5× · лимитка 0.3% на откат»."""
+    bits = []
+    for k in ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage"):
+        if over.get(k) is not None:
+            bits.append(f"{OVER_NAMES[k]} {over[k]:g}" + ("%" if k.endswith("pct") else "×"))
+    if over.get("entry_limit_pct") is not None:
+        pc = over["entry_limit_pct"]
+        bits.append("вход по рынку" if not pc else f"лимитка {pc:g}% " + ("по ходу" if over.get("entry_limit_dir") == "breakout" else "на откат"))
+    elif over.get("entry_limit_dir") is not None:
+        bits.append("лимитка " + ("по ходу" if over["entry_limit_dir"] == "breakout" else "на откат"))
+    if over.get("entry_limit_ttl_h") is not None:
+        bits.append(f"{OVER_NAMES['entry_limit_ttl_h']} {over['entry_limit_ttl_h']:g}")
+    return " · ".join(bits) or "как в конфиге"
+
 
 def config_summary(cfg, result=None):
     p = cfg["params"]
@@ -299,6 +317,8 @@ HELP = """🤖 <b>Бот сигналов Maverick</b>
 <b>Команды</b>
 /monitor — мониторинг: стратегии, открытые позиции, автомод, пауза, live (кнопки)
 /hl — подключить счёт Hyperliquid (адрес кошелька + ключ API-кошелька) и посмотреть его
+/bybit — подключить счёт Bybit (только USDT-фьючерсы; API-ключ и секрет без права вывода) и посмотреть его
+/ex &lt;№&gt; [hl|bybit …] — настройки конфига отдельно для биржи: доля, плечо, лимитный вход
 /tradelog [N] — лог автоторговли файлом (решения автомода, запросы к бирже, ошибки)
 /list — ваши конфиги и их состояние
 /stats &lt;№|имя&gt; — свежая статистика конфига

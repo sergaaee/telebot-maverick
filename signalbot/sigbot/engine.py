@@ -191,10 +191,13 @@ class Engine:
         return out
 
     @staticmethod
-    def order_size(result, add=False, equity=None):
+    def order_size(result, add=False, equity=None, over=None):
         """(объём, маржа) в $ нового входа / добора — как в sizing_line: доля от баланса (сложный процент) или от начального депозита, умноженная на плечо.
-        equity — реальный капитал на бирже: тогда база размера он (а не депозит конфига и результат симуляции), доля и плечо остаются из конфига."""
+        equity — реальный капитал на бирже: тогда база размера он (а не депозит конфига и результат симуляции), доля и плечо остаются из конфига.
+        over — настройки конфига для биржи (trade_pct, leverage, pyramid_pct, pyramid_leverage): поверх параметров конфига."""
         p, t = result["params"], result["stats"]["total"]
+        if over:
+            p = {**p, **{k: v for k, v in over.items() if k in ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage")}}
         compound = p.get("compound", True)
         bal = p["deposit"] + (t["total_usd"] if compound else 0)
         base = bal if compound else p["deposit"]

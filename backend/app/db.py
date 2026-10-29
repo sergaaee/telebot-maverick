@@ -68,14 +68,16 @@ CREATE TABLE IF NOT EXISTS saved_runs (
     created REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS exchange_accounts (
-    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     exchange TEXT NOT NULL,
     wallet TEXT NOT NULL,
     key_enc TEXT NOT NULL,
     testnet INTEGER NOT NULL,
     agent_address TEXT,
     created REAL NOT NULL,
-    verified REAL NOT NULL
+    verified REAL NOT NULL,
+    net TEXT,
+    PRIMARY KEY (user_id, exchange)
 );
 CREATE TABLE IF NOT EXISTS auto_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,7 +97,8 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     PRIMARY KEY (user_id, key)
 );
 CREATE TABLE IF NOT EXISTS pending_entries (
-    config_id INTEGER PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+    exchange TEXT NOT NULL DEFAULT 'hyperliquid',
     user_id INTEGER NOT NULL,
     signal_ts INTEGER NOT NULL,
     symbol TEXT NOT NULL,
@@ -108,16 +111,19 @@ CREATE TABLE IF NOT EXISTS pending_entries (
     leverage REAL NOT NULL,
     order_id TEXT,
     created REAL NOT NULL,
-    expires REAL NOT NULL
+    expires REAL NOT NULL,
+    PRIMARY KEY (config_id, exchange)
 );
 CREATE TABLE IF NOT EXISTS auto_retry (
-    config_id INTEGER PRIMARY KEY REFERENCES configs(id) ON DELETE CASCADE,
+    config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+    exchange TEXT NOT NULL DEFAULT 'hyperliquid',
     signal_ts INTEGER NOT NULL,
     side TEXT NOT NULL,
     pyramid INTEGER NOT NULL DEFAULT 0,
     leg INTEGER,
     reason TEXT,
-    created REAL NOT NULL
+    created REAL NOT NULL,
+    PRIMARY KEY (config_id, exchange)
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -128,6 +134,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
+EXCHANGES = ("hyperliquid", "bybit")                 # поддерживаемые биржи для торговли; hyperliquid — прежняя (его настройки автомода лежат в колонке auto)
+# что можно задать у конфига ОТДЕЛЬНО для биржи (поверх параметров конфига): размер входа и вход лимиткой; сигналы и правила выхода (стоп, тейки) — общие для всех бирж
+EXCHANGE_OVERRIDES = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage", "entry_limit_pct", "entry_limit_dir", "entry_limit_ttl_h")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,32}$")
 MIN_PASSWORD = 8
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -171,6 +180,7 @@ class Database:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with self.conn() as c:
             c.executescript(SCHEMA)
+            self._migrate_exchanges(c)
             ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
             if "digest" not in ucols:        # регулярная сводка в Telegram: off / daily / weekly
                 c.execute("ALTER TABLE users ADD COLUMN digest TEXT")
@@ -181,10 +191,41 @@ class Database:
                 c.execute("ALTER TABLE configs ADD COLUMN auto TEXT")
             if "ready" not in cols:          # состояние «ждёт подтверждения»: NULL = ещё не фиксировали (первое сообщение не шлём)
                 c.execute("ALTER TABLE configs ADD COLUMN ready TEXT")
+            if "exsettings" not in cols:     # настройки по биржам: {"bybit": {open, manage, base, over}, "hyperliquid": {over}}; у Hyperliquid open/manage/base лежат в колонке auto
+                c.execute("ALTER TABLE configs ADD COLUMN exsettings TEXT")
             if "catchup" not in cols:        # «догнать свежий сигнал при включении автомода»: JSON {"on", "age_min", "move_pct", "armed"}; NULL = выключено
                 c.execute("ALTER TABLE configs ADD COLUMN catchup TEXT")
             if "fill_ts" not in cols:        # база от версии до уведомлений об исполнениях: NULL = «ещё не фиксировали», прошлые исполнения не присылаем
                 c.execute("ALTER TABLE configs ADD COLUMN fill_ts INTEGER")
+
+    @staticmethod
+    def _migrate_exchanges(c):
+        """Базы до поддержки нескольких бирж: счёт был один на пользователя, ожидающие входы и повторы — один на конфиг. Пересоздаём таблицы с ключом (…, биржа), данные сохраняются как Hyperliquid."""
+        def pk(table):
+            return [r["name"] for r in sorted((r for r in c.execute(f"PRAGMA table_info({table})") if r["pk"]), key=lambda r: r["pk"])]
+        if pk("exchange_accounts") == ["user_id"]:
+            c.execute("ALTER TABLE exchange_accounts RENAME TO exchange_accounts_old")
+            c.executescript("""CREATE TABLE exchange_accounts (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, exchange TEXT NOT NULL, wallet TEXT NOT NULL, key_enc TEXT NOT NULL, testnet INTEGER NOT NULL,
+                agent_address TEXT, created REAL NOT NULL, verified REAL NOT NULL, net TEXT, PRIMARY KEY (user_id, exchange));
+                INSERT INTO exchange_accounts(user_id, exchange, wallet, key_enc, testnet, agent_address, created, verified) SELECT user_id, exchange, wallet, key_enc, testnet, agent_address, created, verified FROM exchange_accounts_old;
+                DROP TABLE exchange_accounts_old;""")
+        if pk("pending_entries") == ["config_id"]:
+            c.execute("ALTER TABLE pending_entries RENAME TO pending_entries_old")
+            c.executescript("""CREATE TABLE pending_entries (
+                config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE, exchange TEXT NOT NULL DEFAULT 'hyperliquid', user_id INTEGER NOT NULL, signal_ts INTEGER NOT NULL,
+                symbol TEXT NOT NULL, side TEXT NOT NULL, mode TEXT NOT NULL, level REAL NOT NULL, ref REAL NOT NULL, notional REAL NOT NULL, margin REAL NOT NULL, leverage REAL NOT NULL,
+                order_id TEXT, created REAL NOT NULL, expires REAL NOT NULL, PRIMARY KEY (config_id, exchange));
+                INSERT INTO pending_entries(config_id, exchange, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires)
+                    SELECT config_id, 'hyperliquid', user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires FROM pending_entries_old;
+                DROP TABLE pending_entries_old;""")
+        if pk("auto_retry") == ["config_id"]:
+            c.execute("ALTER TABLE auto_retry RENAME TO auto_retry_old")
+            c.executescript("""CREATE TABLE auto_retry (
+                config_id INTEGER NOT NULL REFERENCES configs(id) ON DELETE CASCADE, exchange TEXT NOT NULL DEFAULT 'hyperliquid', signal_ts INTEGER NOT NULL, side TEXT NOT NULL,
+                pyramid INTEGER NOT NULL DEFAULT 0, leg INTEGER, reason TEXT, created REAL NOT NULL, PRIMARY KEY (config_id, exchange));
+                INSERT INTO auto_retry(config_id, exchange, signal_ts, side, pyramid, leg, reason, created) SELECT config_id, 'hyperliquid', signal_ts, side, pyramid, leg, reason, created FROM auto_retry_old;
+                DROP TABLE auto_retry_old;""")
 
     @contextmanager
     def conn(self):
@@ -308,27 +349,32 @@ class Database:
                       (user_id, json.dumps(state, ensure_ascii=False), time.time()))
 
     # ---------------- счёт на бирже (ключ API-кошелька хранится ЗАШИФРОВАННЫМ) ----------------
-    def set_exchange_account(self, user_id, exchange, wallet, key_enc, testnet, agent_address=None):
+    def set_exchange_account(self, user_id, exchange, wallet, key_enc, testnet, agent_address=None, net=None):
+        """wallet — адрес (Hyperliquid) или публичный API-ключ (Bybit); key_enc — зашифрованный секрет; net — сеть для Bybit: live / testnet / demo."""
         now = time.time()
         with self.conn() as c:
-            old = c.execute("SELECT created FROM exchange_accounts WHERE user_id=?", (user_id,)).fetchone()
-            c.execute("INSERT INTO exchange_accounts(user_id, exchange, wallet, key_enc, testnet, agent_address, created, verified) VALUES (?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(user_id) DO UPDATE SET exchange=excluded.exchange, wallet=excluded.wallet, key_enc=excluded.key_enc, testnet=excluded.testnet, "
-                      "agent_address=excluded.agent_address, verified=excluded.verified",
-                      (user_id, exchange, wallet, key_enc, int(bool(testnet)), agent_address, old["created"] if old else now, now))
+            old = c.execute("SELECT created FROM exchange_accounts WHERE user_id=? AND exchange=?", (user_id, exchange)).fetchone()
+            c.execute("INSERT INTO exchange_accounts(user_id, exchange, wallet, key_enc, testnet, agent_address, created, verified, net) VALUES (?,?,?,?,?,?,?,?,?) "
+                      "ON CONFLICT(user_id, exchange) DO UPDATE SET wallet=excluded.wallet, key_enc=excluded.key_enc, testnet=excluded.testnet, "
+                      "agent_address=excluded.agent_address, verified=excluded.verified, net=excluded.net",
+                      (user_id, exchange, wallet, key_enc, int(bool(testnet)), agent_address, old["created"] if old else now, now, net))
 
-    def get_exchange_account(self, user_id):
+    def get_exchange_account(self, user_id, exchange="hyperliquid"):
         with self.conn() as c:
-            row = c.execute("SELECT * FROM exchange_accounts WHERE user_id=?", (user_id,)).fetchone()
+            row = c.execute("SELECT * FROM exchange_accounts WHERE user_id=? AND exchange=?", (user_id, exchange)).fetchone()
         if not row:
             return None
         d = dict(row)
         d["testnet"] = bool(d["testnet"])
         return d
 
-    def delete_exchange_account(self, user_id):
+    def list_exchange_accounts(self, user_id):
         with self.conn() as c:
-            return c.execute("DELETE FROM exchange_accounts WHERE user_id=?", (user_id,)).rowcount > 0
+            return [dict(r) | {"testnet": bool(r["testnet"])} for r in c.execute("SELECT * FROM exchange_accounts WHERE user_id=? ORDER BY exchange", (user_id,))]
+
+    def delete_exchange_account(self, user_id, exchange="hyperliquid"):
+        with self.conn() as c:
+            return c.execute("DELETE FROM exchange_accounts WHERE user_id=? AND exchange=?", (user_id, exchange)).rowcount > 0
 
     def set_digest(self, user_id, mode):
         if mode not in ("off", "daily", "weekly"):
@@ -354,44 +400,58 @@ class Database:
             c.execute("INSERT INTO user_prefs(user_id, key, value) VALUES (?,?,?) ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (user_id, key, json.dumps(value, ensure_ascii=False)))
 
     # ---------------- ожидающие входы: лимитный ордер на вход / ожидание цены для входа по ходу ----------------
-    def set_pending(self, config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, expires):
+    def set_pending(self, config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, expires, exchange="hyperliquid"):
         with self.conn() as c:
-            c.execute("INSERT INTO pending_entries(config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                      "ON CONFLICT(config_id) DO UPDATE SET user_id=excluded.user_id, signal_ts=excluded.signal_ts, symbol=excluded.symbol, side=excluded.side, mode=excluded.mode, level=excluded.level, "
+            c.execute("INSERT INTO pending_entries(config_id, exchange, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                      "ON CONFLICT(config_id, exchange) DO UPDATE SET user_id=excluded.user_id, signal_ts=excluded.signal_ts, symbol=excluded.symbol, side=excluded.side, mode=excluded.mode, level=excluded.level, "
                       "ref=excluded.ref, notional=excluded.notional, margin=excluded.margin, leverage=excluded.leverage, order_id=excluded.order_id, created=excluded.created, expires=excluded.expires",
-                      (config_id, user_id, int(signal_ts), symbol, side, mode, level, ref, notional, margin, leverage, None if order_id is None else str(order_id), time.time(), expires))
+                      (config_id, exchange, user_id, int(signal_ts), symbol, side, mode, level, ref, notional, margin, leverage, None if order_id is None else str(order_id), time.time(), expires))
 
-    def get_pending(self, config_id):
+    def get_pending(self, config_id, exchange="hyperliquid"):
         with self.conn() as c:
-            r = c.execute("SELECT * FROM pending_entries WHERE config_id=?", (config_id,)).fetchone()
+            r = c.execute("SELECT * FROM pending_entries WHERE config_id=? AND exchange=?", (config_id, exchange)).fetchone()
         return dict(r) if r else None
+
+    def pending_of(self, config_id):
+        """Ожидающие входы конфига по всем биржам."""
+        with self.conn() as c:
+            return [dict(r) for r in c.execute("SELECT * FROM pending_entries WHERE config_id=? ORDER BY exchange", (config_id,))]
 
     def list_pending(self):
         with self.conn() as c:
             return [dict(r) for r in c.execute("SELECT * FROM pending_entries ORDER BY created")]
 
-    def clear_pending(self, config_id):
+    def clear_pending(self, config_id, exchange=None):
+        """exchange=None — ожидающие входы конфига по всем биржам."""
         with self.conn() as c:
-            c.execute("DELETE FROM pending_entries WHERE config_id=?", (config_id,))
+            if exchange is None:
+                c.execute("DELETE FROM pending_entries WHERE config_id=?", (config_id,))
+            else:
+                c.execute("DELETE FROM pending_entries WHERE config_id=? AND exchange=?", (config_id, exchange))
 
-    def clear_pending_user(self, user_id):
+    def clear_pending_user(self, user_id, exchange=None):
         with self.conn() as c:
-            return c.execute("DELETE FROM pending_entries WHERE user_id=?", (user_id,)).rowcount
+            if exchange is None:
+                return c.execute("DELETE FROM pending_entries WHERE user_id=?", (user_id,)).rowcount
+            return c.execute("DELETE FROM pending_entries WHERE user_id=? AND exchange=?", (user_id, exchange)).rowcount
 
     # ---------------- вход, который не удался: повторить при перезапуске бота ----------------
-    def set_retry(self, config_id, signal_ts, side, pyramid=False, leg=None, reason=None):
+    def set_retry(self, config_id, signal_ts, side, pyramid=False, leg=None, reason=None, exchange="hyperliquid"):
         with self.conn() as c:
-            c.execute("INSERT INTO auto_retry(config_id, signal_ts, side, pyramid, leg, reason, created) VALUES (?,?,?,?,?,?,?) "
-                      "ON CONFLICT(config_id) DO UPDATE SET signal_ts=excluded.signal_ts, side=excluded.side, pyramid=excluded.pyramid, leg=excluded.leg, reason=excluded.reason, created=excluded.created",
-                      (config_id, int(signal_ts), side, int(bool(pyramid)), leg, (reason or "")[:300], time.time()))
+            c.execute("INSERT INTO auto_retry(config_id, exchange, signal_ts, side, pyramid, leg, reason, created) VALUES (?,?,?,?,?,?,?,?) "
+                      "ON CONFLICT(config_id, exchange) DO UPDATE SET signal_ts=excluded.signal_ts, side=excluded.side, pyramid=excluded.pyramid, leg=excluded.leg, reason=excluded.reason, created=excluded.created",
+                      (config_id, exchange, int(signal_ts), side, int(bool(pyramid)), leg, (reason or "")[:300], time.time()))
 
     def list_retries(self):
         with self.conn() as c:
             return [dict(r) | {"pyramid": bool(r["pyramid"])} for r in c.execute("SELECT * FROM auto_retry ORDER BY created")]
 
-    def clear_retry(self, config_id):
+    def clear_retry(self, config_id, exchange=None):
         with self.conn() as c:
-            c.execute("DELETE FROM auto_retry WHERE config_id=?", (config_id,))
+            if exchange is None:
+                c.execute("DELETE FROM auto_retry WHERE config_id=?", (config_id,))
+            else:
+                c.execute("DELETE FROM auto_retry WHERE config_id=? AND exchange=?", (config_id, exchange))
 
     # ---------------- служебные значения (пульс бота и т.п.) ----------------
     def set_meta(self, key, value):
@@ -404,17 +464,47 @@ class Database:
         return r["value"] if r else default
 
     # ---------------- автомод: действия (журнал) ----------------
-    def set_auto(self, user_id, cfg_id, open_=None, manage=None, base=None):
+    def set_auto(self, user_id, cfg_id, open_=None, manage=None, base=None, exchange="hyperliquid"):
         if base not in (None, "config", "account"):
             raise DbError("База размера: config или account")
+        if exchange not in EXCHANGES:
+            raise DbError("Неизвестная биржа")
         with self.conn() as c:
             row = c.execute("SELECT * FROM configs WHERE id=? AND user_id=?", (cfg_id, user_id)).fetchone()
             if not row:
                 return None
-            cur = self._cfg(row)["auto"]
+            cfg = self._cfg(row)
+            cur = cfg["ex"][exchange]
             new = {"open": cur["open"] if open_ is None else bool(open_), "manage": cur["manage"] if manage is None else bool(manage), "base": base or cur["base"]}
-            c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps(new), cfg_id))
+            if exchange == "hyperliquid":
+                c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps(new), cfg_id))
+            else:
+                raw = json.loads(row["exsettings"] or "{}")
+                raw[exchange] = {**(raw.get(exchange) or {}), **new}
+                c.execute("UPDATE configs SET exsettings=? WHERE id=?", (json.dumps(raw), cfg_id))
             return new
+
+    def set_ex_over(self, user_id, cfg_id, exchange, patch):
+        """Настройки конфига для конкретной биржи (поверх параметров конфига). patch: {ключ: значение | None (убрать — взять из конфига)}. -> актуальные переопределения или None, если конфига нет."""
+        if exchange not in EXCHANGES:
+            raise DbError("Неизвестная биржа")
+        bad = [k for k in patch if k not in EXCHANGE_OVERRIDES]
+        if bad:
+            raise DbError("Для биржи нельзя менять: " + ", ".join(bad))
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM configs WHERE id=? AND user_id=?", (cfg_id, user_id)).fetchone()
+            if not row:
+                return None
+            raw = json.loads(row["exsettings"] or "{}")
+            cur = dict((raw.get(exchange) or {}).get("over") or {})
+            for k, v in patch.items():
+                if v is None:
+                    cur.pop(k, None)
+                else:
+                    cur[k] = v
+            raw[exchange] = {**(raw.get(exchange) or {}), "over": cur}
+            c.execute("UPDATE configs SET exsettings=? WHERE id=?", (json.dumps(raw), cfg_id))
+            return cur
 
     def set_catchup(self, user_id, cfg_id, on=None, age_min=None, move_pct=None, armed=None):
         """Настройки «догнать свежий сигнал»: on — включено, age_min — не старше стольких минут, move_pct — цена не должна уйти в сторону прибыли больше чем на столько %,
@@ -429,16 +519,28 @@ class Database:
             c.execute("UPDATE configs SET catchup=? WHERE id=?", (json.dumps(new), cfg_id))
             return new
 
-    def disable_all_auto(self, user_id):
-        """Выключает открытие и управление у всех конфигов пользователя (выбранная база размера сохраняется). -> у скольких конфигов автомод был включён."""
+    def disable_all_auto(self, user_id, exchange=None):
+        """Выключает открытие и управление у всех конфигов пользователя (выбранная база размера сохраняется). exchange — только на этой бирже (по умолчанию на всех).
+        -> у скольких конфигов автомод был включён."""
+        names = EXCHANGES if exchange is None else (exchange,)
         n = 0
         with self.conn() as c:
-            for row in c.execute("SELECT * FROM configs WHERE user_id=? AND auto IS NOT NULL", (user_id,)).fetchall():
-                a = self._cfg(row)["auto"]
-                if a["open"] or a["manage"]:
+            for row in c.execute("SELECT * FROM configs WHERE user_id=?", (user_id,)).fetchall():
+                cfg = self._cfg(row)
+                if any(cfg["ex"][x]["open"] or cfg["ex"][x]["manage"] for x in names):
                     n += 1
-                c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps({"open": False, "manage": False, "base": a["base"]}) if a["base"] != "config" else None, row["id"]))
-                c.execute("UPDATE configs SET catchup=json_set(COALESCE(catchup, '{}'), '$.armed', json('false')) WHERE id=? AND catchup IS NOT NULL", (row["id"],))
+                if "hyperliquid" in names and row["auto"] is not None:
+                    a = cfg["auto"]
+                    c.execute("UPDATE configs SET auto=? WHERE id=?", (json.dumps({"open": False, "manage": False, "base": a["base"]}) if a["base"] != "config" else None, row["id"]))
+                raw = json.loads(row["exsettings"]) if row["exsettings"] else {}
+                for name in names:
+                    if isinstance(raw.get(name), dict) and name != "hyperliquid":
+                        raw[name]["open"] = raw[name]["manage"] = False
+                if raw:
+                    c.execute("UPDATE configs SET exsettings=? WHERE id=?", (json.dumps(raw), row["id"]))
+                left = any(cfg["ex"][x]["open"] for x in EXCHANGES if x not in names)       # на другой бирже автомод «открывать» ещё включён — «догнать сигнал» остаётся взведённым
+                if not left:
+                    c.execute("UPDATE configs SET catchup=json_set(COALESCE(catchup, '{}'), '$.armed', json('false')) WHERE id=? AND catchup IS NOT NULL", (row["id"],))
         return n
 
     def add_auto_log(self, user_id, config_id, kind, symbol, side, status, details):
@@ -552,6 +654,18 @@ class Database:
             cu = {}
         d["catchup"] = {"on": bool(cu.get("on")), "age_min": float(cu.get("age_min") or 15.0), "move_pct": float(cu["move_pct"]) if cu.get("move_pct") is not None else 0.1, "armed": bool(cu.get("armed"))}
         d["auto"] = {"open": bool(a.get("open")), "manage": bool(a.get("manage")), "base": a.get("base") if a.get("base") in ("config", "account") else "config"}
+        try:
+            raw = json.loads(d.get("exsettings") or "{}")
+        except ValueError:
+            raw = {}
+        d["ex"] = {}
+        for name in EXCHANGES:
+            r = raw.get(name) or {}
+            base = dict(d["auto"]) if name == "hyperliquid" else {"open": bool(r.get("open")), "manage": bool(r.get("manage")), "base": r.get("base") if r.get("base") in ("config", "account") else "config"}
+            base["over"] = {k: v for k, v in (r.get("over") or {}).items() if k in EXCHANGE_OVERRIDES}
+            d["ex"][name] = base
+        d["any_open"] = any(e["open"] for e in d["ex"].values())              # автомод включён хотя бы на одной бирже
+        d["any_manage"] = any(e["manage"] for e in d["ex"].values())
         return d
 
     def list_configs(self, user_id=None):
@@ -587,7 +701,7 @@ class Database:
         with self.conn() as c:
             old = self._by_name(c, user_id, name)
             if old:
-                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, auto=NULL, catchup=NULL, error=NULL, updated=? WHERE id=?",
+                c.execute("UPDATE configs SET params=?, tf=?, baseline=0, last_ts=0, fill_ts=NULL, ready=NULL, auto=NULL, exsettings=NULL, catchup=NULL, error=NULL, updated=? WHERE id=?",
                           (json.dumps(params, ensure_ascii=False), str(tf), now, old["id"]))
                 cid, created = old["id"], False
             else:

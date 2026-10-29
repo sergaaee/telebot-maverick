@@ -72,12 +72,15 @@ def build_digest(db, store, defaults, user, adapter, available_fn=None, mode="da
         errs = sum(1 for x in log if x["status"] == "error")
         if errs:
             lines.append(f"⚠️ Ошибок биржи за период: {errs} (подробнее: /tradelog)")
-    if adapter.real:
+    for ad in (adapter.values() if isinstance(adapter, dict) else [adapter]):          # adapter — один адаптер или словарь {биржа: адаптер}
+        if not ad.real:
+            continue
         try:
-            acc, pos = adapter.account(), adapter.positions()
-            lines += ["", f"🏦 {esc(adapter.name.capitalize())} ({'тестовая сеть' if adapter.testnet else 'БОЕВАЯ сеть'}): капитал <b>{acc.get('equity') or 0:,.2f} $</b>".replace(",", " ")
+            acc, pos = ad.account(), ad.positions()
+            net = getattr(ad, "net", None)
+            lines += ["", f"🏦 {esc(getattr(ad, 'label', ad.name.capitalize()))} ({'тестовая сеть' if ad.testnet and net != 'demo' else 'демо-счёт' if net == 'demo' else 'БОЕВАЯ сеть'}): капитал <b>{acc.get('equity') or 0:,.2f} $</b>".replace(",", " ")
                       + f" · позиций {len(pos)}" + (f" · нереализованный {usd(sum((p.get('pnl_usd') or 0) for p in pos))}" if pos else "")]
         except Exception as e:
-            lines += ["", f"🏦 Счёт на бирже: не удалось получить данные ({esc(str(e)[:100])})"]
+            lines += ["", f"🏦 {esc(getattr(ad, 'label', ad.name.capitalize()))}: не удалось получить данные ({esc(str(e)[:100])})"]
     lines += ["", "<i>Результаты стратегий — расчёт по свечам Binance, а не данные биржи. Отключить сводку: /digest off</i>"]
     return "\n".join(lines)

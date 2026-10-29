@@ -1,7 +1,8 @@
 """Торговля: слой исполнения действий (открыть позицию, переставить стоп, закрыть) за единым интерфейсом.
 
-Данные (свечи, отчёты) идут с Binance как раньше, а торговать можно на Hyperliquid (адаптер на ccxt). Счёт у каждого пользователя свой: адрес кошелька и ключ API-кошелька он
-присылает боту (/hl), они проверяются и хранятся в базе ЗАШИФРОВАННЫМИ (secrets_store.py); пока счёт не подключён — режим симуляции: действие записывается в журнал, ордера не отправляются.
+Данные (свечи, отчёты) идут с Binance как раньше, а торговать можно на Hyperliquid и на Bybit (только USDT-фьючерсы; адаптеры на ccxt). Счёт на каждой бирже у пользователя свой:
+Hyperliquid — адрес кошелька и ключ API-кошелька (/hl), Bybit — API-ключ и секрет без права вывода (/bybit); они проверяются и хранятся в базе ЗАШИФРОВАННЫМИ (secrets_store.py);
+пока счёт не подключён — режим симуляции: действие записывается в журнал, ордера не отправляются.
 TRADE_EXCHANGE=dry-run принудительно включает симуляцию для всех.
 
 ВАЖНО про Hyperliquid:
@@ -101,6 +102,8 @@ class DryRunAdapter(ExchangeAdapter):
 class HyperliquidAdapter(ExchangeAdapter):
     """Hyperliquid (бессрочные контракты, расчёт в USDC) через ccxt. Символ стратегии «BTC/USDT:USDT» превращается в «BTC/USDC:USDC»."""
     name = "hyperliquid"
+    label = "Hyperliquid"
+    quote = "USDC"                      # валюта расчёта в балансе
     real = True
     min_notional = 10.0                 # минимальный ордер на Hyperliquid — 10 $ объёма (по документации биржи; уточните при смене правил)
 
@@ -118,7 +121,7 @@ class HyperliquidAdapter(ExchangeAdapter):
         if self._ex is None:
             if not (self.wallet and self.key):
                 self._log("not_configured", "warn", wallet=bool(self.wallet), key=bool(self.key))
-                raise NotConfigured("Счёт Hyperliquid не подключён — отправьте боту /hl (адрес кошелька и ключ API-кошелька).")
+                raise NotConfigured(self._not_connected())
             import ccxt
             ex = ccxt.hyperliquid({"walletAddress": self.wallet, "privateKey": self.key, "enableRateLimit": True})
             if self.testnet:
@@ -127,14 +130,35 @@ class HyperliquidAdapter(ExchangeAdapter):
                 ex.load_markets()
             except Exception as e:
                 trade_error("exchange_fail", e, user=self.user_id, what="load_markets", testnet=self.testnet)
-                raise ExchangeError(f"Hyperliquid недоступен: {e}") from e
+                raise ExchangeError(f"{self.label} недоступен: {e}") from e
             self._log("exchange_connected", markets=len(getattr(ex, "markets", {}) or {}))
             self._ex = ex
         return self._ex
 
+    def _not_connected(self):
+        return "Счёт Hyperliquid не подключён — отправьте боту /hl (адрес кошелька и ключ API-кошелька)."
+
     @staticmethod
     def hl_symbol(symbol):
         return f"{symbol.split('/')[0]}/USDC:USDC"
+
+    # ----- особенности бирж (Bybit переопределяет) -----
+    def _set_leverage(self, ex, sym, leverage):
+        self._call("плечо", ex.set_leverage, int(max(1, round(leverage))), sym, {"marginMode": "isolated"})
+
+    def _open_orders(self, ex, sym=None):
+        """Открытые ордера, включая условные (стопы)."""
+        return self._call("ордера", ex.fetch_open_orders, sym) if sym else self._call("ордера", ex.fetch_open_orders)
+
+    def _positions_raw(self, ex, symbols=None):
+        return self._call("позиции", ex.fetch_positions, symbols) if symbols else self._call("позиции", ex.fetch_positions)
+
+    def _cancel(self, ex, order, sym):
+        ex.cancel_order(order["id"], sym)
+
+    def _min_value_ok(self, ex, sym, amount, price):
+        """Дополнительные ограничения биржи на размер (минимальное количество и т.п.); исключение, если ордер не пройдёт."""
+        return None
 
     def _call(self, what, fn, *a, **k):
         try:
@@ -143,18 +167,18 @@ class HyperliquidAdapter(ExchangeAdapter):
             raise
         except Exception as e:
             trade_error("exchange_fail", e, user=self.user_id, what=what, testnet=self.testnet)
-            raise ExchangeError(f"Hyperliquid, {what}: {e}") from e
+            raise ExchangeError(f"{self.label}, {what}: {e}") from e
 
     def _price(self, ex, sym):
         t = self._call("цена", ex.fetch_ticker, sym)
         p = t.get("last") or t.get("close") or t.get("mark")
         if not p:
-            raise ExchangeError("Hyperliquid: не удалось получить цену")
+            raise ExchangeError(f"{self.label}: не удалось получить цену")
         return float(p)
 
     def _position(self, ex, sym):
         """Текущая позиция по символу: (размер в базовом активе > 0, сторона 'long'/'short') или (0, None)."""
-        for p in self._call("позиции", ex.fetch_positions, [sym]) or []:
+        for p in self._positions_raw(ex, [sym]) or []:
             size = abs(float(p.get("contracts") or 0))
             if size > 0:
                 return size, (p.get("side") or ("long" if float(p.get("contracts") or 0) > 0 else "short"))
@@ -167,7 +191,7 @@ class HyperliquidAdapter(ExchangeAdapter):
         if notional > self.max_usd + 1e-9:
             raise ExchangeError(f"Объём {notional:.2f} $ больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if notional < self.min_notional - 1e-9:
-            raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера Hyperliquid ({self.min_notional:g} $).")
+            raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера {self.label} ({self.min_notional:g} $).")
         price = self._price(ex, sym)
         amount = float(ex.amount_to_precision(sym, notional / price))
         if amount * price < self.min_notional * 1.01:         # округление вниз (и проскальзывание рыночной цены) увело бы ордер под минимум биржи — берём с небольшим запасом
@@ -177,10 +201,11 @@ class HyperliquidAdapter(ExchangeAdapter):
                 raise ExchangeError(f"Объём {notional:.2f} $ с учётом минимума биржи больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if amount <= 0:
             raise ExchangeError("Размер позиции после округления равен нулю.")
+        self._min_value_ok(ex, sym, amount, price)
         buy = side == "long"
         entry_side, exit_side = ("buy", "sell") if buy else ("sell", "buy")
         self._log("order_request", kind="open", symbol=sym, side=side, notional=notional, amount=amount, price=price, leverage=leverage, stop=stop, takes=takes)
-        self._call("плечо", ex.set_leverage, int(max(1, round(leverage))), sym, {"marginMode": "isolated"})
+        self._set_leverage(ex, sym, leverage)
         order = self._call("вход", ex.create_order, sym, "market", entry_side, amount, price)
         self._log("order_ok", kind="entry", symbol=sym, order=order if isinstance(order, dict) and len(str(order)) < 1500 else (order.get("id") if isinstance(order, dict) else str(order)[:300]))
         res = {"status": "sent", "entry_order": order.get("id") if isinstance(order, dict) else None, "symbol": sym, "side": side, "amount": amount, "price": price,
@@ -226,7 +251,7 @@ class HyperliquidAdapter(ExchangeAdapter):
         if notional > self.max_usd + 1e-9:
             raise ExchangeError(f"Объём {notional:.2f} $ больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if notional < self.min_notional - 1e-9:
-            raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера Hyperliquid ({self.min_notional:g} $).")
+            raise ExchangeError(f"Объём {notional:.2f} $ меньше минимального ордера {self.label} ({self.min_notional:g} $).")
         px = float(ex.price_to_precision(sym, price)) if hasattr(ex, "price_to_precision") else float(price)
         amount = float(ex.amount_to_precision(sym, notional / px))
         if amount * px < self.min_notional * 1.01:
@@ -235,8 +260,9 @@ class HyperliquidAdapter(ExchangeAdapter):
                 raise ExchangeError(f"Объём {amount * px:.2f} $ с учётом минимума биржи больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
         if amount <= 0:
             raise ExchangeError("Размер позиции после округления равен нулю.")
+        self._min_value_ok(ex, sym, amount, px)
         self._log("order_request", kind="limit_entry", symbol=sym, side=side, notional=amount * px, amount=amount, price=px, leverage=leverage)
-        self._call("плечо", ex.set_leverage, int(max(1, round(leverage))), sym, {"marginMode": "isolated"})
+        self._set_leverage(ex, sym, leverage)
         order = self._call("лимитный вход", ex.create_order, sym, "limit", "buy" if side == "long" else "sell", amount, px)
         oid = order.get("id") if isinstance(order, dict) else None
         self._log("order_ok", kind="limit_entry", symbol=sym, order=oid)
@@ -252,7 +278,7 @@ class HyperliquidAdapter(ExchangeAdapter):
             return {"status": st, "filled": float(o.get("filled") or 0), "amount": float(o.get("amount") or 0), "avg": float(o["average"]) if o.get("average") else None}
         except Exception as e:
             self._log("order_state_fallback", "warn", order=order_id, error=str(e)[:200])
-        opened = self._call("ордера", ex.fetch_open_orders, sym) or []
+        opened = self._open_orders(ex, sym) or []
         if any(str(x.get("id")) == str(order_id) for x in opened):
             return {"status": "open", "filled": 0.0, "amount": 0.0, "avg": None}
         return {"status": "unknown", "filled": 0.0, "amount": 0.0, "avg": None}
@@ -273,9 +299,9 @@ class HyperliquidAdapter(ExchangeAdapter):
         exit_side = "sell" if pos_side == "long" else "buy"
         removed = 0
         self._log("order_request", kind="move_stop", symbol=sym, side=pos_side, size=size, stop=price)
-        for o in self._call("ордера", ex.fetch_open_orders, sym) or []:
+        for o in self._open_orders(ex, sym) or []:
             if o.get("triggerPrice") and o.get("reduceOnly") and (o.get("side") == exit_side):
-                self._call("снятие стопа", ex.cancel_order, o["id"], sym)
+                self._call("снятие стопа", self._cancel, ex, o, sym)
                 removed += 1
         o = self._call("новый стоп", ex.create_order, sym, "market", exit_side, size, float(price), {"stopLossPrice": float(price), "reduceOnly": True})
         self._log("order_ok", kind="move_stop", symbol=sym, stop=price, removed_old=removed, order=o.get("id") if isinstance(o, dict) else None)
@@ -297,10 +323,10 @@ class HyperliquidAdapter(ExchangeAdapter):
         o = self._call("закрытие", ex.create_order, sym, "market", exit_side, amount, price, {"reduceOnly": True})
         self._log("order_ok", kind="close", symbol=sym, amount=amount, order=o.get("id") if isinstance(o, dict) else None)
         if part >= 0.999:                                     # позиция закрыта целиком — висящие стопы и тейки больше не нужны
-            for x in self._call("ордера", ex.fetch_open_orders, sym) or []:
+            for x in self._open_orders(ex, sym) or []:
                 if x.get("reduceOnly"):
                     try:
-                        ex.cancel_order(x["id"], sym)
+                        self._cancel(ex, x, sym)
                     except Exception:
                         pass
         return {"status": "sent", "symbol": sym, "closed": amount, "order": o.get("id") if isinstance(o, dict) else None}
@@ -317,9 +343,9 @@ class HyperliquidAdapter(ExchangeAdapter):
             except Exception as e:
                 errors.append(f"закрытие {p['symbol']}: {e}")
         try:
-            for o in self._call("ордера", ex.fetch_open_orders) or []:
+            for o in self._open_orders(ex) or []:
                 try:
-                    ex.cancel_order(o["id"], o.get("symbol"))
+                    self._cancel(ex, o, o.get("symbol"))
                     cancelled += 1
                 except Exception as e:
                     errors.append(f"отмена ордера {o.get('id')}: {e}")
@@ -332,7 +358,7 @@ class HyperliquidAdapter(ExchangeAdapter):
     def positions(self):
         ex = self._x()
         out = []
-        for p in self._call("позиции", ex.fetch_positions) or []:
+        for p in self._positions_raw(ex) or []:
             size = abs(float(p.get("contracts") or 0))
             if size <= 0:
                 continue
@@ -343,13 +369,13 @@ class HyperliquidAdapter(ExchangeAdapter):
     def account(self):
         ex = self._x()
         b = self._call("баланс", ex.fetch_balance) or {}
-        usdc = b.get("USDC") or {}
+        usdc = b.get(self.quote) or {}
         return {"equity": usdc.get("total"), "free": usdc.get("free"), "used": usdc.get("used")}
 
     def open_orders(self):
         ex = self._x()
         out = []
-        for o in self._call("ордера", ex.fetch_open_orders) or []:
+        for o in self._open_orders(ex) or []:
             out.append({"symbol": o.get("symbol"), "side": o.get("side"), "type": o.get("type"), "amount": o.get("amount"), "price": o.get("price"),
                         "trigger": o.get("triggerPrice"), "reduce_only": bool(o.get("reduceOnly")), "ts": o.get("timestamp")})
         return out
@@ -359,6 +385,116 @@ class HyperliquidAdapter(ExchangeAdapter):
         rows = self._call("сделки", ex.fetch_my_trades, None, None, limit) or []
         return [{"symbol": t.get("symbol"), "side": t.get("side"), "amount": t.get("amount"), "price": t.get("price"), "fee": (t.get("fee") or {}).get("cost"),
                  "pnl": (t.get("info") or {}).get("closedPnl"), "ts": t.get("timestamp")} for t in rows][-limit:][::-1]
+
+
+class BybitAdapter(HyperliquidAdapter):
+    """Bybit — ТОЛЬКО фьючерсы: бессрочные USDT-контракты (linear) через ccxt, тот же набор действий, что у Hyperliquid. Спот, опционы, инверсные контракты не поддерживаются:
+    все запросы идут с категорией linear. Символ стратегии «BTC/USDT:USDT» остаётся как есть.
+    Сети: live (боевая), testnet (тестовая сеть testnet.bybit.com) и demo (демо-торговля на боевом аккаунте). Ключ API должен быть БЕЗ права вывода средств (см. verify_bybit).
+    Режим позиции — односторонний (one-way); маржа — изолированная, если аккаунт позволяет (в Unified Trading Account режим маржи задаётся на уровне аккаунта).
+    ВАЖНО: код проверен только на имитации биржи — на живом Bybit он не запускался, сначала прогоните его на testnet / demo."""
+    name = "bybit"
+    label = "Bybit"
+    quote = "USDT"
+    min_notional = 5.0                  # у Bybit минимум зависит от монеты (стоимость ≥ 5 USDT и минимальное количество) — дополнительно проверяется по рынку
+
+    def __init__(self, api_key="", secret="", net="testnet", max_usd=None, exchange=None):
+        super().__init__(api_key, secret, net != "live", max_usd, exchange)
+        self.net = net if net in ("live", "testnet", "demo") else "testnet"
+
+    def _log(self, event, level="info", **f):
+        trade_log(event, level, user=self.user_id, exchange=self.name, testnet=self.testnet, net=self.net, **f)
+
+    def describe(self):
+        return {**super().describe(), "label": self.label, "net": self.net}
+
+    def _not_connected(self):
+        return "Счёт Bybit не подключён — отправьте боту /bybit (API-ключ и секрет без права вывода)."
+
+    def _x(self):
+        if self._ex is None:
+            if not (self.wallet and self.key):
+                self._log("not_configured", "warn", key=bool(self.wallet), secret=bool(self.key))
+                raise NotConfigured(self._not_connected())
+            import ccxt
+            ex = ccxt.bybit({"apiKey": self.wallet, "secret": self.key, "enableRateLimit": True, "options": {"defaultType": "swap", "defaultSubType": "linear"}})
+            if self.net == "testnet":
+                ex.set_sandbox_mode(True)
+            elif self.net == "demo":
+                ex.enable_demo_trading(True)
+            try:
+                ex.load_markets()
+            except Exception as e:
+                trade_error("exchange_fail", e, user=self.user_id, what="load_markets", testnet=self.testnet, net=self.net)
+                raise ExchangeError(f"{self.label} недоступен: {e}") from e
+            self._log("exchange_connected", markets=len(getattr(ex, "markets", {}) or {}))
+            self._ex = ex
+        return self._ex
+
+    @staticmethod
+    def hl_symbol(symbol):
+        return symbol                   # у Bybit тот же «BTC/USDT:USDT», что и в расчёте
+
+    def _set_leverage(self, ex, sym, leverage):
+        lev = int(max(1, round(leverage)))
+        try:
+            ex.set_margin_mode("isolated", sym, {"leverage": lev})          # в Unified-аккаунте режим маржи общий — биржа может отказать, это не мешает
+        except Exception as e:
+            self._log("margin_mode_skipped", "info", error=str(e)[:200])
+        try:
+            ex.set_leverage(lev, sym)
+        except Exception as e:
+            if "110043" in str(e) or "not modified" in str(e).lower():       # плечо уже такое — для Bybit это «ошибка», для нас — норма
+                return
+            trade_error("exchange_fail", e, user=self.user_id, what="плечо", testnet=self.testnet)
+            raise ExchangeError(f"{self.label}, плечо: {e}") from e
+
+    def _open_orders(self, ex, sym=None):
+        """Обычные ордера и условные (стопы) — у Bybit это разные выборки."""
+        out, seen = [], set()
+        for extra in ({}, {"trigger": True}):
+            params = {**extra, **({} if sym else {"settleCoin": "USDT"})}
+            try:
+                rows = self._call("ордера", ex.fetch_open_orders, sym, None, None, params)
+            except ExchangeError:
+                if not extra:
+                    raise
+                continue                                                      # условные ордера не отдались — не критично для обычного списка
+            for o in rows or []:
+                if o.get("id") not in seen:
+                    seen.add(o.get("id"))
+                    out.append(o)
+        return out
+
+    def _positions_raw(self, ex, symbols=None):
+        return self._call("позиции", ex.fetch_positions, symbols, {"settleCoin": "USDT"}) if not symbols else self._call("позиции", ex.fetch_positions, symbols)
+
+    def _cancel(self, ex, order, sym):
+        if order.get("triggerPrice") or order.get("stopPrice"):
+            ex.cancel_order(order["id"], sym, {"trigger": True})
+        else:
+            ex.cancel_order(order["id"], sym)
+
+    def _min_value_ok(self, ex, sym, amount, price):
+        try:
+            m = ex.market(sym)
+            lo = ((m.get("limits") or {}).get("amount") or {}).get("min")
+        except Exception:
+            return None
+        if lo and amount < float(lo) - 1e-12:
+            raise ExchangeError(f"Количество {amount:g} меньше минимального для {sym} на Bybit ({float(lo):g}, ≈ {float(lo) * price:.1f} $) — увеличьте объём (долю или плечо).")
+        return None
+
+    def min_order_value(self, symbol, price=None):
+        """Минимальная стоимость ордера по символу: максимум из 5 USDT и минимального количества × цена."""
+        try:
+            ex = self._x()
+            m = ex.market(self.hl_symbol(symbol))
+            lo = float((((m.get("limits") or {}).get("amount") or {}).get("min")) or 0)
+            px = price or self._price(ex, self.hl_symbol(symbol))
+            return max(self.min_notional, lo * px)
+        except Exception:
+            return self.min_notional
 
 
 HEX_ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -430,18 +566,94 @@ def _verify(wallet, key, testnet, exchange, user_id):
     return {"agent": agent, "account": acc}
 
 
+BYBIT_NETS = ("live", "testnet", "demo")
+BYBIT_KEY = re.compile(r"^[A-Za-z0-9]{10,40}$")
+BYBIT_SECRET = re.compile(r"^[A-Za-z0-9]{16,80}$")
+
+
+def verify_bybit(api_key, secret, net="testnet", exchange=None, user_id=None):
+    try:
+        return _verify_bybit(api_key, secret, net, exchange, user_id)
+    except ValueError as e:
+        trade_log("verify_fail", "warn", user=user_id, exchange="bybit", net=net, api_key=mask_address(api_key), reason=str(e))
+        raise
+
+
+def _walk_strings(x):
+    if isinstance(x, dict):
+        for k, v in x.items():
+            yield str(k)
+            yield from _walk_strings(v)
+    elif isinstance(x, (list, tuple)):
+        for v in x:
+            yield from _walk_strings(v)
+    elif x is not None:
+        yield str(x)
+
+
+def _verify_bybit(api_key, secret, net, exchange, user_id):
+    """Проверяет присланные API-ключ и секрет Bybit ПЕРЕД сохранением. -> {"account": {...}, "permissions": ...}; ValueError с понятным текстом.
+    Ключ должен уметь торговать (не read-only) и НЕ иметь права вывода средств (по ответу биржи /v5/user/query-api). Не удалось проверить права — ключ не принимается
+    (аварийный обход: BYBIT_SKIP_PERM_CHECK=true — только если биржа изменила формат ответа; в демо-режиме средств нет, проверка прав необязательна)."""
+    api_key, secret = (api_key or "").strip(), (secret or "").strip()
+    if net not in BYBIT_NETS:
+        raise ValueError("Сеть: live (боевая), testnet (тестовая) или demo (демо-торговля).")
+    if not BYBIT_KEY.match(api_key):
+        raise ValueError("API-ключ Bybit — это 10–40 латинских букв и цифр.")
+    if not BYBIT_SECRET.match(secret):
+        raise ValueError("Секрет Bybit — это 16–80 латинских букв и цифр.")
+    trade_log("verify_start", user=user_id, exchange="bybit", net=net, api_key=mask_address(api_key))
+    a = BybitAdapter(api_key, secret, net, exchange=exchange)
+    a.user_id = user_id
+    try:
+        ex = a._x()
+    except (NotConfigured, ExchangeError) as e:
+        raise ValueError(str(e))
+    skip = os.getenv("BYBIT_SKIP_PERM_CHECK", "").strip().lower() == "true"
+    perms = None
+    if not skip:
+        try:
+            info = ex.private_get_v5_user_query_api()
+        except Exception as e:
+            if net != "demo":
+                raise ValueError(f"Не удалось проверить права ключа Bybit: {str(e)[:200]}. Проверьте ключ, секрет и сеть (боевая/тестовая/демо).")
+            info = None
+        res = (info or {}).get("result") if isinstance(info, dict) else None
+        if isinstance(res, dict):
+            perms = res.get("permissions")
+            trade_log("verify_role", user=user_id, exchange="bybit", net=net, read_only=res.get("readOnly"), permissions=str(perms)[:300], ips=str(res.get("ips"))[:120])
+            if str(res.get("readOnly")) in ("1", "True", "true"):
+                raise ValueError("Это ключ только для чтения (Read-only): торговать им нельзя. Создайте ключ с правом «Контракты — ордера и позиции» (Derivatives/Contract: Orders, Positions) и БЕЗ права вывода.")
+            contract = [] if not isinstance(perms, dict) else list(perms.get("ContractTrade") or []) + list(perms.get("Derivatives") or [])
+            if isinstance(perms, dict) and not contract:
+                raise ValueError("У ключа нет права торговли контрактами (Contract / Derivatives: Orders, Positions) — а бот торгует только USDT-фьючерсами Bybit. Создайте ключ с этим правом.")
+            if any("withdraw" in s.lower() for s in _walk_strings(perms)):
+                raise ValueError("У ключа есть право вывода средств — такой ключ не принимается. Создайте новый ключ API без права Withdraw (Bybit → API → Create New Key → отметьте только торговлю контрактами).")
+        elif net != "demo":
+            raise ValueError("Биржа не вернула права ключа — не могу убедиться, что у него нет права вывода. Если вы уверены, администратор может задать BYBIT_SKIP_PERM_CHECK=true.")
+    try:
+        acc = a.account()
+    except (NotConfigured, ExchangeError) as e:
+        raise ValueError(str(e))
+    trade_log("verify_ok", user=user_id, exchange="bybit", net=net, api_key=mask_address(api_key), equity=acc.get("equity"))
+    return {"account": acc, "permissions": perms}
+
+
 _cache = {}
+EXCHANGE_LABELS = {"hyperliquid": "Hyperliquid", "bybit": "Bybit"}
 
 
-def adapter_for(db, user_id):
-    """Адаптер конкретного пользователя: его подключённый счёт Hyperliquid, а без счёта (или при TRADE_EXCHANGE=dry-run) — симуляция."""
+def adapter_for(db, user_id, exchange="hyperliquid"):
+    """Адаптер конкретного пользователя на конкретной бирже: его подключённый счёт, а без счёта (или при TRADE_EXCHANGE=dry-run) — симуляция."""
     if os.getenv("TRADE_EXCHANGE", "").strip().lower() in ("dry-run", "off", "sim"):
         return DryRunAdapter()
-    acc = db.get_exchange_account(user_id)
-    if not acc or acc["exchange"] != "hyperliquid":
+    if exchange not in EXCHANGE_LABELS:
         return DryRunAdapter()
-    sig = (acc["wallet"], acc["key_enc"], acc["testnet"])
-    hit = _cache.get(user_id)
+    acc = db.get_exchange_account(user_id, exchange)
+    if not acc or acc["exchange"] != exchange:
+        return DryRunAdapter()
+    sig = (acc["wallet"], acc["key_enc"], acc["testnet"], acc.get("net"))
+    hit = _cache.get((user_id, exchange))
     if hit and hit[0] == sig:
         return hit[1]
     try:
@@ -449,12 +661,21 @@ def adapter_for(db, user_id):
     except SecretError:
         key = ""                                                  # ключ не расшифровать: адаптер сообщит «подключите заново», а не упадёт
     if not key:
-        trade_log("key_undecryptable", "error", user=user_id, note="сохранённый ключ не расшифровать (сменился SECRET_KEY / потерян secret.key)")
-    a = HyperliquidAdapter(acc["wallet"], key, acc["testnet"])
+        trade_log("key_undecryptable", "error", user=user_id, exchange=exchange, note="сохранённый ключ не расшифровать (сменился SECRET_KEY / потерян secret.key)")
+    if exchange == "bybit":
+        a = BybitAdapter(acc["wallet"], key, acc.get("net") or ("testnet" if acc["testnet"] else "live"))
+    else:
+        a = HyperliquidAdapter(acc["wallet"], key, acc["testnet"])
     a.user_id = user_id
-    _cache[user_id] = (sig, a)
+    _cache[(user_id, exchange)] = (sig, a)
     return a
 
 
-def forget_adapter(user_id):
-    _cache.pop(user_id, None)
+def adapters_for(db, user_id):
+    """{биржа: адаптер} по всем поддерживаемым биржам (без подключённого счёта — симуляция)."""
+    return {name: adapter_for(db, user_id, name) for name in EXCHANGE_LABELS}
+
+
+def forget_adapter(user_id, exchange=None):
+    for k in [k for k in _cache if k[0] == user_id and (exchange is None or k[1] == exchange)]:
+        _cache.pop(k, None)

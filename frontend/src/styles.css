@@ -238,6 +238,7 @@ a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
 .pf-tip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; } .pf-tip.bold { font-weight: 600; background: rgba(30,36,48,0.95); }
 .pf-tip-date { position: absolute; top: 2px; font-size: 11px; color: var(--muted); background: rgba(15,19,26,0.85); padding: 0 6px; border-radius: 4px; }
 .pf-dep-input { width: 130px; } .pf-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--line); margin-right: 3px; }
+.mon-auto-wrap { display: contents; } .mon-auto-extra { grid-column: 1 / -1; margin-left: 0; } .mon-exover { grid-column: 1 / -1; font-size: 12px; } .mon-exover > summary { cursor: pointer; margin-bottom: 4px; } .mon-exover .mon-sizing { margin: 2px 0 4px 14px; }
 .mon-sizewarn { grid-column: 1 / -1; } .mon-base select { padding: 1px 4px; font-size: 12px; }
 .mon-sizing { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; } .mon-num { width: 56px; padding: 1px 4px; font-size: 12px; text-align: right; }
 .pf-table { max-height: 520px; } .pf-table td, .pf-table th { white-space: nowrap; } .mon-num.changed { border-color: var(--accent); color: var(--accent); } .mini-btn { padding: 0 6px; font-size: 11px; margin-left: 2px; }

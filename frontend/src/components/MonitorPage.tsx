@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, closeTestPosition, panicStop, setCatchup, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto } from '../api';
+import { autoOffAll, closeTestPosition, panicStop, setCatchup, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto, setExchangeOver } from '../api';
 import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
-import type { AutoLogItem, ExchangeAccount, ExchangeInfo, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
+import type { AutoLogItem, ExchangeAccount, ExchangeInfo, ExchangeName, ExchangeOverrides, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
 import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
   open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту',
-  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён',
+  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
 
@@ -280,6 +280,66 @@ function SizingEditor({ e, exchange, onSaved, onError }: { e: MonitorEntry; exch
   );
 }
 
+const EX_NAMES: ExchangeName[] = ['hyperliquid', 'bybit'];
+const EX_LABEL: Record<ExchangeName, string> = { hyperliquid: 'Hyperliquid', bybit: 'Bybit' };
+const OVER_NUM = ['trade_pct', 'leverage', 'pyramid_pct', 'pyramid_leverage', 'entry_limit_pct', 'entry_limit_ttl_h'] as const;
+
+/** Свои настройки конфига для одной биржи (поверх параметров конфига): доля и плечо входа / добора, вход лимитным ордером. Пусто — как в конфиге (значение конфига показано серым). */
+function ExchangeOverEditor({ e, name, onSaved, onError }: { e: MonitorEntry; name: ExchangeName; onSaved: () => void; onError: (m: string) => void }) {
+  const st = e.settings;
+  const over: ExchangeOverrides = e.ex?.[name]?.over ?? {};
+  const [f, setF] = useState<Record<string, string>>({});
+  const key = JSON.stringify(over);
+  useEffect(() => {
+    const o = JSON.parse(key) as ExchangeOverrides;
+    setF({ ...Object.fromEntries(OVER_NUM.map((k) => [k, o[k] != null ? String(o[k]) : ''])), entry_limit_dir: o.entry_limit_dir ?? '' });
+  }, [key]);
+  if (!st || e.config_id == null) return null;
+  const n = (v: string) => Number(v.replace(',', '.'));
+  const patch: { [K in keyof ExchangeOverrides]?: ExchangeOverrides[K] | null } = {};
+  for (const k of OVER_NUM) {
+    const t = (f[k] ?? '').trim();
+    if (t === '' && over[k] != null) patch[k] = null;
+    else if (t !== '' && n(t) !== over[k]) patch[k] = n(t);
+  }
+  const dir = f.entry_limit_dir ?? '';
+  if (dir === '' && over.entry_limit_dir != null) patch.entry_limit_dir = null;
+  else if (dir !== '' && dir !== over.entry_limit_dir) patch.entry_limit_dir = dir as 'pullback' | 'breakout';
+  const dirty = Object.keys(patch).length > 0;
+  const own = Object.keys(over).length > 0;
+  const call = async (p: typeof patch) => {
+    try {
+      await setExchangeOver(e.config_id!, name, p);
+      onSaved();
+    } catch (x) {
+      onError(x instanceof Error ? x.message : String(x));
+    }
+  };
+  const num = (k: typeof OVER_NUM[number], ph: number | null | undefined, label: string, w?: string) => (
+    <input className="mon-num" inputMode="decimal" value={f[k] ?? ''} placeholder={ph != null ? String(ph) : ''} onChange={(ev) => setF({ ...f, [k]: ev.target.value })}
+      onKeyDown={(ev) => { if (ev.key === 'Enter' && dirty) void call(patch); }} aria-label={`${EX_LABEL[name]}: ${label}`} data-testid={`mon-ex-${name}-${w ?? k}`} />
+  );
+  const limitCfg = st.entry_limit_pct ?? 0;
+  return (
+    <div className="mon-sizing" data-testid={`mon-ex-${name}`}>
+      <b className="small">{EX_LABEL[name]}</b><Help text={HELP.ex_over} />
+      {num('trade_pct', st.trade_pct, 'доля депозита, %', 'pct')} <span className="small">% ×</span> {num('leverage', st.leverage, 'плечо', 'lev')} <span className="small">плечо</span>
+      {st.pyramid_enabled && (
+        <>
+          <span className="muted small">· добор</span> {num('pyramid_pct', st.pyramid_pct, 'доля добора, %', 'ppct')} <span className="small">% ×</span> {num('pyramid_leverage', st.pyramid_leverage ?? st.leverage, 'плечо добора', 'plev')}
+        </>
+      )}
+      <span className="muted small">· лимитный вход</span><Help text={HELP.ex_over_limit} /> {num('entry_limit_pct', limitCfg, 'вход лимиткой, % (0 — по рынку)', 'limit')} <span className="small">%</span>
+      <select value={dir} onChange={(ev) => setF({ ...f, entry_limit_dir: ev.target.value })} aria-label={`${EX_LABEL[name]}: направление лимитного входа`} data-testid={`mon-ex-${name}-dir`}>
+        <option value="">как в конфиге ({(st.entry_limit_dir ?? 'pullback') === 'breakout' ? 'по ходу' : 'на откат'})</option><option value="pullback">на откат</option><option value="breakout">по ходу</option>
+      </select>
+      <span className="small">живёт</span> {num('entry_limit_ttl_h', st.entry_limit_ttl_h ?? 4, 'жизнь ордера, часов', 'ttl')} <span className="small">ч</span>
+      <button type="button" className="ghost" disabled={!dirty} onClick={() => void call(patch)} data-testid={`mon-ex-${name}-save`}>Применить</button>
+      <button type="button" className="ghost" disabled={!own} onClick={() => void call(Object.fromEntries(Object.keys(over).map((k) => [k, null])))} data-testid={`mon-ex-${name}-reset`}>как в конфиге</button>
+    </div>
+  );
+}
+
 function CatchupEditor({ e, onSaved, onError }: { e: MonitorEntry; onSaved: () => void; onError: (m: string) => void }) {
   const cu = e.catchup;
   const [age, setAge] = useState('');
@@ -312,15 +372,21 @@ function CatchupEditor({ e, onSaved, onError }: { e: MonitorEntry; onSaved: () =
   );
 }
 
-function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause, onSaved, onError }: {
-  e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange']; account?: MonitorResponse['account'];
-  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => void; onPause: () => void; onSaved: () => void; onError: (m: string) => void;
+function Row2({ e, open, exchange, exchanges, account, accounts, onToggleOpen, onAuto, onPause, onSaved, onError }: {
+  e: MonitorEntry; open: boolean; exchange: MonitorResponse['exchange']; exchanges?: MonitorResponse['exchanges']; account?: MonitorResponse['account']; accounts?: MonitorResponse['accounts'];
+  onToggleOpen: () => void; onAuto: (patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }, exchange: ExchangeName) => void; onPause: () => void; onSaved: () => void; onError: (m: string) => void;
 }) {
   const st = statusOf(e);
   const pos = e.position;
   const stale = e.candle_ts ? (Date.now() - e.candle_ts) / 60000 : null;
   const dep = e.settings?.deposit;
-  const sizeWarn = !!(exchange.real && account?.equity && dep && dep > account.equity * 1.5 && e.auto?.open && (e.auto.base ?? 'config') === 'config');
+  const infoOf = (n: ExchangeName): ExchangeInfo | undefined => (n === 'hyperliquid' ? exchanges?.hyperliquid ?? exchange : exchanges?.[n]);
+  const accOf = (n: ExchangeName) => (n === 'hyperliquid' ? accounts?.hyperliquid ?? account : accounts?.[n]);
+  const cfgOf = (n: ExchangeName) => e.ex?.[n] ?? (n === 'hyperliquid' ? { open: e.auto?.open ?? false, manage: e.auto?.manage ?? false, base: e.auto?.base ?? 'config', over: {} } : { open: false, manage: false, base: 'config' as const, over: {} });
+  // Hyperliquid показывается всегда, остальные биржи — если счёт подключён или у конфига для неё что-то включено / настроено
+  const shown = EX_NAMES.filter((n) => n === 'hyperliquid' || infoOf(n)?.real || cfgOf(n).open || cfgOf(n).manage || Object.keys(cfgOf(n).over).length > 0);
+  const multi = shown.length > 1;
+  const pend = { ...(e.pending_entries ?? {}), ...(e.pending_entries?.hyperliquid || !e.pending_entry ? {} : { hyperliquid: e.pending_entry }) };
   return (
     <div className="mon-row" data-status={st.cls}>
       <span className={`mon-dot ${st.cls}`} title={st.text} />
@@ -329,21 +395,35 @@ function Row2({ e, open, exchange, account, onToggleOpen, onAuto, onPause, onSav
         <span className={st.cls === 'open' ? (pos?.side === 'long' ? 'pos' : 'neg') : 'muted'}>{st.text}</span>
         {pos && <> · <b className={signClass(pos.pnl_usd)}>{fmtUsd(pos.pnl_usd)}</b> <span className="muted small">{pos.pnl_pct_deposit != null ? fmtPct(pos.pnl_pct_deposit, 2) : ''} · {held(pos.hold_h)}{pos.legs_n && pos.legs_n > 1 ? ` · ног ${pos.legs_n}` : ''}</span></>}
         {pos?.danger && <span className="bad-text small" title="цена за оценочной ценой ликвидации"> ⚠ ликвидация</span>}
-        {e.pending_entry && <span className="warn-text small" data-testid="mon-pending" title={e.pending_entry.order_id ? `лимитный ордер ${e.pending_entry.order_id} на бирже` : 'бот следит за ценой и войдёт по рынку при касании уровня'}> · ⏳ ждёт вход {e.pending_entry.side === 'long' ? 'лонг' : 'шорт'} по {fmtPrice(e.pending_entry.level)}</span>}
+        {EX_NAMES.map((n) => { const pe = pend[n]; return pe ? <span key={n} className="warn-text small" data-testid="mon-pending" title={pe.order_id ? `лимитный ордер ${pe.order_id} на бирже` : 'бот следит за ценой и войдёт по рынку при касании уровня'}> · ⏳ {multi ? `${EX_LABEL[n]}: ` : ''}ждёт вход {pe.side === 'long' ? 'лонг' : 'шорт'} по {fmtPrice(pe.level)}</span> : null; })}
         {!pos && e.ready_now && e.ready_now[0] && <span className="muted small"> · {e.ready_now[0].waiting.map((w) => ({ cool: 'откат', liq: 'ликвидации', trend: 'тренд' })[w]).join(' + ')}</span>}
         {e.baseline === false && !e.paused && <span className="muted small" title="Бот ещё не обработал этот конфиг (первый расчёт идёт или бот не запущен)"> · бот ещё не посчитал</span>}
         {stale != null && stale > 20 && <span className="warn-text small"> · свечи {ago(e.candle_ts)}</span>}
       </div>
-      <span className="mon-auto" data-testid="mon-auto">
-        <label title={HELP.auto_open}><input type="checkbox" checked={e.auto?.open ?? false} disabled={e.paused} onChange={(ev) => onAuto({ open: ev.target.checked })} /> открывать<Help text={HELP.auto_open} /></label>
-        <label title={HELP.auto_manage}><input type="checkbox" checked={e.auto?.manage ?? false} disabled={e.paused} onChange={(ev) => onAuto({ manage: ev.target.checked })} /> управлять<Help text={HELP.auto_manage} /></label>
-        <label className="mon-base" title={HELP.auto_base}>размер от <select value={e.auto?.base ?? 'config'} disabled={e.paused} onChange={(ev) => onAuto({ base: ev.target.value as 'config' | 'account' })} aria-label="База размера входа" data-testid="mon-base">
-          <option value="config">депозита конфига</option><option value="account">баланса счёта</option>
-        </select><Help text={HELP.auto_base} /></label>
-        {(e.auto?.open || e.auto?.manage) && <span className={exchange.real ? 'neg small' : 'muted small'}>{exchange.real ? '● биржа' : '● симуляция'}</span>}
-      </span>
-      {sizeWarn && <div className="warn-text small mon-sizewarn" data-testid="mon-sizewarn">⚠️ Депозит конфига {fmtUsd(dep ?? 0)} намного больше капитала на бирже {fmtUsd(account!.equity ?? 0)}: объём входа считается от {fmtUsd(dep ?? 0)} и, скорее всего, не пройдёт. Выберите «размер от баланса счёта».</div>}
+      {shown.map((n) => {
+        const c = cfgOf(n), info = infoOf(n), acc = accOf(n);
+        const sfx = n === 'hyperliquid' ? '' : `-${n}`;
+        const sizeWarn = !!(info?.real && acc?.equity && dep && dep > acc.equity * 1.5 && c.open && c.base === 'config');
+        return (
+          <div key={n} className="mon-auto-wrap">
+            <span className={`mon-auto${n === 'hyperliquid' ? '' : ' mon-auto-extra'}`} data-testid={`mon-auto${sfx}`}>
+              {multi && <b className="small" title={HELP.auto_exchange}>{EX_LABEL[n]}<Help text={HELP.auto_exchange} /></b>}
+              <label title={HELP.auto_open}><input type="checkbox" checked={c.open} disabled={e.paused} onChange={(ev) => onAuto({ open: ev.target.checked }, n)} /> открывать<Help text={HELP.auto_open} /></label>
+              <label title={HELP.auto_manage}><input type="checkbox" checked={c.manage} disabled={e.paused} onChange={(ev) => onAuto({ manage: ev.target.checked }, n)} /> управлять<Help text={HELP.auto_manage} /></label>
+              <label className="mon-base" title={HELP.auto_base}>размер от <select value={c.base} disabled={e.paused} onChange={(ev) => onAuto({ base: ev.target.value as 'config' | 'account' }, n)} aria-label={`База размера входа${multi ? `, ${EX_LABEL[n]}` : ''}`} data-testid={`mon-base${sfx}`}>
+                <option value="config">депозита конфига</option><option value="account">баланса счёта</option>
+              </select><Help text={HELP.auto_base} /></label>
+              {(c.open || c.manage) && <span className={info?.real ? 'neg small' : 'muted small'}>{info?.real ? '● биржа' : '● симуляция'}</span>}
+            </span>
+            {sizeWarn && <div className="warn-text small mon-sizewarn" data-testid={`mon-sizewarn${sfx}`}>⚠️ {multi ? `${EX_LABEL[n]}: д` : 'Д'}епозит конфига {fmtUsd(dep ?? 0)} намного больше капитала на бирже {fmtUsd(acc!.equity ?? 0)}: объём входа считается от {fmtUsd(dep ?? 0)} и, скорее всего, не пройдёт. Выберите «размер от баланса счёта».</div>}
+          </div>
+        );
+      })}
       <SizingEditor e={e} exchange={exchange} onSaved={onSaved} onError={onError} />
+      <details className="mon-exover" data-testid="mon-exover" open={shown.some((n) => Object.keys(cfgOf(n).over).length > 0)}>
+        <summary className="small">Свои настройки по биржам (размер и вход лимиткой){multi || Object.keys(cfgOf('hyperliquid').over).length ? '' : ' — по умолчанию как в конфиге'}<Help text={HELP.ex_over} /></summary>
+        {shown.map((n) => <ExchangeOverEditor key={n} e={e} name={n} onSaved={onSaved} onError={onError} />)}
+      </details>
       <CatchupEditor e={e} onSaved={onSaved} onError={onError} />
       <span className="mon-btns">
         <button type="button" className="ghost" onClick={onPause} data-testid="mon-pause">{e.paused ? '▶ Возобновить' : '⏸ Пауза'}</button>
@@ -373,50 +453,59 @@ function Journal({ log }: { log: AutoLogItem[] }) {
   );
 }
 
-const exchangeLabel = (x: ExchangeInfo) => (x.name === 'hyperliquid' ? `Hyperliquid (${x.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть'})` : x.name);
+const exchangeLabel = (x: ExchangeInfo) => {
+  if (x.name !== 'hyperliquid' && x.name !== 'bybit') return x.name;
+  const net = x.net === 'demo' ? 'демо-торговля' : x.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть';
+  return `${x.name === 'bybit' ? 'Bybit' : 'Hyperliquid'} (${net})`;
+};
 
-/** Что именно сейчас происходит с ордерами: симуляция, тестовая сеть или боевая. */
-function ExchangeBanner({ info }: { info?: ExchangeInfo }) {
-  const live = info?.real && !info.testnet;
+/** Что именно сейчас происходит с ордерами: симуляция, тестовая сеть или боевая (по каждой подключённой бирже). */
+function ExchangeBanner({ info, all }: { info?: ExchangeInfo; all?: MonitorResponse['exchanges'] }) {
+  const reals = (all ? EX_NAMES.map((n) => all[n]).filter((x): x is ExchangeInfo => !!x?.real) : info?.real ? [info] : []);
+  const live = reals.some((x) => !x.testnet);
   return (
     <div className={`banner ${live ? 'error' : 'warn'}`} data-testid="mon-banner">
       <span>
-        {info?.real ? (
-          <>Торговля: <b>{exchangeLabel(info)}</b> — автомод {live ? <b>отправляет реальные ордера на настоящие деньги</b> : 'отправляет ордера в тестовую сеть'}. </>
+        {reals.length > 0 ? (
+          <>Торговля: <b>{reals.map(exchangeLabel).join(' · ')}</b> — автомод {live ? <b>отправляет реальные ордера на настоящие деньги</b> : 'отправляет ордера в тестовую сеть'}. </>
         ) : (
-          <>Биржа для торговли не подключена — автомод работает как <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются; чтобы торговать, подключите счёт Hyperliquid в Telegram-боте: /hl). </>
+          <>Биржа для торговли не подключена — автомод работает как <b>симуляция</b> (действия пишутся в журнал, ордера не отправляются; чтобы торговать, подключите счёт в Telegram-боте: /hl — Hyperliquid, /bybit — Bybit). </>
         )}
-        Позиции в списке ниже — расчёт стратегий по свечам и отчётам Binance, а не позиции на бирже{info?.real ? ': реальные позиции биржи — в отдельном блоке' : ''}.
+        Позиции в списке ниже — расчёт стратегий по свечам и отчётам Binance, а не позиции на бирже{reals.length > 0 ? ': реальные позиции бирж — в отдельных блоках' : ''}.
       </span>
     </div>
   );
 }
 
 /** Подключённый счёт на бирже: подключение, баланс, позиции, открытые ордера, последние исполнения (реальные данные биржи, не расчёт стратегий). */
-function ExchangeBlock({ state, error, onDisconnect }: { state: ExchangeAccount | null; error: string | null; onDisconnect: () => void }) {
-  if (!state) return error ? <section className="mon-card"><div className="bad-text small">Биржа: {error}</div></section> : null;
+function ExchangeBlock({ name = 'hyperliquid', state, error, onDisconnect }: { name?: ExchangeName; state: ExchangeAccount | null; error: string | null; onDisconnect: () => void }) {
+  const bybit = name === 'bybit';
+  const tid = bybit ? 'mon-exchange-bybit' : 'mon-exchange';
+  if (!state) return error ? <section className="mon-card"><div className="bad-text small">{EX_LABEL[name]}: {error}</div></section> : null;
   if (!state.connected) {
     return (
-      <section className="mon-card" data-testid="mon-exchange">
-        <div className="mon-head"><b>Биржа</b><Help text={HELP.exchange_block} /></div>
-        <div className="muted small">Счёт Hyperliquid не подключён — автомод работает как симуляция. Подключить: в Telegram-боте команда <b>/hl</b> (адрес кошелька и ключ API-кошелька присылаются боту, который проверит их, сохранит зашифрованными и удалит ваши сообщения). Работает только после привязки Telegram к этому аккаунту.</div>
+      <section className="mon-card" data-testid={tid}>
+        <div className="mon-head"><b>{bybit ? 'Биржа: Bybit (USDT-фьючерсы)' : 'Биржа'}</b><Help text={bybit ? HELP.bybit_block : HELP.exchange_block} /></div>
+        {bybit
+          ? <div className="muted small">Счёт Bybit не подключён — автомод на Bybit работает как симуляция. Подключить: в Telegram-боте команда <b>/bybit</b> (API-ключ и секрет присылаются боту, который проверит права ключа — торговля контрактами да, вывод средств нет, — сохранит секрет зашифрованным и удалит ваши сообщения). Только USDT-фьючерсы. Работает только после привязки Telegram к этому аккаунту.</div>
+          : <div className="muted small">Счёт Hyperliquid не подключён — автомод работает как симуляция. Подключить: в Telegram-боте команда <b>/hl</b> (адрес кошелька и ключ API-кошелька присылаются боту, который проверит их, сохранит зашифрованными и удалит ваши сообщения). Работает только после привязки Telegram к этому аккаунту.</div>}
       </section>
     );
   }
-  const net = state.exchange.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть';
+  const net = state.exchange.net === 'demo' ? 'демо-торговля' : state.exchange.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть';
   const acc = state.account;
   return (
-    <section className="mon-card" data-testid="mon-exchange">
+    <section className="mon-card" data-testid={tid}>
       <div className="mon-head">
-        <b>Биржа: {exchangeLabel(state.exchange)}</b><Help text={HELP.exchange_block} />
-        <span className="muted small"> · кошелёк {state.wallet} · API-кошелёк {state.agent ?? '–'} · {net} · проверен {state.verified ? fmtTs(state.verified * 1000) : '–'}</span>
+        <b>Биржа: {exchangeLabel(state.exchange)}</b><Help text={bybit ? HELP.bybit_block : HELP.exchange_block} />
+        <span className="muted small"> · {bybit ? `API-ключ ${state.wallet}` : `кошелёк ${state.wallet} · API-кошелёк ${state.agent ?? '–'}`} · {net} · проверен {state.verified ? fmtTs(state.verified * 1000) : '–'}</span>
         <span className="mon-spacer" />
-        <button type="button" className="ghost bad-text" onClick={onDisconnect} data-testid="exchange-disconnect">Отключить счёт</button>
+        <button type="button" className="ghost bad-text" onClick={onDisconnect} data-testid={bybit ? 'exchange-disconnect-bybit' : 'exchange-disconnect'}>Отключить счёт</button>
       </div>
       {state.error && <div className="bad-text small">Биржа: {state.error}</div>}
       {!state.error && (
         <>
-          <div className="mon-grid" data-testid="exchange-account">
+          <div className="mon-grid" data-testid={bybit ? 'exchange-account-bybit' : 'exchange-account'}>
             <Row label="Капитал">{acc.equity != null ? fmtUsd(Number(acc.equity), 2) : '–'}</Row>
             <Row label="Свободно">{acc.free != null ? fmtUsd(Number(acc.free), 2) : '–'}</Row>
             <Row label="В марже">{acc.used != null ? fmtUsd(Number(acc.used), 2) : '–'}</Row>
@@ -463,9 +552,10 @@ export default function MonitorPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testSide, setTestSide] = useState<'long' | 'short'>('long');
+  const [testEx, setTestEx] = useState<ExchangeName>('hyperliquid');
   const [openIds, setOpenIds] = useState<Set<number>>(new Set());
-  const [ex, setEx] = useState<ExchangeAccount | null>(null);
-  const [exErr, setExErr] = useState<string | null>(null);
+  const [ex, setEx] = useState<Record<ExchangeName, ExchangeAccount | null>>({ hyperliquid: null, bybit: null });
+  const [exErr, setExErr] = useState<Record<ExchangeName, string | null>>({ hyperliquid: null, bybit: null });
   const alive = useRef(true);
 
   const load = useCallback(async () => {
@@ -476,7 +566,9 @@ export default function MonitorPage() {
         setErr(null);
       }
       // подключённый счёт на бирже (реальные позиции, баланс, ордера, исполнения); сбой биржи не мешает остальной странице
-      getExchangeAccount().then((x) => alive.current && (setEx(x), setExErr(null))).catch((e) => alive.current && setExErr(e instanceof Error ? e.message : String(e)));
+      for (const n of EX_NAMES) {
+        getExchangeAccount(n).then((x) => alive.current && (setEx((s) => ({ ...s, [n]: x })), setExErr((s) => ({ ...s, [n]: null })))).catch((e) => alive.current && setExErr((s) => ({ ...s, [n]: e instanceof Error ? e.message : String(e) })));
+      }
     } catch (e) {
       if (alive.current) setErr(e instanceof Error ? e.message : String(e));
     }
@@ -499,13 +591,15 @@ export default function MonitorPage() {
     return n;
   });
 
-  const auto = async (id: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }) => {
+  const infoOf = (n: ExchangeName): ExchangeInfo | undefined => data?.exchanges?.[n] ?? (n === 'hyperliquid' ? data?.exchange : undefined);
+  const auto = async (id: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }, exchange: ExchangeName = 'hyperliquid') => {
     const turningOn = patch.open === true || patch.manage === true;
-    if (turningOn && !window.confirm(data?.exchange.real
-      ? `Включить автомод? Бот будет сам отправлять ордера на ${exchangeLabel(data.exchange)} по этому конфигу.`
-      : 'Включить автомод? Биржа для торговли не подключена — действия будут только записываться в журнал (симуляция).')) return;
+    const info = infoOf(exchange);
+    if (turningOn && !window.confirm(info?.real
+      ? `Включить автомод? Бот будет сам отправлять ордера на ${exchangeLabel(info)} по этому конфигу.`
+      : `Включить автомод? Счёт ${EX_LABEL[exchange]} не подключён — действия будут только записываться в журнал (симуляция).`)) return;
     try {
-      await setAuto(id, patch);
+      await setAuto(id, patch, exchange);
       await load();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -531,7 +625,8 @@ export default function MonitorPage() {
   };
 
   const panic = async () => {
-    if (!window.confirm(`🚨 СТОП ВСЁ\nАвтомод выключится у ВСЕХ конфигов, все позиции ${data?.exchange.real ? `на ${exchangeLabel(data.exchange)}` : '(счёт не подключён — закрывать нечего)'} закроются по рынку, все ордера (стопы, тейки) снимутся. Продолжить?`)) return;
+    const reals = EX_NAMES.map((n) => infoOf(n)).filter((x): x is ExchangeInfo => !!x?.real);
+    if (!window.confirm(`🚨 СТОП ВСЁ\nАвтомод выключится у ВСЕХ конфигов на всех биржах, все позиции ${reals.length ? `на ${reals.map(exchangeLabel).join(' и ')}` : '(счёт не подключён — закрывать нечего)'} закроются по рынку, все ордера (стопы, тейки) снимутся. Продолжить?`)) return;
     try {
       const r = await panicStop();
       setMsg(`СТОП ВСЁ: автомод выключен у ${r.auto_off}, закрыто позиций ${r.closed.length}, снято ордеров ${r.cancelled}${r.errors.length ? `. ОШИБКИ: ${r.errors.join('; ')} — проверьте счёт на бирже вручную` : ''}`);
@@ -542,13 +637,14 @@ export default function MonitorPage() {
   };
 
   const testPos = async () => {
-    const mn = data?.exchange.min_notional ?? 0;
+    const info = infoOf(testEx);
+    const mn = info?.min_notional ?? 0;
     const lev = mn ? Math.ceil(mn * 1.1) : 1;
-    if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): маржа 1 $ × ${lev}× = объём ${lev} $?${data?.exchange.real ? ` Это реальный ордер на ${exchangeLabel(data.exchange)}.` : ' Биржа не подключена — будет симуляция.'}`)) return;
+    if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): маржа 1 $ × ${lev}× = объём ${lev} $?${info?.real ? ` Это реальный ордер на ${exchangeLabel(info)}.` : ` Счёт ${EX_LABEL[testEx]} не подключён — будет симуляция.`}`)) return;
     setBusy(true);
     setMsg(null);
     try {
-      const r = await openTestPosition(testSide);
+      const r = await openTestPosition(testSide, testEx);
       setMsg(r.status === 'dry_run' ? 'Симуляция: ордер не отправлялся (биржа не подключена). Запись добавлена в журнал.' : `Открыта: маржа ${r.margin} $ × ${r.leverage}× = объём ${r.notional} $. Закрыть — кнопкой «Закрыть тестовую».`);
     } catch (e) {
       setMsg(`Не удалось: ${e instanceof Error ? e.message : String(e)}`);
@@ -558,11 +654,11 @@ export default function MonitorPage() {
     }
   };
 
-  const disconnect = async () => {
-    if (!window.confirm('Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод выключится у всех конфигов. Открытые на бирже позиции это не закрывает. Подключить заново можно через бота: /hl.')) return;
+  const disconnect = async (n: ExchangeName) => {
+    if (!window.confirm(`Отключить счёт ${EX_LABEL[n]}? Сохранённый ключ будет удалён, автомод на ${EX_LABEL[n]} выключится у всех конфигов. Открытые на бирже позиции это не закрывает. Подключить заново можно через бота: ${n === 'bybit' ? '/bybit' : '/hl'}.`)) return;
     try {
-      await disconnectExchange();
-      setMsg('Счёт отключён, автомод выключен.');
+      await disconnectExchange(n);
+      setMsg(`Счёт ${EX_LABEL[n]} отключён, автомод на нём выключен.`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
@@ -573,7 +669,7 @@ export default function MonitorPage() {
     if (!window.confirm('Закрыть позицию по BTC на бирже целиком (рыночным ордером) и снять висящие ордера?')) return;
     setBusy(true);
     try {
-      const r = await closeTestPosition();
+      const r = await closeTestPosition(testEx);
       setMsg(r.status === 'dry_run' ? 'Симуляция: закрывать нечего.' : r.status === 'skipped' ? 'На бирже нет позиции по BTC — закрывать нечего.' : 'Позиция по BTC закрыта.');
     } catch (e) {
       setMsg(`Не удалось: ${e instanceof Error ? e.message : String(e)}`);
@@ -584,7 +680,7 @@ export default function MonitorPage() {
   };
 
   const entries = data?.entries ?? [];
-  const anyAuto = entries.some((e) => e.auto && (e.auto.open || e.auto.manage));
+  const anyAuto = entries.some((e) => (e.ex ? Object.values(e.ex).some((c) => c.open || c.manage) : e.auto && (e.auto.open || e.auto.manage)));
   const live = entries.filter((e) => e.position && !e.paused);                 // позиции конфигов на паузе в сводку не входят
   const open = live.length;
   const total = live.reduce((a, e) => a + (e.position?.pnl_usd ?? 0), 0);
@@ -599,25 +695,29 @@ export default function MonitorPage() {
         <button type="button" className="danger" data-testid="panic" onClick={() => void panic()}>🚨 СТОП ВСЁ</button><Help text={HELP.panic} />
       </div>
       <BotStatus bot={data?.bot} anyAuto={anyAuto} />
-      <ExchangeBanner info={data?.exchange} />
+      <ExchangeBanner info={data?.exchange} all={data?.exchanges} />
       {err && <div className="banner error">{err}</div>}
       <div className="mon-test">
         <b>Тестовая позиция $1 по BTC</b><Help text={HELP.test_position} />
+        <select value={testEx} onChange={(e) => setTestEx(e.target.value as ExchangeName)} aria-label="Биржа тестовой позиции" data-testid="test-exchange">
+          <option value="hyperliquid">Hyperliquid</option><option value="bybit">Bybit</option>
+        </select>
         <select value={testSide} onChange={(e) => setTestSide(e.target.value as 'long' | 'short')} aria-label="Сторона тестовой позиции">
           <option value="long">лонг</option><option value="short">шорт</option>
         </select>
         <button type="button" className="ghost" disabled={busy} onClick={() => void testPos()}>{busy ? 'Открываю…' : 'Открыть'}</button>
-        {data?.exchange.real && <button type="button" className="ghost" disabled={busy} onClick={() => void closeTest()}>Закрыть тестовую</button>}
+        {infoOf(testEx)?.real && <button type="button" className="ghost" disabled={busy} onClick={() => void closeTest()}>Закрыть тестовую</button>}
         {msg && <span className="muted small" data-testid="mon-msg"> {msg}</span>}
       </div>
-      <ExchangeBlock state={ex} error={exErr} onDisconnect={() => void disconnect()} />
+      <ExchangeBlock name="hyperliquid" state={ex.hyperliquid} error={exErr.hyperliquid} onDisconnect={() => void disconnect('hyperliquid')} />
+      <ExchangeBlock name="bybit" state={ex.bybit} error={exErr.bybit} onDisconnect={() => void disconnect('bybit')} />
       {!data && !err && <div className="empty">Загрузка…</div>}
       {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Отправьте конфиг боту в Telegram (файлом или текстом) — он появится здесь.</div>}
       <div className="mon-list">
         {entries.map((e) => (
           <section key={e.config_id ?? e.name} className="mon-card" data-testid="mon-card" data-name={e.title ?? e.name}>
-            <Row2 e={e} open={e.config_id != null && openIds.has(e.config_id)} exchange={data!.exchange} account={data!.account}
-              onToggleOpen={() => e.config_id != null && toggleOpen(e.config_id)} onAuto={(p) => e.config_id != null && void auto(e.config_id, p)} onPause={() => void pause(e)} onSaved={() => void load()} onError={(m) => setErr(m)} />
+            <Row2 e={e} open={e.config_id != null && openIds.has(e.config_id)} exchange={data!.exchange} exchanges={data!.exchanges} account={data!.account} accounts={data!.accounts}
+              onToggleOpen={() => e.config_id != null && toggleOpen(e.config_id)} onAuto={(p, x) => e.config_id != null && void auto(e.config_id, p, x)} onPause={() => void pause(e)} onSaved={() => void load()} onError={(m) => setErr(m)} />
             {e.error && <div className="bad-text small">Не удалось посчитать: {e.error}</div>}
             {e.config_id != null && openIds.has(e.config_id) && <Details id={e.config_id} exchange={data!.exchange} onChanged={() => void load()} />}
           </section>
