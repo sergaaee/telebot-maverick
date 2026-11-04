@@ -322,7 +322,7 @@ def _trade_out(n, t, rep, at=None):
         "local": r[1] if r else None, "scalp": r[2] if r else None, "global": r[7] if r and len(r) > 7 else None,
         "liq_long_k": r[3] if r and len(r) > 3 else None, "liq_short_k": r[4] if r and len(r) > 4 else None,
     }
-    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total", "funding_pct", "funding_usd", "limit"):
+    for k in ("symbol", "coin", "top_value", "partial", "window_end", "leg", "group", "pyramid", "avg", "adds_n", "adds", "entry_first", "w_total", "funding_pct", "funding_usd", "limit", "sl_market"):
         if k in t:
             out[k] = t[k]
     return out
@@ -520,11 +520,12 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est)     # все подтверждённые сигналы (с пропущенными)
     events = [e for e in confirmed if allow(*e)] if allow else confirmed
     levels = backtest.normalize_tps(tps)
-    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm) if eff.get("sl_hold_strong") else None
+    sl_market = bool(eff.get("sl_market"))
+    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm) if (eff.get("sl_hold_strong") or sl_market) else None
     entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0} if eff.get("entry_limit_pct") else None
     lim_ttl_ms = int(entry_limit["ttl_h"] * 3.6e6) if entry_limit else 0
     run_kw = dict(sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"], cooldown_h=extra.get("cooldown_h", 0.0), be_after_tp1=bool(eff.get("be_after_tp1")), pyramid=pyramid,
-                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=hold, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week, entry_limit=entry_limit)
+                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=None if sl_market else hold, mstop=hold if sl_market else None, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week, entry_limit=entry_limit)
     kept, kept_skipped, resume, from_ts = [], [], None, None
     if snap and snap.get("sim"):
         kept, kept_skipped, resume, from_ts = _closed_prefix(snap["sim"], lim_ttl_ms)
@@ -602,7 +603,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
 
     rep = {s[0]: s for s in sigs}
-    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm) if eff.get("sl_hold_strong") else None
+    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
     at = _metrics_at([s[0] for s in sigs_all], sigs_all, hold_chk)
     out_trades = [_trade_out(i, t, rep, at) for i, t in enumerate(trades, 1)]
 

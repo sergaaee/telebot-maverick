@@ -84,6 +84,8 @@ export interface Params {
   signal_gap_h: number;
   /** стоп-лосс не действует, пока метрики удовлетворяют условию входа */
   sl_hold_strong: boolean;
+  /** стоп-лосс по маркету: стоп-ордера нет; цена дошла до стопа — ждём следующий отчёт, и если метрики ниже порогов входа, а цена всё ещё за стопом, закрываем по рынку */
+  sl_market: boolean;
   /** топ-коины: торговля монетой из блока Top Coin отчёта по сигналу основной стратегии */
   top_enabled: boolean;
   top_side: Side;
@@ -155,6 +157,8 @@ export interface Trade {
   n: number;
   /** вход лимитным ордером: уровень, цена сигнала, сторона и сколько часов ждали исполнения */
   limit?: { level: number; ref: number; dir: 'pullback' | 'breakout'; wait_h: number };
+  /** сделка велась со стоп-лоссом по маркету: SL — это закрытие по рынку на отчёте, а не по цене стопа */
+  sl_market?: boolean;
   /** фандинг сделки: % от объёма (+ расход) и в долларах */
   funding_pct?: number;
   funding_usd?: number;
@@ -499,6 +503,7 @@ export interface MonitorLeg {
   tps: { n: number; price: number; hit: boolean; share: number }[];
   stop: number;
   stop_kind: 'SL' | 'БУ';
+  stop_market?: boolean;                   // «стоп-лосс по маркету»: стоп-ордера нет, позицию закрывает бот на отчёте ниже порогов, если цена за стопом
   stop_held?: boolean;                     // «не ставить SL, пока метрики сильны»: стопа сейчас нет (ни в расчёте, ни на бирже)
   tp_hits: number;
   liq_price: number | null;
