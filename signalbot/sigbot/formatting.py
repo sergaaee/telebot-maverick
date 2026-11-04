@@ -122,6 +122,8 @@ def config_summary(cfg, result=None):
         bits.append(f"пауза между сигналами {p['signal_gap_h']:g} ч")
     if p.get("sl_hold_strong"):
         bits.append("SL после остывания метрик")
+    if p.get("sl_market"):
+        bits.append("SL по маркету (решает отчёт)")
     if p.get("weekdays_only"):
         bits.append("только будни (пн Токио → пт Нью-Йорк)")
     if p.get("liquidation_sim"):

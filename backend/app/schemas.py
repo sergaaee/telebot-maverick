@@ -64,6 +64,7 @@ class BacktestParams(BaseModel):
     friday_close_before_min: Optional[float] = Field(None, ge=0, le=720, description="закрыть позицию в пятницу за столько минут до закрытия Нью-Йорка")
     signal_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между открытиями позиций")
     sl_hold_strong: Optional[bool] = None
+    sl_market: Optional[bool] = Field(None, description="стоп-лосс по маркету: стоп-ордера нет; цена дошла до стопа — ждём следующий отчёт, и если метрики ниже порогов входа, а цена всё ещё за стопом, закрываем по рынку")
     # торговля только по тренду (EMA на таймфрейме trend_tf)
     trend_enabled: Optional[bool] = None
     trend_emas: Optional[list[Literal[20, 50, 100, 200]]] = Field(None, min_length=1, max_length=4)

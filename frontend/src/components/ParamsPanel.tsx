@@ -381,7 +381,12 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
           <input type="checkbox" checked={p.sl_hold_strong} onChange={(e) => set('sl_hold_strong', e.target.checked)} />
           <Label text="не ставить SL, пока метрики сильны" help="sl_hold_strong" />
         </label>
-        {p.sl_hold_strong && <div className="src-info warn-text">пока метрики выше порогов входа, убыток по позиции не ограничен</div>}
+        {p.sl_hold_strong && !p.sl_market && <div className="src-info warn-text">пока метрики выше порогов входа, убыток по позиции не ограничен</div>}
+        <label className="field check" data-testid="sl-market">
+          <input type="checkbox" checked={p.sl_market} onChange={(e) => set('sl_market', e.target.checked)} />
+          <Label text="стоп-лосс по маркету (решает отчёт)" help="sl_market" />
+        </label>
+        {p.sl_market && <div className="src-info warn-text">стоп-ордера нет: между отчётами убыток по позиции не ограничен{p.sl_hold_strong ? '; «не ставить SL, пока метрики сильны» не нужна — правило отчёта её включает' : ''}</div>}
       </Section>
 
       <Section title="Пирамидинг и паузы" help="groupPyramid" open={p.pyramid_enabled || p.signal_gap_h > 0}>

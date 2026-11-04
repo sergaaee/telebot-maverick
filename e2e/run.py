@@ -560,12 +560,21 @@ def scenario(pg, base, state_url):
     hold_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({sl_hold_strong: true})}).then(r => r.json())""")
     sl_fills = [f for t in hold_api["trades"] for f in t["fills"] if f["label"] == "SL"]
     check("API: при «не ставить SL…» исполнения по SL происходят только вне зоны входа (флаг strong = false)", sl_fills and all(f["metrics"]["strong"] is False for f in sl_fills), f"SL {len(sl_fills)}, strong: {sum(1 for f in sl_fills if f['metrics']['strong'])}")
+    mk_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({sl_market: true})}).then(r => r.json())""")
+    mk_sl = [f for t in mk_api["trades"] for f in t["fills"] if f["label"] == "SL"]
+    check("API: «стоп-лосс по маркету»: выходы по SL только на отчёте с метриками ниже порогов, у сделок отметка sl_market, для бота есть hold_now",
+          all(f["metrics"]["strong"] is False for f in mk_sl) and mk_api["hold_now"] is not None and all(t.get("sl_market") for t in mk_api["trades"]) and len(mk_api["trades"]) > 0, f"SL {len(mk_sl)}, сильных среди них {sum(1 for f in mk_sl if f['metrics']['strong'] is not False)}, без sl_market {sum(1 for t in mk_api['trades'] if not t.get('sl_market'))}, из {len(mk_api['trades'])}")
+    sm_box = pg.get_by_test_id("sl-market")
+    check("в параметрах есть «стоп-лосс по маркету» с подсказкой «?», по умолчанию выключен", sm_box.count() == 1 and sm_box.locator(".help").count() == 1 and not sm_box.locator("input").is_checked())
+    sm_box.locator("input").click(); pg.wait_for_timeout(300)
+    check("при включении появляется предупреждение про убыток между отчётами", "между отчётами" in pg.locator(".src-info.warn-text").last.inner_text())
+    sm_box.locator("input").click(); pg.wait_for_timeout(300)
     # конфиг: новые поля уходят в файл; старый файл без них ВЫКЛЮЧАЕТ возможности
     with pg.expect_download() as dl2:
         pg.get_by_role("button", name="Скачать конфиг").click()
     cfg2 = _json.loads(Path(dl2.value.path()).read_text(encoding="utf-8"))
-    check("в скачанном конфиге есть новые поля", cfg2["params"]["pyramid_enabled"] is True and cfg2["params"]["pyramid_max"] == 2 and cfg2["params"]["sl_hold_strong"] is True)
-    for k in ("pyramid_enabled", "pyramid_avg", "pyramid_max", "pyramid_pct", "pyramid_gap_h", "signal_gap_h", "sl_hold_strong"):
+    check("в скачанном конфиге есть новые поля", cfg2["params"]["pyramid_enabled"] is True and cfg2["params"]["pyramid_max"] == 2 and cfg2["params"]["sl_hold_strong"] is True and cfg2["params"]["sl_market"] is False)
+    for k in ("pyramid_enabled", "pyramid_avg", "pyramid_max", "pyramid_pct", "pyramid_gap_h", "signal_gap_h", "sl_hold_strong", "sl_market"):
         cfg2["params"].pop(k)
     pg.get_by_role("button", name="Загрузить…").click()
     pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg2))
