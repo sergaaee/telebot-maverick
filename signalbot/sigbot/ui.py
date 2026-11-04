@@ -18,7 +18,7 @@ from .transport import TelegramError
 log = logging.getLogger("signalbot")
 LIVE_TTL = 30 * 60
 HIST_N = 10
-LIVE_SCREENS = ("m", "c", "v", "x", "xb", "cx")                      # подтверждения и тестовая позиция не перерисовываются сами
+LIVE_SCREENS = ("m", "c", "v", "x", "xb", "xu", "cx")                      # подтверждения и тестовая позиция не перерисовываются сами
 MAX_BUTTONS = 24
 
 
@@ -51,9 +51,13 @@ def _state(e):
     return "позиции нет"
 
 
-EXC = {"h": "hyperliquid", "b": "bybit"}
+EXC = {"h": "hyperliquid", "b": "bybit", "u": "upscale"}
 EXC_CODE = {v: k for k, v in EXC.items()}
-EXC_LABEL = {"hyperliquid": "Hyperliquid", "bybit": "Bybit"}
+EXC_LABEL = {"hyperliquid": "Hyperliquid", "bybit": "Bybit", "upscale": "Upscale"}
+UP_TYPES = {"demo": "демо-счёт", "real": "платный счёт (челлендж / фондированный)", "tournament": "турнирный счёт"}
+EX_ORDER = ("hyperliquid", "bybit", "upscale")
+EX_SCREEN = {"hyperliquid": "x", "bybit": "xb", "upscale": "xu"}                  # экран биржи
+EX_DISCONNECT = {"hyperliquid": "cdx", "bybit": "cdb", "upscale": "cdu"}          # подтверждение отключения счёта
 
 
 def _exn(code):
@@ -68,10 +72,9 @@ def _auto(e):
     ex = e.get("ex")
     if not ex:
         return _onoff(e.get("auto") or {})
-    by = ex.get("bybit") or {}
-    if not (by.get("open") or by.get("manage")):
+    if not any(ex[n]["open"] or ex[n]["manage"] for n in EX_ORDER if n != "hyperliquid"):
         return _onoff(ex["hyperliquid"])                    # автомод только на Hyperliquid — как раньше
-    return " │ ".join(f"{EXC_LABEL[n]}: {_onoff(ex[n])}" for n in ("hyperliquid", "bybit") if ex[n]["open"] or ex[n]["manage"] or n == "hyperliquid")
+    return " │ ".join(f"{EXC_LABEL[n]}: {_onoff(ex[n])}" for n in EX_ORDER if ex[n]["open"] or ex[n]["manage"] or n == "hyperliquid")
 
 
 def _any_auto(e):
@@ -131,9 +134,9 @@ class MonitorUI:
     def render(self, user, screen, live=False):
         """-> (тело, клавиатура). Тело без строки времени: по нему решаем, менять ли сообщение."""
         kind, *a = screen.split(":")
-        fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange, "xb": self._s_exchange_bybit, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
+        fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange, "xb": self._s_exchange_bybit, "xu": self._s_exchange_upscale, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
               "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "sz": self._s_sizing, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect,
-              "cx": self._s_exsettings, "cby": self._s_confirm_bybit_live, "cdb": self._s_confirm_disconnect_bybit}.get(kind)
+              "cx": self._s_exsettings, "cby": self._s_confirm_bybit_live, "cdb": self._s_confirm_disconnect_bybit, "cdu": self._s_confirm_disconnect_upscale, "cup": self._s_confirm_upscale_account}.get(kind)
         if fn is None:
             return self._s_list(user, live)
         return fn(user, *a, live=live)
@@ -178,7 +181,7 @@ class MonitorUI:
         if pair:
             kb.append(pair)
         kb.append([("🔄 Обновить", "m"), self._live_btn("m", live)])
-        kb.append([("🏦 Hyperliquid", "x"), ("🏦 Bybit", "xb")])
+        kb.append([("🏦 Hyperliquid", "x"), ("🏦 Bybit", "xb"), ("🏦 Upscale", "xu")])
         kb.append([("🧪 Тест $1", "t")])
         kb.append([("⛔ Автомод выкл. везде", "coff"), ("🚨 СТОП ВСЁ", "cpn")])
         return body, kb
@@ -227,7 +230,7 @@ class MonitorUI:
             lines.append(f"План: SL {st['sl_pct']:g}% · TP " + " / ".join(f"{t['pct']:g}%×{t['share']:g}" for t in st["tps"]) + (" · БУ после TP1" if st["be_after_tp1"] else "")
                          + f" · плечо {st['leverage']:g}× · {st['trade_pct']:g}% депозита")
         ads = self._ads(user)
-        shown = [n for n in ("hyperliquid", "bybit") if self._shown(c, n, ads[n].real)]
+        shown = [n for n in EX_ORDER if self._shown(c, n, ads[n].real)]
         multi = len(shown) > 1
         for n in shown:
             a, ad = c["ex"][n], ads[n]
@@ -316,29 +319,38 @@ class MonitorUI:
         info = manage.account_info(self.db, ad, user["id"], exn)
         d = info["exchange"]
         label = EXC_LABEL[exn]
-        if exn == "bybit":
-            home, other, other_label = "xb", "x", "Hyperliquid"
-        else:
-            home, other, other_label = "x", "xb", "Bybit"
+        home = EX_SCREEN[exn]
+        nav = [(f"🏦 {EXC_LABEL[n]}", EX_SCREEN[n]) for n in EX_ORDER if n != exn] + [("← К списку", "m")]
         if not info["connected"]:
             if exn == "bybit":
                 body = ("🏦 <b>Bybit</b> (только USDT-фьючерсы)\nСчёт Bybit не подключён — автомод на Bybit работает как симуляция (ордера не отправляются).\n"
                         "Подключение: <b>API-ключ и секрет</b> без права вывода средств вы присылаете сюда в чат; бот проверит права ключа, сохранит секрет зашифрованным и сразу удалит ваши сообщения.\n"
                         "<i>Тестовая сеть и демо-торговля — для проверки без реальных денег; сначала прогоните бота там.</i>")
-                kb = [[("🔌 Тестовая сеть", "by:t"), ("🔌 Демо-торговля", "by:d")], [("🔌 БОЕВАЯ сеть", "cby")], [(f"🏦 {other_label}", other), ("← К списку", "m")]]
+                kb = [[("🔌 Тестовая сеть", "by:t"), ("🔌 Демо-торговля", "by:d")], [("🔌 БОЕВАЯ сеть", "cby")], nav]
+            elif exn == "upscale":
+                body = ("🏦 <b>Upscale</b> (проп-трейдинг)\nСчёт Upscale не подключён — автомод на Upscale работает как симуляция (ордера не отправляются).\n"
+                        "Подключение: <b>личный API-ключ</b> (<code>usk_…</code>, создаётся в приложении Upscale; торговля по API включается у каждого счёта отдельно) вы присылаете сюда в чат; бот проверит его, "
+                        "предложит выбрать счёт, сохранит ключ зашифрованным и сразу удалит ваше сообщение. Ключом нельзя выводить средства.\n"
+                        "<i>Начните с демо-счёта: правила платного счёта (просадка) действуют и при торговле ботом — его можно провалить.</i>")
+                kb = [[("🔌 Подключить Upscale", "up")], nav]
             else:
                 body = ("🏦 <b>Hyperliquid</b>\nСчёт Hyperliquid не подключён — автомод работает как симуляция (ордера не отправляются).\n"
                         "Подключение: адрес кошелька и ключ <b>API-кошелька</b> (не основного!) вы присылаете сюда в чат; бот проверит их, сохранит зашифрованными и сразу удалит ваши сообщения.")
-                kb = [[("🔌 Подключить · тестовая сеть", "hl:t")], [("🔌 Подключить · БОЕВАЯ сеть", "chl")], [(f"🏦 {other_label}", other), ("← К списку", "m")]]
+                kb = [[("🔌 Подключить · тестовая сеть", "hl:t")], [("🔌 Подключить · БОЕВАЯ сеть", "chl")], nav]
             return body, kb
         net = _net_text(d)
-        who = f"API-ключ <code>{info['wallet']}</code>" if exn == "bybit" else f"Кошелёк <code>{info['wallet']}</code> · API-кошелёк <code>{info['agent'] or '–'}</code>"
-        lines = [f"🏦 <b>{label}</b> ({net})" + (" · USDT-фьючерсы" if exn == "bybit" else ""), who]
+        if exn == "bybit":
+            who = f"API-ключ <code>{info['wallet']}</code>"
+        elif exn == "upscale":
+            who = f"Счёт <code>{info['wallet']}</code> · {esc(UP_TYPES.get(info.get('net'), str(info.get('net') or '–')))}"
+        else:
+            who = f"Кошелёк <code>{info['wallet']}</code> · API-кошелёк <code>{info['agent'] or '–'}</code>"
+        lines = [f"🏦 <b>{label}</b> ({net})" + (" · USDT-фьючерсы" if exn == "bybit" else " · проп-трейдинг" if exn == "upscale" else ""), who]
         acc = info["account"]
         if info["error"]:
             lines.append(f"⚠️ {esc(str(info['error']))}")
         elif acc.get("equity") is not None:
-            lines.append(f"Капитал <b>{fm.num(acc.get('equity'), 2)} $</b> · свободно {fm.num(acc.get('free'), 2)} $ · в марже {fm.num(acc.get('used'), 2)} $")
+            lines.append(f"Капитал <b>{fm.num(acc.get('equity'), 2)} $</b>" + (f" · свободно {fm.num(acc.get('free'), 2)} $" if acc.get("free") is not None else "") + f" · в марже {fm.num(acc.get('used'), 2)} $")
         if not info["error"]:
             lines.append("")
             lines += ([f"{'🟢' if p['side'] == 'long' else '🔴'} {esc(str(p['symbol']))} {p['size']:g} · вход {fm.price(p['entry'])} · ликвид. {fm.price(p['liq'])} · PnL {fm.usd(p['pnl_usd'] or 0, 2)} · {p['leverage'] or '–'}×"
@@ -347,10 +359,14 @@ class MonitorUI:
                 lines.append(f"Открытых ордеров: {len(info['orders'])}")
             for f in info["fills"][:5]:
                 lines.append(f"• {fm.ts_str(int(f['ts']))[5:] if f.get('ts') else ''} {f['side']} {f['amount']:g} @ {fm.price(f['price'])}" + (f" · PnL {f['pnl']}" if f.get("pnl") not in (None, "", "0.0", "0") else ""))
-        return "\n".join(lines), [[("🔄", home), self._live_btn(home, live)], [("🔌 Отключить", "cdx" if exn == "hyperliquid" else "cdb"), ("🧪 Тест", "t" if exn == "hyperliquid" else "t:b")], [(f"🏦 {other_label}", other), ("← К списку", "m")]]
+        test = "t" if exn == "hyperliquid" else f"t:{EXC_CODE[exn]}"
+        return "\n".join(lines), [[("🔄", home), self._live_btn(home, live)], [("🔌 Отключить", EX_DISCONNECT[exn]), ("🧪 Тест", test)], nav]
 
     def _s_exchange_bybit(self, user, live=False):
         return self._s_exchange(user, live, "bybit")
+
+    def _s_exchange_upscale(self, user, live=False):
+        return self._s_exchange(user, live, "upscale")
 
     def _s_exsettings(self, user, cid, live=False):
         """Настройки конфига по биржам: автомод, база размера и собственные размер / лимитный вход каждой биржи (поверх параметров конфига)."""
@@ -361,12 +377,12 @@ class MonitorUI:
                  f"Конфиг: {p['trade_pct']:g}% × {p['leverage']:g}×" + (f" · добор {p.get('pyramid_pct') or 0:g}% × {(p.get('pyramid_leverage') or p['leverage']):g}×" if p.get("pyramid_enabled") else "")
                  + (f" · вход лимиткой {p['entry_limit_pct']:g}% ({'по ходу' if p.get('entry_limit_dir') == 'breakout' else 'на откат'}, {p.get('entry_limit_ttl_h') or 4:g} ч)" if p.get("entry_limit_pct") else " · вход по рынку"), ""]
         kb = []
-        for n in ("hyperliquid", "bybit"):
+        for n in EX_ORDER:
             a, ad, k = c["ex"][n], ads[n], EXC_CODE[n]
             lines.append(f"<b>{EXC_LABEL[n]}</b> ({'счёт подключён' if ad.real else 'не подключён — симуляция'}): {_onoff(a)}")
             lines.append(f"   размер: {fm.over_line(a['over'])}" if a["over"] else "   размер и вход — как в конфиге")
             kb.append([(f"📐 Размер · {EXC_LABEL[n]}", f"sz:{c['id']}:{k}"), (f"{'✅' if a['open'] else '⬜'} Открывать", f"a:{c['id']}:o:{k}"), (f"{'✅' if a['manage'] else '⬜'} Управлять", f"a:{c['id']}:m:{k}")])
-        lines += ["", "<i>Сигналы и правила выхода (стоп, тейки, БУ) общие — из конфига. Лимитный вход и остальное для биржи: /ex " + f"{c['id']} hl|bybit ключ=значение.</i>"]
+        lines += ["", "<i>Сигналы и правила выхода (стоп, тейки, БУ) общие — из конфига. Лимитный вход и остальное для биржи: /ex " + f"{c["id"]} hl|bybit|upscale ключ=значение.</i>"]
         kb.append([("← Карточка", f"c:{c['id']}"), ("🔄", f"cx:{c['id']}")])
         return "\n".join(lines), kb
 
@@ -374,7 +390,9 @@ class MonitorUI:
         exn = _exn(code)
         d = self._ad(user, exn).describe()
         suffix = "" if exn == "hyperliquid" else ":b"
-        if exn == "bybit":
+        if exn == "upscale":
+            size = "Маржа 1 $ (или больше — до 5 $, если нужно), плечо подбирается под минимальный ордер Upscale (по умолчанию ≈ 10 $ объёма; точное значение биржа не публикует — отклонит ордер с понятной ошибкой)"
+        elif exn == "bybit":
             size = "Маржа от 1 $ (если минимальный ордер велик — до 5 $), плечо подбирается под минимум биржи: не меньше минимального количества BTC (у Bybit это порядка сотни долларов объёма)"
         else:
             size = "Маржа 1 $" + (f" × {int(-(-(d['min_notional'] * 1.1) // 1))}× (минимальный ордер биржи {d['min_notional']:g} $ объёма)" if d["min_notional"] else "")
@@ -418,6 +436,19 @@ class MonitorUI:
 
     def _s_confirm_disconnect(self, user, live=False):
         return self._confirm("🔌 Отключить счёт Hyperliquid? Сохранённый ключ будет удалён, автомод на Hyperliquid выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxy", "x")
+
+    def _s_confirm_disconnect_upscale(self, user, live=False):
+        return self._confirm("🔌 Отключить счёт Upscale? Сохранённый API-ключ будет удалён, автомод на Upscale выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxu", "xu")
+
+    def _s_confirm_upscale_account(self, user, idx, live=False):
+        """Подтверждение платного / турнирного счёта Upscale перед подключением: правила просадки действуют и для бота."""
+        st = self.svc._up.get(user["id"])
+        acc = (st or {}).get("accounts", [])
+        if not st or not idx.isdigit() or int(idx) >= len(acc):
+            return "⌛ Выбор счёта устарел. Начните заново: /upscale", [[("← Upscale", "xu")]]
+        a = acc[int(idx)]
+        return self._confirm(f"⚠️ Подключить <b>{esc(UP_TYPES.get(a['type'], a['type']))}</b> ({fm.num(a['equity'], 2)} $)? Бот будет торговать на нём по сигналам, а правила счёта (лимиты просадки, фазы) продолжают действовать: "
+                             "серия убытков может провалить платный счёт. Рекомендуем сначала проверить бота на демо-счёте.", f"upa:{idx}:y", "xu")
 
     def _s_confirm_disconnect_bybit(self, user, live=False):
         return self._confirm("🔌 Отключить счёт Bybit? Сохранённый секрет будет удалён, автомод на Bybit выключится у всех конфигов. Открытые на бирже позиции это не закрывает.", "dxb", "xb")
@@ -581,6 +612,23 @@ class MonitorUI:
         if kind == "byx":
             self.svc.cancel_hl(user)
             return "Подключение отменено", False, "xb"
+        if kind == "up":                                                           # начать подключение Upscale: дальше бот ждёт API-ключ обычным сообщением
+            self.svc.start_upscale_connect(chat, user)
+            return "Жду API-ключ", False, None
+        if kind == "upx":
+            self.svc.cancel_hl(user)
+            return "Подключение отменено", False, "xu"
+        if kind == "upa":                                                          # выбор счёта Upscale из списка: demo — сразу, остальные — через подтверждение (экран cup)
+            st = self.svc._up.get(uid)
+            acc = (st or {}).get("accounts", [])
+            if not st or not a[0].isdigit() or int(a[0]) >= len(acc):
+                return "Выбор счёта устарел — начните заново: /upscale", True, "xu"
+            if acc[int(a[0])]["type"] != "demo" and not (len(a) > 1 and a[1] == "y"):
+                return None, False, f"cup:{a[0]}"
+            return self.svc.finish_upscale_connect(chat, user, int(a[0])), False, "xu"
+        if kind == "dxu":
+            manage.disconnect_account(self.db, uid, "upscale")
+            return "Счёт Upscale отключён, автомод на нём выключен", False, "xu"
         if kind == "dxy":
             manage.disconnect_account(self.db, uid, "hyperliquid")
             return "Счёт Hyperliquid отключён, автомод на нём выключен", False, "x"

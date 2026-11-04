@@ -579,7 +579,7 @@ export interface AutoLogItem {
   details: Record<string, unknown>;
 }
 
-export type ExchangeName = 'hyperliquid' | 'bybit';
+export type ExchangeName = 'hyperliquid' | 'bybit' | 'upscale';
 
 /** Настройки конфига ТОЛЬКО для биржи (поверх параметров конфига): размер входа и вход лимитным ордером. Нет ключа — берётся из конфига. */
 export interface ExchangeOverrides {
@@ -600,16 +600,16 @@ export interface ExchangeInfo {
   testnet: boolean;
   min_notional: number;
   label?: string;
-  net?: 'live' | 'testnet' | 'demo';
+  net?: 'live' | 'testnet' | 'demo' | 'real' | 'tournament';
 }
 
 /** Подключённый счёт на бирже: кто подключён (адрес маскируется, ключ наружу не отдаётся), баланс, позиции, открытые ордера, последние исполнения. */
 export interface ExchangeAccount {
   connected: boolean;
   exchange: ExchangeInfo;
-  wallet: string | null;                   // адрес кошелька (Hyperliquid) или API-ключ (Bybit), усечённый
+  wallet: string | null;                   // адрес кошелька (Hyperliquid), API-ключ (Bybit) или идентификатор счёта (Upscale), усечённый
   agent: string | null;
-  net?: string | null;                     // Bybit: live / testnet / demo
+  net?: string | null;                     // Bybit: live / testnet / demo; Upscale: тип счёта demo / real / tournament
   created: number | null;
   verified: number | null;
   error: string | null;

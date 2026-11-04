@@ -280,8 +280,9 @@ function SizingEditor({ e, exchange, onSaved, onError }: { e: MonitorEntry; exch
   );
 }
 
-const EX_NAMES: ExchangeName[] = ['hyperliquid', 'bybit'];
-const EX_LABEL: Record<ExchangeName, string> = { hyperliquid: 'Hyperliquid', bybit: 'Bybit' };
+const EX_NAMES: ExchangeName[] = ['hyperliquid', 'bybit', 'upscale'];
+const EX_LABEL: Record<ExchangeName, string> = { hyperliquid: 'Hyperliquid', bybit: 'Bybit', upscale: 'Upscale' };
+const UP_TYPES: Record<string, string> = { demo: 'демо-счёт', real: 'платный счёт (челлендж / фондированный)', tournament: 'турнирный счёт' };
 const OVER_NUM = ['trade_pct', 'leverage', 'pyramid_pct', 'pyramid_leverage', 'entry_limit_pct', 'entry_limit_ttl_h'] as const;
 
 /** Свои настройки конфига для одной биржи (поверх параметров конфига): доля и плечо входа / добора, вход лимитным ордером. Пусто — как в конфиге (значение конфига показано серым). */
@@ -454,7 +455,8 @@ function Journal({ log }: { log: AutoLogItem[] }) {
 }
 
 const exchangeLabel = (x: ExchangeInfo) => {
-  if (x.name !== 'hyperliquid' && x.name !== 'bybit') return x.name;
+  if (x.name !== 'hyperliquid' && x.name !== 'bybit' && x.name !== 'upscale') return x.name;
+  if (x.name === 'upscale') return `Upscale (${UP_TYPES[x.net ?? ''] ?? 'счёт'})`;
   const net = x.net === 'demo' ? 'демо-торговля' : x.testnet ? 'тестовая сеть' : 'БОЕВАЯ сеть';
   return `${x.name === 'bybit' ? 'Bybit' : 'Hyperliquid'} (${net})`;
 };
@@ -480,13 +482,17 @@ function ExchangeBanner({ info, all }: { info?: ExchangeInfo; all?: MonitorRespo
 /** Подключённый счёт на бирже: подключение, баланс, позиции, открытые ордера, последние исполнения (реальные данные биржи, не расчёт стратегий). */
 function ExchangeBlock({ name = 'hyperliquid', state, error, onDisconnect }: { name?: ExchangeName; state: ExchangeAccount | null; error: string | null; onDisconnect: () => void }) {
   const bybit = name === 'bybit';
-  const tid = bybit ? 'mon-exchange-bybit' : 'mon-exchange';
+  const upscale = name === 'upscale';
+  const tid = bybit ? 'mon-exchange-bybit' : upscale ? 'mon-exchange-upscale' : 'mon-exchange';
+  const help = bybit ? HELP.bybit_block : upscale ? HELP.upscale_block : HELP.exchange_block;
   if (!state) return error ? <section className="mon-card"><div className="bad-text small">{EX_LABEL[name]}: {error}</div></section> : null;
   if (!state.connected) {
     return (
       <section className="mon-card" data-testid={tid}>
-        <div className="mon-head"><b>{bybit ? 'Биржа: Bybit (USDT-фьючерсы)' : 'Биржа'}</b><Help text={bybit ? HELP.bybit_block : HELP.exchange_block} /></div>
-        {bybit
+        <div className="mon-head"><b>{bybit ? 'Биржа: Bybit (USDT-фьючерсы)' : upscale ? 'Биржа: Upscale (проп-трейдинг)' : 'Биржа'}</b><Help text={help} /></div>
+        {upscale
+          ? <div className="muted small">Счёт Upscale не подключён — автомод на Upscale работает как симуляция. Подключить: в Telegram-боте команда <b>/upscale</b> (личный API-ключ <code>usk_…</code> присылается боту, он проверит ключ, предложит выбрать счёт, сохранит ключ зашифрованным и удалит ваше сообщение). Ключом нельзя выводить средства. Торговля по API включается у счёта в приложении Upscale. Начните с демо-счёта: правила платного счёта действуют и для бота. Работает только после привязки Telegram к этому аккаунту.</div>
+          : bybit
           ? <div className="muted small">Счёт Bybit не подключён — автомод на Bybit работает как симуляция. Подключить: в Telegram-боте команда <b>/bybit</b> (API-ключ и секрет присылаются боту, который проверит права ключа — торговля контрактами да, вывод средств нет, — сохранит секрет зашифрованным и удалит ваши сообщения). Только USDT-фьючерсы. Работает только после привязки Telegram к этому аккаунту.</div>
           : <div className="muted small">Счёт Hyperliquid не подключён — автомод работает как симуляция. Подключить: в Telegram-боте команда <b>/hl</b> (адрес кошелька и ключ API-кошелька присылаются боту, который проверит их, сохранит зашифрованными и удалит ваши сообщения). Работает только после привязки Telegram к этому аккаунту.</div>}
       </section>
@@ -497,15 +503,15 @@ function ExchangeBlock({ name = 'hyperliquid', state, error, onDisconnect }: { n
   return (
     <section className="mon-card" data-testid={tid}>
       <div className="mon-head">
-        <b>Биржа: {exchangeLabel(state.exchange)}</b><Help text={bybit ? HELP.bybit_block : HELP.exchange_block} />
-        <span className="muted small"> · {bybit ? `API-ключ ${state.wallet}` : `кошелёк ${state.wallet} · API-кошелёк ${state.agent ?? '–'}`} · {net} · проверен {state.verified ? fmtTs(state.verified * 1000) : '–'}</span>
+        <b>Биржа: {exchangeLabel(state.exchange)}</b><Help text={help} />
+        <span className="muted small"> · {upscale ? `счёт ${state.wallet} · ${UP_TYPES[state.net ?? ''] ?? '–'}` : bybit ? `API-ключ ${state.wallet}` : `кошелёк ${state.wallet} · API-кошелёк ${state.agent ?? '–'}`} · {net} · проверен {state.verified ? fmtTs(state.verified * 1000) : '–'}</span>
         <span className="mon-spacer" />
-        <button type="button" className="ghost bad-text" onClick={onDisconnect} data-testid={bybit ? 'exchange-disconnect-bybit' : 'exchange-disconnect'}>Отключить счёт</button>
+        <button type="button" className="ghost bad-text" onClick={onDisconnect} data-testid={bybit ? 'exchange-disconnect-bybit' : upscale ? 'exchange-disconnect-upscale' : 'exchange-disconnect'}>Отключить счёт</button>
       </div>
       {state.error && <div className="bad-text small">Биржа: {state.error}</div>}
       {!state.error && (
         <>
-          <div className="mon-grid" data-testid={bybit ? 'exchange-account-bybit' : 'exchange-account'}>
+          <div className="mon-grid" data-testid={bybit ? 'exchange-account-bybit' : upscale ? 'exchange-account-upscale' : 'exchange-account'}>
             <Row label="Капитал">{acc.equity != null ? fmtUsd(Number(acc.equity), 2) : '–'}</Row>
             <Row label="Свободно">{acc.free != null ? fmtUsd(Number(acc.free), 2) : '–'}</Row>
             <Row label="В марже">{acc.used != null ? fmtUsd(Number(acc.used), 2) : '–'}</Row>
@@ -554,8 +560,8 @@ export default function MonitorPage() {
   const [testSide, setTestSide] = useState<'long' | 'short'>('long');
   const [testEx, setTestEx] = useState<ExchangeName>('hyperliquid');
   const [openIds, setOpenIds] = useState<Set<number>>(new Set());
-  const [ex, setEx] = useState<Record<ExchangeName, ExchangeAccount | null>>({ hyperliquid: null, bybit: null });
-  const [exErr, setExErr] = useState<Record<ExchangeName, string | null>>({ hyperliquid: null, bybit: null });
+  const [ex, setEx] = useState<Record<ExchangeName, ExchangeAccount | null>>({ hyperliquid: null, bybit: null, upscale: null });
+  const [exErr, setExErr] = useState<Record<ExchangeName, string | null>>({ hyperliquid: null, bybit: null, upscale: null });
   const alive = useRef(true);
 
   const load = useCallback(async () => {
@@ -640,7 +646,7 @@ export default function MonitorPage() {
     const info = infoOf(testEx);
     const mn = info?.min_notional ?? 0;
     const lev = mn ? Math.ceil(mn * 1.1) : 1;
-    const sizeText = testEx === 'bybit' && info?.real ? 'маржа от 1 $ (до 5 $), плечо подберётся под минимальный ордер биржи (минимальное количество BTC)' : `маржа 1 $ × ${lev}× = объём ${lev} $`;
+    const sizeText = testEx === 'upscale' && info?.real ? 'маржа от 1 $, плечо подберётся под минимальный ордер Upscale (≈ 10 $ объёма; биржа может отклонить меньший)' : testEx === 'bybit' && info?.real ? 'маржа от 1 $ (до 5 $), плечо подберётся под минимальный ордер биржи (минимальное количество BTC)' : `маржа 1 $ × ${lev}× = объём ${lev} $`;
     if (!window.confirm(`Открыть тестовую позицию по BTC (${testSide === 'long' ? 'лонг' : 'шорт'}): ${sizeText}?${info?.real ? ` Это реальный ордер на ${exchangeLabel(info)}.` : ` Счёт ${EX_LABEL[testEx]} не подключён — будет симуляция.`}`)) return;
     setBusy(true);
     setMsg(null);
@@ -656,7 +662,7 @@ export default function MonitorPage() {
   };
 
   const disconnect = async (n: ExchangeName) => {
-    if (!window.confirm(`Отключить счёт ${EX_LABEL[n]}? Сохранённый ключ будет удалён, автомод на ${EX_LABEL[n]} выключится у всех конфигов. Открытые на бирже позиции это не закрывает. Подключить заново можно через бота: ${n === 'bybit' ? '/bybit' : '/hl'}.`)) return;
+    if (!window.confirm(`Отключить счёт ${EX_LABEL[n]}? Сохранённый ключ будет удалён, автомод на ${EX_LABEL[n]} выключится у всех конфигов. Открытые на бирже позиции это не закрывает. Подключить заново можно через бота: ${n === 'bybit' ? '/bybit' : n === 'upscale' ? '/upscale' : '/hl'}.`)) return;
     try {
       await disconnectExchange(n);
       setMsg(`Счёт ${EX_LABEL[n]} отключён, автомод на нём выключен.`);
@@ -701,7 +707,7 @@ export default function MonitorPage() {
       <div className="mon-test">
         <b>Тестовая позиция $1 по BTC</b><Help text={HELP.test_position} />
         <select value={testEx} onChange={(e) => setTestEx(e.target.value as ExchangeName)} aria-label="Биржа тестовой позиции" data-testid="test-exchange">
-          <option value="hyperliquid">Hyperliquid</option><option value="bybit">Bybit</option>
+          <option value="hyperliquid">Hyperliquid</option><option value="bybit">Bybit</option><option value="upscale">Upscale</option>
         </select>
         <select value={testSide} onChange={(e) => setTestSide(e.target.value as 'long' | 'short')} aria-label="Сторона тестовой позиции">
           <option value="long">лонг</option><option value="short">шорт</option>
@@ -712,6 +718,7 @@ export default function MonitorPage() {
       </div>
       <ExchangeBlock name="hyperliquid" state={ex.hyperliquid} error={exErr.hyperliquid} onDisconnect={() => void disconnect('hyperliquid')} />
       <ExchangeBlock name="bybit" state={ex.bybit} error={exErr.bybit} onDisconnect={() => void disconnect('bybit')} />
+      <ExchangeBlock name="upscale" state={ex.upscale} error={exErr.upscale} onDisconnect={() => void disconnect('upscale')} />
       {!data && !err && <div className="empty">Загрузка…</div>}
       {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Отправьте конфиг боту в Telegram (файлом или текстом) — он появится здесь.</div>}
       <div className="mon-list">
