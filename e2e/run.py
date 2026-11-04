@@ -925,6 +925,26 @@ def scenario(pg, base, state_url):
     pg.get_by_test_id("exchange-disconnect-bybit").click(); pg.wait_for_timeout(1500)
     check("отключение Bybit: ключа в базе нет, блок снова «не подключён», карточки без строки Bybit", E2E_DB.get_exchange_account(tid, "bybit") is None and "не подключён" in pg.get_by_test_id("mon-exchange-bybit").inner_text()
           and card("Переименован").get_by_test_id("mon-auto-bybit").count() == 0)
+    # Upscale (проп-трейдинг): подключается только через бота; на сайте — блок счёта, свои переключатели и настройки конфига
+    up_box = pg.get_by_test_id("mon-exchange-upscale")
+    check("блок Upscale: счёт не подключён — инструкция про /upscale и совет начать с демо, полей ввода ключей на сайте нет; в карточках только Hyperliquid",
+          "/upscale" in up_box.inner_text() and "демо" in up_box.inner_text() and up_box.locator("input").count() == 0 and card("Переименован").get_by_test_id("mon-auto-upscale").count() == 0)
+    E2E_DB.set_exchange_account(tid, "upscale", "11111111-1111-4111-8111-111111111111", "не-шифртекст", True, None, net="demo")
+    pg.get_by_role("button", name="Обновить", exact=True).click(); pg.get_by_test_id("exchange-disconnect-upscale").wait_for(timeout=15000)
+    up_text = pg.get_by_test_id("mon-exchange-upscale").inner_text()
+    check("блок Upscale: подключённый счёт — тип счёта, замаскированный идентификатор, ключа на странице нет, баннер называет Upscale",
+          "демо-счёт" in up_text and "111111…1111" in up_text and "не-шифртекст" not in pg.content() and "Upscale" in pg.get_by_test_id("mon-banner").inner_text())
+    check("у карточки появились отдельные переключатели Upscale (выключены по умолчанию)", card("Переименован").get_by_test_id("mon-auto-upscale").count() == 1
+          and not card("Переименован").get_by_test_id("mon-auto-upscale").locator("input").nth(0).is_checked() and card("Переименован").get_by_test_id("mon-base-upscale").input_value() == "config")
+    pg.once("dialog", lambda d: d.accept())
+    card("Переименован").get_by_test_id("mon-auto-upscale").locator("input").nth(0).click(); pg.wait_for_timeout(1500)
+    c_up = E2E_DB.find_config(tid, "Переименован")
+    check("автомод Upscale включается отдельно от остальных бирж", c_up["ex"]["upscale"]["open"] and not c_up["ex"]["hyperliquid"]["open"] and not c_up["ex"]["bybit"]["open"])
+    card("Переименован").get_by_test_id("mon-auto-upscale").locator("input").nth(0).click(); pg.wait_for_timeout(1000)
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("exchange-disconnect-upscale").click(); pg.wait_for_timeout(1500)
+    check("отключение Upscale: ключа в базе нет, блок снова «не подключён»", E2E_DB.get_exchange_account(tid, "upscale") is None and "не подключён" in pg.get_by_test_id("mon-exchange-upscale").inner_text()
+          and card("Переименован").get_by_test_id("mon-auto-upscale").count() == 0)
     check("кнопка «СТОП ВСЁ» с подсказкой", pg.get_by_test_id("panic").is_visible())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_test_id("panic").click(); pg.get_by_test_id("mon-msg").filter(has_text="СТОП ВСЁ").wait_for(timeout=10000)

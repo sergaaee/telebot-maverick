@@ -134,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
-EXCHANGES = ("hyperliquid", "bybit")                 # поддерживаемые биржи для торговли; hyperliquid — прежняя (его настройки автомода лежат в колонке auto)
+EXCHANGES = ("hyperliquid", "bybit", "upscale")                 # поддерживаемые биржи для торговли; hyperliquid — прежняя (его настройки автомода лежат в колонке auto)
 # что можно задать у конфига ОТДЕЛЬНО для биржи (поверх параметров конфига): размер входа и вход лимиткой; сигналы и правила выхода (стоп, тейки) — общие для всех бирж
 EXCHANGE_OVERRIDES = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage", "entry_limit_pct", "entry_limit_dir", "entry_limit_ttl_h")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,32}$")

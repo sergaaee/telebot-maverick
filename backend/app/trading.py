@@ -1,6 +1,6 @@
 """Торговля: слой исполнения действий (открыть позицию, переставить стоп, закрыть) за единым интерфейсом.
 
-Данные (свечи, отчёты) идут с Binance как раньше, а торговать можно на Hyperliquid и на Bybit (только USDT-фьючерсы; адаптеры на ccxt). Счёт на каждой бирже у пользователя свой:
+Данные (свечи, отчёты) идут с Binance как раньше, а торговать можно на Hyperliquid, Bybit (только USDT-фьючерсы; адаптеры на ccxt) и Upscale (проп-трейдинг, свой API: upscale.py). Счёт на каждой бирже у пользователя свой:
 Hyperliquid — адрес кошелька и ключ API-кошелька (/hl), Bybit — API-ключ и секрет без права вывода (/bybit); они проверяются и хранятся в базе ЗАШИФРОВАННЫМИ (secrets_store.py);
 пока счёт не подключён — режим симуляции: действие записывается в журнал, ордера не отправляются.
 TRADE_EXCHANGE=dry-run принудительно включает симуляцию для всех.
@@ -710,7 +710,7 @@ def _verify_bybit(api_key, secret, net, exchange, user_id):
 
 
 _cache = {}
-EXCHANGE_LABELS = {"hyperliquid": "Hyperliquid", "bybit": "Bybit"}
+EXCHANGE_LABELS = {"hyperliquid": "Hyperliquid", "bybit": "Bybit", "upscale": "Upscale"}
 
 
 def adapter_for(db, user_id, exchange="hyperliquid"):
@@ -734,6 +734,9 @@ def adapter_for(db, user_id, exchange="hyperliquid"):
         trade_log("key_undecryptable", "error", user=user_id, exchange=exchange, note="сохранённый ключ не расшифровать (сменился SECRET_KEY / потерян secret.key)")
     if exchange == "bybit":
         a = BybitAdapter(acc["wallet"], key, acc.get("net") or ("testnet" if acc["testnet"] else "live"))
+    elif exchange == "upscale":
+        from .upscale import UpscaleAdapter                      # wallet — идентификатор счёта Upscale, ключ — личный API-ключ, net — тип счёта (demo / real / tournament)
+        a = UpscaleAdapter(key, acc["wallet"], acc.get("net") or ("demo" if acc["testnet"] else "real"))
     else:
         a = HyperliquidAdapter(acc["wallet"], key, acc["testnet"])
     a.user_id = user_id

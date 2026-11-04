@@ -157,7 +157,7 @@ def test_adapter_for_is_per_exchange_and_forget_is_selective(auth_env, monkeypat
     assert adapter_for(db, uid, "bybit") is by and adapter_for(db, uid) is hl                  # кеш по (пользователь, биржа)
     forget_adapter(uid, "bybit")
     assert adapter_for(db, uid) is hl and adapter_for(db, uid, "bybit") is not by              # забыли только Bybit
-    assert set(adapters_for(db, uid)) == {"hyperliquid", "bybit"} and isinstance(adapter_for(db, uid, "binance"), DryRunAdapter)
+    assert set(adapters_for(db, uid)) == {"hyperliquid", "bybit", "upscale"} and isinstance(adapter_for(db, uid, "binance"), DryRunAdapter)
     assert isinstance(adapter_for(db, db.check_login("bob", "bob-password-1")["id"], "bybit"), DryRunAdapter)         # у другого пользователя счёта нет
     monkeypatch.setenv("TRADE_EXCHANGE", "dry-run")
     assert isinstance(adapter_for(db, uid, "bybit"), DryRunAdapter)
@@ -382,7 +382,7 @@ def test_api_per_exchange_auto_overrides_accounts_and_disconnect(auth_env, monke
     login(a, "alice", "alice-password")
     m = a.post("/api/monitor", json={}, headers=H_).json()
     e = m["entries"][0]
-    assert set(e["ex"]) == {"hyperliquid", "bybit"} and not e["ex"]["bybit"]["open"] and e["pending_entries"] == {} and set(m["exchanges"]) == {"hyperliquid", "bybit"} and not m["exchanges"]["bybit"]["real"]
+    assert set(e["ex"]) == {"hyperliquid", "bybit", "upscale"} and not e["ex"]["bybit"]["open"] and e["pending_entries"] == {} and set(m["exchanges"]) == {"hyperliquid", "bybit", "upscale"} and not m["exchanges"]["bybit"]["real"]
     assert e["settings"]["entry_limit_pct"] == 0 and e["settings"]["entry_limit_dir"] == "pullback"
     r = a.put(f"/api/monitor/configs/{cid}/auto", json={"open": True, "exchange": "bybit"}, headers=H_)
     assert r.status_code == 200 and r.json()["target"] == "bybit" and r.json()["auto"]["open"] is True

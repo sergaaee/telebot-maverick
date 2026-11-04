@@ -21,6 +21,7 @@ from app.service import ParamError
 from app.secrets_store import SecretError, encrypt
 from app.tradelog import read_tail, trade_error, trade_log
 from app.trading import EXCHANGE_LABELS, adapter_for, adapters_for, forget_adapter, mask_address, verify_bybit, verify_hyperliquid
+from app.upscale import ACCOUNT_TYPES as UP_TYPES, verify_upscale
 
 from app.trading import BYBIT_KEY
 
@@ -49,6 +50,7 @@ class SignalService:
         self._retry_ids = {(r["config_id"], r["exchange"]) for r in db.list_retries()}      # входы, которые не удались до перезапуска: повторяются при первой проверке конфига
         self._hl = {}                       # user_id -> шаг подключения Hyperliquid (ждём адрес кошелька / ключ API-кошелька)
         self._by = {}                       # user_id -> шаг подключения Bybit (ждём API-ключ / секрет)
+        self._up = {}                       # user_id -> шаг подключения Upscale (ждём API-ключ, затем выбор счёта); ключ живёт только в памяти до выбора счёта
         self._sl_err = {}                   # (конфиг, биржа) -> (текст, время) последней ошибки синхронизации стопа: не повторять сообщение каждые 5 минут
 
     # ---------------- отправка ----------------
@@ -109,7 +111,7 @@ class SignalService:
         if not user:
             self.send(chat, fm.NOT_LINKED)
             return
-        if self._hl_pending(chat, user, msg, text, cmd) or self._by_pending(chat, user, msg, text, cmd):         # идёт подключение счёта: сообщение — адрес кошелька / ключ
+        if self._hl_pending(chat, user, msg, text, cmd) or self._by_pending(chat, user, msg, text, cmd) or self._up_pending(chat, user, msg, text, cmd):         # идёт подключение счёта: сообщение — адрес кошелька / ключ
             return
         doc = msg.get("document")
         if doc:
@@ -304,11 +306,11 @@ class SignalService:
         elif kind == "fills":
             exname = self.EX_ALIASES.get(which.strip() or "hl")
             if not exname:
-                self.send(chat, "Биржа: hl (Hyperliquid) или bybit — например, /export fills bybit.")
+                self.send(chat, "Биржа: hl (Hyperliquid), bybit или upscale — например, /export fills bybit.")
                 return
             ad = self.adapter_for(user["id"], exname)
             if not ad.real:
-                self.send(chat, f"Счёт {EXCHANGE_LABELS[exname]} не подключён ({'/hl' if exname == 'hyperliquid' else '/bybit'}) — реальных исполнений нет.")
+                self.send(chat, f"Счёт {EXCHANGE_LABELS[exname]} не подключён ({'/hl' if exname == 'hyperliquid' else '/bybit' if exname == 'bybit' else '/upscale'}) — реальных исполнений нет.")
                 return
             try:
                 body, name = exporter.fills_csv(ad.fills(500)), "maverick-fills.csv"
@@ -316,7 +318,7 @@ class SignalService:
                 self.send(chat, f"⚠️ Не удалось получить исполнения: {esc(str(e)[:200])}")
                 return
         else:
-            self.send(chat, "Что выгрузить?\n/export trades — сделки стратегий (расчёт)\n/export log — журнал автоторговли\n/export fills [hl|bybit] — реальные исполнения на бирже")
+            self.send(chat, "Что выгрузить?\n/export trades — сделки стратегий (расчёт)\n/export log — журнал автоторговли\n/export fills [hl|bybit|upscale] — реальные исполнения на бирже")
             return
         self.tg.send_document(chat, name, body.encode("utf-8"), caption=name)
 
@@ -343,6 +345,7 @@ class SignalService:
 
     def start_hl_connect(self, chat, user, testnet=True):
         self._by.pop(user["id"], None)
+        self._up.pop(user["id"], None)
         self._hl[user["id"]] = {"step": "wallet", "testnet": bool(testnet), "until": time.time() + self.HL_TTL, "tries": 0}
         net = "тестовая сеть" if testnet else "БОЕВАЯ сеть"
         self.tg.send_message(chat, f"🔌 <b>Подключение Hyperliquid</b> ({net})\n\nШаг 1 из 2: пришлите <b>адрес основного кошелька</b> Hyperliquid (0x… и 40 символов) — это счёт, на котором лежат средства.\n\n"
@@ -352,8 +355,8 @@ class SignalService:
 
     def cancel_hl(self, user):
         """Отменяет незавершённое подключение счёта (Hyperliquid или Bybit)."""
-        a, b = self._hl.pop(user["id"], None), self._by.pop(user["id"], None)
-        return a is not None or b is not None
+        a, b, c = self._hl.pop(user["id"], None), self._by.pop(user["id"], None), self._up.pop(user["id"], None)
+        return a is not None or b is not None or c is not None
 
     def _delete(self, chat, msg):
         mid = (msg or {}).get("message_id")
@@ -427,6 +430,7 @@ class SignalService:
     def start_bybit_connect(self, chat, user, net="testnet"):
         net = net if net in self.BY_NETS else "testnet"
         self._hl.pop(user["id"], None)
+        self._up.pop(user["id"], None)
         self._by[user["id"]] = {"step": "key", "net": net, "until": time.time() + self.HL_TTL, "tries": 0}
         keys = {"live": "Bybit → профиль → API → Create New Key", "testnet": "testnet.bybit.com → профиль → API → Create New Key",
                 "demo": "на bybit.com переключитесь в Demo Trading → профиль → API → Create New Key"}[net]
@@ -498,7 +502,88 @@ class SignalService:
         """Подключение счёта Bybit (API-ключ и секрет) и состояние счёта."""
         self.ui.open(chat, user, "xb")
 
-    EX_ALIASES = {"hl": "hyperliquid", "hyper": "hyperliquid", "hyperliquid": "hyperliquid", "by": "bybit", "bb": "bybit", "bybit": "bybit"}
+    # ---------------- подключение счёта Upscale (проп-трейдинг, личный API-ключ) ----------------
+    def start_upscale_connect(self, chat, user):
+        self._hl.pop(user["id"], None)
+        self._by.pop(user["id"], None)
+        self._up[user["id"]] = {"step": "key", "until": time.time() + self.HL_TTL, "tries": 0}
+        self.tg.send_message(chat, "🔌 <b>Подключение Upscale</b> (проп-трейдинг)\n\nПришлите <b>личный API-ключ</b> — он начинается с <code>usk_</code> и показывается один раз при создании в приложении Upscale. "
+                                   "Торговля по API должна быть включена у нужного счёта (в приложении, у каждого счёта отдельно). Этим ключом нельзя выводить средства.\n\n"
+                                   "После проверки я покажу счета ключа, и вы выберете, на каком торговать. <b>Начните с демо-счёта</b>: правила платного счёта (лимиты просадки) действуют и для бота — серия убытков может его провалить.\n"
+                                   "Ваше сообщение с ключом я удалю сразу; ключ хранится в базе зашифрованным. Отмена — кнопка ниже или /cancel.",
+                             keyboard=[[("Отмена", "upx")]])
+
+    def _up_pending(self, chat, user, msg, text, cmd):
+        """Сообщение в сценарии подключения Upscale: API-ключ. True — сообщение съедено сценарием (команды сценарий отменяют)."""
+        st = self._up.get(user["id"])
+        if not st:
+            return False
+        if time.time() > st["until"]:
+            self._up.pop(user["id"], None)
+            self.send(chat, "⌛ Время подключения вышло. Начните заново: /upscale")
+            return False
+        if cmd:
+            self._up.pop(user["id"], None)
+            if cmd == "/cancel":
+                self.send(chat, "Подключение счёта отменено.")
+                return True
+            return False
+        tokens = text.split()
+        if not tokens:
+            return True
+        if st["step"] != "key":                                                        # ждём выбор счёта кнопкой: сообщения не принимаем (и на всякий случай удаляем)
+            self._delete(chat, msg)
+            self.send(chat, "Выберите счёт кнопкой выше или отмените подключение: /cancel", keyboard=[[("Отмена", "upx")]])
+            return True
+        deleted = self._delete(chat, msg)                                              # ключ в чате не оставляем ни при каких условиях
+        key = tokens[0]
+        st["tries"] += 1
+        try:
+            res = verify_upscale(key, user_id=user["id"])
+        except ValueError as e:
+            if st["tries"] >= 5:
+                self._up.pop(user["id"], None)
+                self.send(chat, f"❌ {esc(str(e))}\n\nСлишком много попыток — подключение отменено. Начните заново: /upscale")
+                return True
+            self.send(chat, f"❌ {esc(str(e))}\n\nПришлите ключ ещё раз (или «Отмена»).", keyboard=[[("Отмена", "upx")]])
+            return True
+        st.update(step="pick", key=key, accounts=res["accounts"], deleted=deleted, until=time.time() + self.HL_TTL)
+        rows = [f"{i + 1}. <b>{esc(UP_TYPES.get(a['type'], a['type']))}</b> · <code>{mask_address(a['accountId'])}</code> · капитал {fm.num(a['equity'], 2)} $ · фаза {esc(str(a['phase']))}" for i, a in enumerate(res["accounts"])]
+        kb = [[(f"{i + 1}. {UP_TYPES.get(a['type'], a['type']).split(' (')[0]} · {fm.num(a['equity'], 0)} $", f"upa:{i}")] for i, a in enumerate(res["accounts"])] + [[("Отмена", "upx")]]
+        self.send(chat, "✅ Ключ принят. Счета, на которых можно торговать по API:\n" + "\n".join(rows)
+                  + ("\n🧹 Ваше сообщение с ключом удалено." if deleted else "\n⚠️ Не удалось удалить ваше сообщение с ключом — удалите его вручную (у себя и «у всех»).")
+                  + "\n\nВыберите счёт кнопкой. Демо-счёт подключается сразу, платный и турнирный — после подтверждения.", keyboard=kb)
+        return True
+
+    def finish_upscale_connect(self, chat, user, idx):
+        """Выбран счёт Upscale: ключ шифруется и сохраняется вместе со счётом. -> текст всплывающего сообщения."""
+        st = self._up.get(user["id"])
+        acc = ((st or {}).get("accounts") or [])
+        if not st or st.get("step") != "pick" or not (0 <= idx < len(acc)):
+            return "Выбор счёта устарел — начните заново: /upscale"
+        a = acc[idx]
+        try:
+            enc = encrypt(st["key"], self.db.path)
+        except SecretError as e:
+            self._up.pop(user["id"], None)
+            self.send(chat, f"⚠️ Не удалось сохранить ключ: {esc(str(e))}")
+            return "Не удалось сохранить ключ"
+        self.db.set_exchange_account(user["id"], "upscale", a["accountId"], enc, a["type"] == "demo", None, net=a["type"])
+        forget_adapter(user["id"], "upscale")
+        self._up.pop(user["id"], None)
+        self.db.add_auto_log(user["id"], None, "exchange_connected", None, None, "info", {"exchange": "upscale", "account_type": a["type"], "account": mask_address(a["accountId"])})
+        trade_log("account_connected", user=user["id"], exchange="upscale", account_type=a["type"], account=mask_address(a["accountId"]))
+        self.send(chat, f"✅ <b>Upscale подключён</b> — {esc(UP_TYPES.get(a['type'], a['type']))}\nСчёт <code>{mask_address(a['accountId'])}</code> · капитал {fm.num(a['equity'], 2)} $"
+                        + ("" if a["type"] == "demo" else "\n⚠️ Это не демо-счёт: правила просадки счёта действуют и при торговле ботом.")
+                        + "\n\nАвтомод на Upscale выключен у всех конфигов: включайте его в /monitor (карточка конфига → Upscale). Размер и лимитный вход для биржи: /ex. "
+                          "Код проверен только на имитации API — сначала прогоните его на демо-счёте (тестовая позиция в /monitor → Upscale → Тест).")
+        return "Upscale подключён"
+
+    def cmd_upscale(self, chat, user, arg):
+        """Подключение счёта Upscale (личный API-ключ и выбор счёта) и состояние счёта."""
+        self.ui.open(chat, user, "xu")
+
+    EX_ALIASES = {"hl": "hyperliquid", "hyper": "hyperliquid", "hyperliquid": "hyperliquid", "by": "bybit", "bb": "bybit", "bybit": "bybit", "up": "upscale", "upscale": "upscale"}
     EX_KEYS = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage", "entry_limit_pct", "entry_limit_dir", "entry_limit_ttl_h")
 
     def cmd_ex(self, chat, user, arg):
@@ -519,7 +604,7 @@ class SignalService:
             return
         name = self.EX_ALIASES.get(parts[1].lower())
         if not name:
-            self.send(chat, "Биржа: hl (Hyperliquid) или bybit.")
+            self.send(chat, "Биржа: hl (Hyperliquid), bybit или upscale.")
             return
         patch = {}
         for tok in parts[2:]:
