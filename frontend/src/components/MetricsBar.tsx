@@ -66,7 +66,7 @@ export default function MetricsBar({ latest, sync, params, onSync }: Props) {
         {sync?.enabled ? (
           <>
             <span className="muted" title={(sync.sources.filter((s) => s.error).map((s) => `${s.label}: ${s.error}`).join('\n')) || undefined}>
-              {sync.running ? '⟳ обновляю историю…' : `⟳ история обновлена ${clock(Math.max(0, ...sync.sources.map((s) => s.last_ok ?? 0)))} UTC · след. ${clock(sync.next_run)} (${sync.schedule ?? `каждые ${Math.round(sync.interval_min)} мин`})`}
+              {sync.running ? '⟳ обновляю историю…' : `⟳ история обновлена ${clock(Math.max(0, ...sync.sources.map((s) => s.last_ok ?? 0)))} UTC · след. ${clock(sync.next_run)} (${sync.schedule ?? (Math.round(sync.interval_min) === 1 ? 'каждую минуту' : `каждые ${Math.round(sync.interval_min)} мин`)})`}
             </span>
             <button type="button" className="ghost" disabled={sync.running} onClick={onSync}>Обновить сейчас</button>
           </>

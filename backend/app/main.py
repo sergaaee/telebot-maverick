@@ -111,7 +111,7 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             wd = Watchdog(db, watchdog.telegram_notify(os.getenv("SIGNALBOT_TOKEN").strip()))        # сторож бота: пишет в Telegram, если бот молчит
             wd.start()
         candle_sync.start()                # свечи: при запуске и затем каждые CANDLES_SYNC_MIN минут
-        sync.start()                       # подгрузка при запуске сервера и затем по расписанию HISTORY_SYNC_AT (по умолчанию :02 и :32 каждого часа)
+        sync.start()                       # подгрузка при запуске сервера и затем каждые HISTORY_SYNC_MIN минут (по умолчанию каждую минуту) или по расписанию HISTORY_SYNC_AT
         yield
         if wd:
             wd.stop()

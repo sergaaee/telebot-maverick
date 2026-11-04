@@ -1449,6 +1449,10 @@ class SignalService:
         for i in done:
             self._fp.pop(i, None)                            # статистика топ-коинов пересчитается в следующем цикле
 
+    def wake(self):
+        """Разбудить цикл проверки сигналов (например, после подгрузки новых сообщений): следующий цикл начнётся сразу."""
+        self._wake.set()
+
     def wait(self, timeout):
         self._wake.wait(timeout)
         self._wake.clear()

@@ -269,11 +269,57 @@ def test_scheduled_sync_waits_for_the_slot_and_reports_it():
     assert HistorySync([Src("a", "1")], 32).snapshot()["schedule"] is None                                 # без расписания — прежнее поведение по периоду
 
 
-def test_settings_default_schedule_and_env_override(monkeypatch):
+def test_settings_default_is_every_minute_and_env_override(monkeypatch):
     from app.config import load_settings
     monkeypatch.delenv("HISTORY_SYNC_AT", raising=False)
+    monkeypatch.delenv("HISTORY_SYNC_MIN", raising=False)
+    assert load_settings().sync_at == [] and load_settings().sync_min == 1.0                               # по умолчанию — каждую минуту, без расписания по минутам часа
+    monkeypatch.setenv("HISTORY_SYNC_MIN", "5")
+    assert load_settings().sync_min == 5.0
+    monkeypatch.setenv("HISTORY_SYNC_AT", "2,32")                                                          # прежнее расписание «раз в полчаса» включается явно
     assert load_settings().sync_at == [2, 32]
     monkeypatch.setenv("HISTORY_SYNC_AT", "5,35")
     assert load_settings().sync_at == [5, 35]
     monkeypatch.setenv("HISTORY_SYNC_AT", "")
     assert load_settings().sync_at == []                                                                   # пусто — по периоду HISTORY_SYNC_MIN
+
+
+def test_default_period_is_one_minute_and_is_counted_from_the_start_of_the_previous_run():
+    assert HistorySync([Src("a", "1")]).interval == 60.0 and HistorySync([Src("a", "1")]).snapshot()["interval_min"] == 1.0
+    s = HistorySync([Src("a", "1")], 0.05, exporter=lambda p, c: time.sleep(0.6) or 0)                     # период 3 с, сама подгрузка идёт 0,6 с
+    s.start()
+    end = time.time() + 5
+    while s.next_run is None and time.time() < end:
+        time.sleep(0.02)
+    started = s.state["a"]["last_run"]
+    assert abs(s.next_run - started - 3.0) < 0.25                                                          # ровно период от начала подгрузки, а не период + её длительность
+    s.stop()
+    slow = HistorySync([Src("a", "1")], 0.01, exporter=lambda p, c: time.sleep(0.8) or 0)                  # период (0,6 с) короче самой подгрузки: пауза не нулевая, цикл не крутится вхолостую
+    slow.start()
+    end = time.time() + 5
+    while slow.next_run is None and time.time() < end:
+        time.sleep(0.01)
+    assert slow.next_run - time.time() > 0.03
+    slow.stop()
+
+
+def test_session_lock_serializes_processes_and_gives_up_after_the_wait(tmp_path):
+    import threading
+    from app.history_sync import session_lock
+    order = []
+
+    def second():
+        with session_lock(tmp_path, wait=5):
+            order.append("second")
+
+    with session_lock(tmp_path, wait=1):
+        t = threading.Thread(target=second)
+        t.start()
+        time.sleep(0.5)
+        order.append("first-done")                                                                         # второй ждёт, пока первый держит блокировку
+    t.join(5)
+    assert order == ["first-done", "second"]
+    with session_lock(tmp_path, wait=1):
+        with pytest.raises(RuntimeError, match="занята другим процессом"):
+            with session_lock(tmp_path, wait=0.4):
+                pass

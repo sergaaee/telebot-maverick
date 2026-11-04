@@ -478,7 +478,7 @@ def scenario(pg, base, state_url):
     api_l = pg.evaluate("() => fetch('/api/latest').then(r => r.json())")["sources"]
     bn = next(x for x in api_l if x["id"] == "binance")["report"]
     check("значения в панели совпадают с последним отчётом", f"{bn['dl']:.2f}" in bar.locator("[data-source=binance]").inner_text() and f"{bn['ds']:.2f}" in bar.locator("[data-source=binance]").inner_text())
-    check("статус автообновления: при запуске уже обновлено, указан период", "история обновлена" in bar.inner_text() and "каждые 32 мин" in bar.inner_text(), bar.inner_text()[-120:])
+    check("статус автообновления: при запуске уже обновлено, указан период", "история обновлена" in bar.inner_text() and "каждые 600 мин" in bar.inner_text(), bar.inner_text()[-120:])
     check("у блока есть «?»", bar.locator(".help").count() == 2)
     pg.locator(".toast-close").all()
     bar.get_by_role("button", name="Обновить сейчас").click()
@@ -1101,7 +1101,7 @@ def main():
                    LOCAL_MIN="1.85", SCALP_MIN="1.25", CONFIRM="4", TP_PCT="6", SL_PCT="2", SIDE="both", ONLY="", COOL_DROP="",
                    COOL_DECLINES="", LIQ_HOURS="", COOLDOWN_H="0", FEE="0.0005", SLIPPAGE="0", ORDER_SIZE="0.1",
                    TOP_ENABLED="false", TOP_SIDES="long", TOP_TP_LEVELS="", TOP_TP_PCT="5", TOP_SL_PCT="3", TOP_SIZE_USD="100", TOP_FEE="0.0005",
-                   HISTORY_SYNC="false", CANDLES_SYNC="false", TOP_SLIPPAGE="0", TOP_DAYS="3", TOP_MIN_VALUE="0", TOP_BE_AFTER_TP1="",
+                   HISTORY_SYNC="false", HISTORY_SYNC_MIN="600", HISTORY_SYNC_AT="", CANDLES_SYNC="false", TOP_SLIPPAGE="0", TOP_DAYS="3", TOP_MIN_VALUE="0", TOP_BE_AFTER_TP1="",
                    VITE_PROXY_TARGET=f"http://127.0.0.1:{bp}", VITE_PORT=str(fp))
         procs.append(subprocess.Popen([sys.executable, "-m", "uvicorn", "server:app", "--app-dir", str(ROOT / "e2e"), "--port", str(bp),
                                        "--log-level", "warning"], cwd=ROOT / "backend", env=env, start_new_session=True))
