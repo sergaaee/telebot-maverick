@@ -4,6 +4,7 @@
 
 Источники обрабатываются по очереди (одна сессия Telegram). Ошибка одного источника не останавливает остальные и не роняет сервер:
 причина сохраняется в статусе и видна в интерфейсе."""
+import errno
 import os
 import threading
 import time
@@ -36,28 +37,46 @@ def next_slot(now, minutes):
 
 
 @contextmanager
-def session_lock(root, wait=LOCK_WAIT_SEC):
-    """Межпроцессная блокировка на время работы с сессией Telegram (на системах без fcntl блокировки нет). Не дождались за wait секунд — RuntimeError (статус «ошибка», повтор в следующий раз)."""
+def session_lock(dirs, wait=LOCK_WAIT_SEC):
+    """Межпроцессная блокировка на время работы с сессией Telegram. Файл блокировки создаётся в первом из каталогов dirs, куда можно писать (рядом с файлами истории — они общие для сайта и бота;
+    корень приложения в контейнере часто только для чтения). Блокировка — вспомогательная: нет каталога для файла, нет fcntl (Windows) или файловая система не умеет блокировки — подгрузка идёт без неё,
+    а не падает. Не дождались за wait секунд — RuntimeError (статус «ошибка», повтор в следующий раз)."""
     try:
         import fcntl
     except ImportError:
         yield
         return
-    f = open(os.path.join(str(root), ".history_sync.lock"), "a")
+    if isinstance(dirs, (str, os.PathLike)):
+        dirs = [dirs]
+    f = None
+    for d in dirs:
+        try:
+            f = open(os.path.join(str(d), ".history_sync.lock"), "a")
+            break
+        except OSError:
+            continue
+    if f is None:
+        yield
+        return
+    locked = False
     try:
         deadline = time.monotonic() + wait
         while True:
             try:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
                 break
-            except OSError:
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                    break                                   # блокировки не поддерживаются (ENOLCK и т.п.) — работаем без неё
                 if time.monotonic() > deadline:
                     raise RuntimeError("подгрузка занята другим процессом (сайт или бот) дольше двух минут — повторю в следующий раз")
                 time.sleep(0.2)
         try:
             yield
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            if locked:
+                fcntl.flock(f, fcntl.LOCK_UN)
     finally:
         f.close()
 
@@ -65,10 +84,11 @@ def session_lock(root, wait=LOCK_WAIT_SEC):
 def default_exporter(path, chat):
     """Реальная подгрузка через Telethon (без интерактивного входа). -> число добавленных сообщений."""
     import asyncio
+    import tempfile
 
     from tools import export_history
 
-    with session_lock(export_history.ROOT):
+    with session_lock([os.path.dirname(os.path.abspath(str(path))), tempfile.gettempdir()]):
         return asyncio.run(export_history.main(str(path), chat, full=False, interactive=False))
 
 

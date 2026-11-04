@@ -323,3 +323,38 @@ def test_session_lock_serializes_processes_and_gives_up_after_the_wait(tmp_path)
         with pytest.raises(RuntimeError, match="занята другим процессом"):
             with session_lock(tmp_path, wait=0.4):
                 pass
+
+
+def test_session_lock_falls_back_to_another_directory_and_never_breaks_the_sync(tmp_path, monkeypatch):
+    """Регрессия: корень приложения в контейнере только для чтения — файл блокировки не создать; подгрузка не должна падать с «Permission denied»."""
+    import os
+    from app.history_sync import session_lock
+    missing = tmp_path / "нет-такого-каталога"
+    with session_lock([missing, tmp_path], wait=1):                                                         # первый каталог недоступен -> берётся второй
+        assert (tmp_path / ".history_sync.lock").exists() and not missing.exists()
+        with pytest.raises(RuntimeError, match="занята другим процессом"):                                   # блокировка именно во втором каталоге
+            with session_lock([missing, tmp_path], wait=0.3):
+                pass
+    ran = []
+    with session_lock([missing, tmp_path / "и-этого-нет"], wait=1):                                         # писать негде нигде — работаем без блокировки
+        ran.append(1)
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        if os.access(ro, os.W_OK):
+            pytest.skip("каталог остался доступен на запись (запуск от root): проверка прав здесь невозможна")
+        with session_lock([ro, tmp_path], wait=1):
+            ran.append(2)
+    finally:
+        ro.chmod(0o700)
+    assert ran == [1, 2]
+    import fcntl
+
+    def no_locks(f, op):
+        raise OSError(errno_enolck, "блокировки не поддерживаются")
+    errno_enolck = 37
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    with session_lock(tmp_path, wait=1):                                                                    # файловая система без flock — тоже без падения
+        ran.append(3)
+    assert ran == [1, 2, 3]
