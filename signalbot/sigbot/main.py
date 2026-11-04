@@ -92,11 +92,14 @@ def main():
     markets = MarketsCache(lambda: ccxt_swap_symbols(s.exchange))
     engine = Engine(s, store, markets, make_price_fn(s.exchange) if b.live_price else None)
     sync = None
+    holder = {}
     if b.sync:
-        sync = HistorySync(list(s.sources.values()), b.sync_min, enabled=True, at_minutes=list(b.sync_at))
+        # пришли новые сообщения — сразу запускаем проверку сигналов, не дожидаясь очередного цикла (раз в SIGNALBOT_POLL_SEC)
+        sync = HistorySync(list(s.sources.values()), b.sync_min, enabled=True, at_minutes=list(b.sync_at), on_updated=lambda src: holder["service"].wake() if "service" in holder else None)
         sync.start()
         log.info("подгрузка сообщений ботов %s", ("в минуты :" + ", :".join(f"{m:02d}" for m in b.sync_at) + " каждого часа (UTC)") if b.sync_at else f"каждые {b.sync_min:g} мин")
     service = SignalService(s, None, db, engine, b, sync)
+    holder["service"] = service
     log.info("запущен; пользователей: %d, привязано к Telegram: %d", db.user_count(), sum(1 for u in db.list_users() if u["telegram_id"]))
     while True:
         bot = make_bot(b.token)

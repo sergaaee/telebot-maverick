@@ -1,13 +1,17 @@
-"""Фоновая подгрузка новых сообщений Telegram-ботов в файлы истории: при запуске сервера и затем либо в заданные минуты каждого часа по UTC (по умолчанию в :02 и :32 —
-раз в полчаса, ровно когда боты публикуют отчёты), либо, если расписание не задано, каждые sync_min минут.
+"""Фоновая подгрузка новых сообщений Telegram-ботов в файлы истории: при запуске сервера и затем либо в заданные минуты каждого часа по UTC (расписание at_minutes, например :02 и :32),
+либо, если расписание не задано (по умолчанию), каждые sync_min минут — по умолчанию КАЖДУЮ МИНУТУ (отсчёт от начала прошлой подгрузки, без накопления сдвига).
+Сессия Telegram (файл SQLite) одна на сайт и бота: пока подгружает один процесс, другой ждёт (блокировка файла), иначе при подгрузке раз в минуту они сталкивались бы («database is locked»).
 
 Источники обрабатываются по очереди (одна сессия Telegram). Ошибка одного источника не останавливает остальные и не роняет сервер:
 причина сохраняется в статусе и видна в интерфейсе."""
+import os
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-DEFAULT_AT = (2, 32)
+DEFAULT_INTERVAL_MIN = 1.0                 # как часто подгружать, если расписание по минутам часа не задано
+LOCK_WAIT_SEC = 120.0                      # сколько ждать, пока другой процесс закончит подгрузку
 
 
 def parse_minutes(raw):
@@ -31,17 +35,45 @@ def next_slot(now, minutes):
     raise ValueError("нет минут расписания")
 
 
+@contextmanager
+def session_lock(root, wait=LOCK_WAIT_SEC):
+    """Межпроцессная блокировка на время работы с сессией Telegram (на системах без fcntl блокировки нет). Не дождались за wait секунд — RuntimeError (статус «ошибка», повтор в следующий раз)."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    f = open(os.path.join(str(root), ".history_sync.lock"), "a")
+    try:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("подгрузка занята другим процессом (сайт или бот) дольше двух минут — повторю в следующий раз")
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
 def default_exporter(path, chat):
     """Реальная подгрузка через Telethon (без интерактивного входа). -> число добавленных сообщений."""
     import asyncio
 
     from tools import export_history
 
-    return asyncio.run(export_history.main(str(path), chat, full=False, interactive=False))
+    with session_lock(export_history.ROOT):
+        return asyncio.run(export_history.main(str(path), chat, full=False, interactive=False))
 
 
 class HistorySync:
-    def __init__(self, sources, interval_min=32.0, exporter=None, on_updated=None, enabled=True, disabled_reason=None, at_minutes=None):
+    def __init__(self, sources, interval_min=DEFAULT_INTERVAL_MIN, exporter=None, on_updated=None, enabled=True, disabled_reason=None, at_minutes=None):
         self.sources = [s for s in sources if s.chat]
         self.interval = max(interval_min, 0.05) * 60
         self.at_minutes = sorted(set(at_minutes or []))             # непусто — по расписанию (минуты часа, UTC), период interval_min не используется
@@ -78,8 +110,11 @@ class HistorySync:
     # ---------- цикл ----------
     def _loop(self):
         while not self._stop.is_set():
+            started = time.time()
             self.run_once()
-            self.next_run = next_slot(time.time(), self.at_minutes) if self.at_minutes else time.time() + self.interval
+            now = time.time()
+            # по периоду — от начала прошлой подгрузки (ровно раз в период); если сама подгрузка шла дольше периода, пауза всё равно не нулевая (десятая часть периода, не больше 5 с)
+            self.next_run = next_slot(now, self.at_minutes) if self.at_minutes else max(started + self.interval, now + min(self.interval * 0.1, 5.0))
             self._wake.wait(max(0.0, self.next_run - time.time()))
             self._wake.clear()
 

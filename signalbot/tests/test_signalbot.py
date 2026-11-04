@@ -126,6 +126,21 @@ UI_CONFIG = {"format": "maverick-config", "version": 1, "tf": "auto", "params": 
 
 
 # ---------------- разбор ----------------
+def test_history_sync_defaults_to_every_minute_and_new_messages_wake_the_cycle(env, monkeypatch):
+    from sigbot.config import load_bot_settings
+    monkeypatch.delenv("SIGNALBOT_SYNC_AT", raising=False)
+    monkeypatch.delenv("SIGNALBOT_SYNC_MIN", raising=False)
+    b = load_bot_settings()
+    assert b.sync_at == () and b.sync_min == 1.0
+    monkeypatch.setenv("SIGNALBOT_SYNC_AT", "2,32")
+    assert load_bot_settings().sync_at == (2, 32)
+    import time as _t
+    t0 = _t.monotonic()
+    env.wake()
+    env.wait(30)                                                                                           # после wake() цикл не ждёт период
+    assert _t.monotonic() - t0 < 2
+
+
 def test_parse_variants():
     wrapped = json.dumps(UI_CONFIG)
     assert parse_configs(wrapped)[0]["params"]["confirm"] == 2
