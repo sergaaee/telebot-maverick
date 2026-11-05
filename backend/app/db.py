@@ -134,7 +134,39 @@ CREATE INDEX IF NOT EXISTS idx_runs_user ON saved_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
 
-EXCHANGES = ("hyperliquid", "bybit", "upscale")                 # поддерживаемые биржи для торговли; hyperliquid — прежняя (его настройки автомода лежат в колонке auto)
+# Аккаунтов Hyperliquid у пользователя может быть несколько: это «слоты» hyperliquid (первый, прежний — его настройки автомода лежат в колонке auto), hyperliquid2, hyperliquid3 …
+# Для остальной системы слот — такая же отдельная биржа: свой счёт, свои «открывать / управлять / база / размер», свои ожидающие входы. Сколько слотов — HL_MAX_ACCOUNTS (1…10, по умолчанию 3).
+def _hl_slots_n():
+    try:
+        from dotenv import load_dotenv                      # число слотов нужно при импорте модуля, а db могут импортировать раньше config: .env читаем здесь же (уже заданные переменные не перезаписываются)
+        from pathlib import Path
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    except ImportError:
+        pass
+    try:
+        return max(1, min(10, int(os.getenv("HL_MAX_ACCOUNTS") or 3)))
+    except ValueError:
+        return 3
+
+
+HL_SLOTS = ("hyperliquid",) + tuple(f"hyperliquid{i}" for i in range(2, _hl_slots_n() + 1))
+EXCHANGES = HL_SLOTS + ("bybit", "upscale")                     # поддерживаемые биржи для торговли
+
+
+def is_hl(name):
+    """Слот Hyperliquid (первый или дополнительный)?"""
+    return name in HL_SLOTS
+
+
+def hl_slot(name):
+    """Номер слота Hyperliquid: hyperliquid -> 1, hyperliquid3 -> 3."""
+    return int(name[len("hyperliquid"):] or 1)
+
+
+def hl_name(n):
+    """Имя слота по номеру: 1 -> hyperliquid, 3 -> hyperliquid3."""
+    return "hyperliquid" if int(n) == 1 else f"hyperliquid{int(n)}"
 # что можно задать у конфига ОТДЕЛЬНО для биржи (поверх параметров конфига): размер входа и вход лимиткой; сигналы и правила выхода (стоп, тейки) — общие для всех бирж
 EXCHANGE_OVERRIDES = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage", "entry_limit_pct", "entry_limit_dir", "entry_limit_ttl_h")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,32}$")

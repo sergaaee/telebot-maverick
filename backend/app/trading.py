@@ -14,6 +14,7 @@ TRADE_EXCHANGE=dry-run принудительно включает симуля�
 import os
 import re
 
+from .db import HL_SLOTS, hl_slot
 from .secrets_store import SecretError, decrypt
 from .tradelog import trade_error, trade_log
 
@@ -115,7 +116,9 @@ class HyperliquidAdapter(ExchangeAdapter):
     real = True
     min_notional = 10.0                 # минимальный ордер на Hyperliquid — 10 $ объёма (по документации биржи; уточните при смене правил)
 
-    def __init__(self, wallet="", key="", testnet=True, max_usd=None, exchange=None):
+    def __init__(self, wallet="", key="", testnet=True, max_usd=None, exchange=None, slot=None):
+        if slot and slot != self.name:                                       # дополнительный аккаунт Hyperliquid (hyperliquid2 …): своё имя и подпись
+            self.name, self.label = slot, EXCHANGE_LABELS.get(slot, slot)
         self.wallet, self.key, self.testnet = wallet or "", key or "", bool(testnet)
         self.max_usd = float(max_usd if max_usd is not None else (os.getenv("TRADE_MAX_USD") or 5000))
         self._ex = exchange
@@ -144,7 +147,8 @@ class HyperliquidAdapter(ExchangeAdapter):
         return self._ex
 
     def _not_connected(self):
-        return "Счёт Hyperliquid не подключён — отправьте боту /hl (адрес кошелька и ключ API-кошелька)."
+        n = hl_slot(self.name)
+        return f"Счёт {self.label} не подключён — отправьте боту /hl{f' {n}' if n > 1 else ''} (адрес кошелька и ключ API-кошелька)."
 
     @staticmethod
     def hl_symbol(symbol):
@@ -710,7 +714,8 @@ def _verify_bybit(api_key, secret, net, exchange, user_id):
 
 
 _cache = {}
-EXCHANGE_LABELS = {"hyperliquid": "Hyperliquid", "bybit": "Bybit", "upscale": "Upscale"}
+EXCHANGE_LABELS = {name: ("Hyperliquid" if name == "hyperliquid" else f"Hyperliquid {hl_slot(name)}") for name in HL_SLOTS}
+EXCHANGE_LABELS.update({"bybit": "Bybit", "upscale": "Upscale"})
 
 
 def adapter_for(db, user_id, exchange="hyperliquid"):
@@ -738,7 +743,7 @@ def adapter_for(db, user_id, exchange="hyperliquid"):
         from .upscale import UpscaleAdapter                      # wallet — идентификатор счёта Upscale, ключ — личный API-ключ, net — тип счёта (demo / real / tournament)
         a = UpscaleAdapter(key, acc["wallet"], acc.get("net") or ("demo" if acc["testnet"] else "real"))
     else:
-        a = HyperliquidAdapter(acc["wallet"], key, acc["testnet"])
+        a = HyperliquidAdapter(acc["wallet"], key, acc["testnet"], slot=exchange)
     a.user_id = user_id
     _cache[(user_id, exchange)] = (sig, a)
     return a

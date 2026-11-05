@@ -579,7 +579,8 @@ export interface AutoLogItem {
   details: Record<string, unknown>;
 }
 
-export type ExchangeName = 'hyperliquid' | 'bybit' | 'upscale';
+/** Биржа / аккаунт для торговли: «hyperliquid» (первый аккаунт), «hyperliquid2», «hyperliquid3» … (дополнительные аккаунты Hyperliquid), «bybit», «upscale». */
+export type ExchangeName = 'hyperliquid' | `hyperliquid${number}` | 'bybit' | 'upscale';
 
 /** Настройки конфига ТОЛЬКО для биржи (поверх параметров конфига): размер входа и вход лимитным ордером. Нет ключа — берётся из конфига. */
 export interface ExchangeOverrides {
