@@ -196,10 +196,13 @@ def test_exchange_failures_are_wrapped():
         HyperliquidAdapter(exchange=FakeEx(fail_on="ticker")).open_market("BTC/USDT:USDT", "long", 20.0, 2.0)
 
 
-def test_default_order_limit_is_5000_and_env_overrides(monkeypatch):
+def test_default_order_limit_is_50000_and_env_overrides(monkeypatch):
     from app.trading import HyperliquidAdapter
     monkeypatch.delenv("TRADE_MAX_USD", raising=False)
-    assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 5000.0
+    assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 50000.0
+    from app.trading import BybitAdapter
+    from app.upscale import UpscaleAdapter
+    assert BybitAdapter("AbCdEfGh12345", "s3cr3t").max_usd == 50000.0 and UpscaleAdapter("usk_x", "acc").max_usd == 50000.0               # одно умолчание на все биржи
     monkeypatch.setenv("TRADE_MAX_USD", "100")                                                   # старое значение из .env продолжает действовать — его нужно поменять там
     assert HyperliquidAdapter("0x" + "ab" * 20, "0x" + "11" * 32).max_usd == 100.0
 

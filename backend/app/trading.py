@@ -8,7 +8,7 @@ TRADE_EXCHANGE=dry-run принудительно включает симуля�
 ВАЖНО про Hyperliquid:
  * сеть (тестовая / боевая) пользователь выбирает при подключении, тестовая — по умолчанию в боте;
  * принимается только ключ API-кошелька («агента», он умеет торговать, но не выводить средства), ключ основного кошелька отклоняется;
- * каждый ордер ограничен TRADE_MAX_USD (по умолчанию 5000 $ объёма) — предохранитель от слишком большого размера по конфигу;
+ * каждый ордер ограничен TRADE_MAX_USD (по умолчанию 50 000 $ объёма) — предохранитель от слишком большого размера по конфигу;
  * код проверен только на имитации биржи (тесты), на живой сети он не запускался: сначала прогоните его на testnet.
 """
 import os
@@ -18,6 +18,7 @@ from .db import HL_SLOTS, hl_slot
 from .secrets_store import SecretError, decrypt
 from .tradelog import trade_error, trade_log
 
+DEFAULT_MAX_USD = 50_000.0              # предохранитель по умолчанию: максимальный объём одного ордера, $ (переменная TRADE_MAX_USD)
 TEST_MAX_USD = 5.0                      # потолок тестовой позиции (маржа): даже если подменить запрос, больше не откроется
 
 
@@ -120,7 +121,7 @@ class HyperliquidAdapter(ExchangeAdapter):
         if slot and slot != self.name:                                       # дополнительный аккаунт Hyperliquid (hyperliquid2 …): своё имя и подпись
             self.name, self.label = slot, EXCHANGE_LABELS.get(slot, slot)
         self.wallet, self.key, self.testnet = wallet or "", key or "", bool(testnet)
-        self.max_usd = float(max_usd if max_usd is not None else (os.getenv("TRADE_MAX_USD") or 5000))
+        self.max_usd = float(max_usd if max_usd is not None else (os.getenv("TRADE_MAX_USD") or DEFAULT_MAX_USD))
         self._ex = exchange
         self.user_id = None                 # для лога: чей счёт
 
