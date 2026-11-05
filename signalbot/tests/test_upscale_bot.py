@@ -145,3 +145,22 @@ def test_signal_opens_on_upscale_with_its_own_size_and_ex_command_knows_the_exch
     assert book.closed_all == 1 and not env.db.get_config(cid)["any_open"]
     env.handle_update(tmsg("/export fills kraken"))
     assert "upscale" in env.tg.texts(CHAT)[-1]
+
+
+def test_clamped_leverage_is_explained_to_the_user(env, fake_upscale, monkeypatch):
+    """Upscale ограничил плечо (максимум 5× при запрошенных 10×): вход идёт с допустимым плечом, а владельцу приходит пояснение про маржу."""
+    from app.upscale import UpscaleAdapter
+    env.handle_update(cb("up"))
+    env.handle_update(tmsg(UPKEY, mid=970))
+    env.handle_update(cb("upa:0"))
+    book = Book(1000.0)
+    _patch(monkeypatch, UpscaleAdapter, book)
+    monkeypatch.setattr(UpscaleAdapter, "open_market", lambda s, sym, side, notional, lev=1.0, stop=None, takes=None: book.opened.append((sym, side, notional, lev, stop, takes))
+                        or {"status": "sent", "leverage": 5.0, "leverage_requested": lev, "leverage_clamped": True, "margin": notional / 5.0})
+    cid = add_cfg(env, "Плечо выше максимума", leverage=10)
+    env.handle_update(cb(f"ay:{cid}:o:u"))
+    env.handle_update(cb(f"ab:{cid}:u"))
+    _signal_cycle(env)
+    assert len(book.opened) == 1 and book.opened[0][3] == 10.0
+    t = flat(" ".join(x for x in env.tg.texts(CHAT) if "недоступно на Upscale" in x))
+    assert "плечо 10× недоступно на Upscale" in t and "с плечом 5× и тем же объёмом" in t and "больше маржи" in t and f"/ex {cid} upscale leverage" in t

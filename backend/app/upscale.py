@@ -88,6 +88,13 @@ def as_list(payload, *keys):
     return []
 
 
+class UpscaleError(ExchangeError):
+    """Ошибка Upscale с кодом и телом ответа (нужны, например, границы плеча из invalid_leverage)."""
+    def __init__(self, msg, code=None, payload=None, status=None):
+        super().__init__(msg)
+        self.code, self.payload, self.status = code, payload if isinstance(payload, dict) else {}, status
+
+
 def _requests_transport(method, url, headers, params, body, timeout):
     import requests
     r = requests.request(method, url, headers=headers, params=params, json=body, timeout=timeout)
@@ -132,6 +139,7 @@ class UpscaleAdapter(ExchangeAdapter):
         self._markets = None
         self._markets_ts = 0.0
         self._markets_ttl = markets_ttl
+        self._lev_bounds = {}            # uuid рынка -> (время, минимум, максимум) плеча, которые биржа назвала в ответе invalid_leverage (границы зависят от фазы счёта — запоминаем ненадолго)
         self.user_id = None
 
     def describe(self):
@@ -187,7 +195,7 @@ class UpscaleAdapter(ExchangeAdapter):
                 elif lo is not None:
                     text += f" (минимум {from_fp9(lo):g}×)"
         trade_log("exchange_fail", "error", user=self.user_id, exchange=self.name, what=what, http=status, code=code, message=str(msg)[:300] if msg else None)
-        return ExchangeError(f"{self.label}, {what}: {text}" + (f" [{code}]" if code and code not in text else ""))
+        return UpscaleError(f"{self.label}, {what}: {text}" + (f" [{code}]" if code and code not in text else ""), code, payload, status)
 
     # ---------- рынки ----------
     def markets(self, refresh=False):
@@ -301,6 +309,40 @@ class UpscaleAdapter(ExchangeAdapter):
         return out
 
     # ---------- действия ----------
+    LEV_CACHE_SEC = 600.0
+
+    def _clamp_leverage(self, market_id, lev):
+        """Плечо в границах, которые биржа ранее назвала для этого рынка (запоминаются на LEV_CACHE_SEC секунд: после повышения фазы счёта максимум вырастает)."""
+        hit = self._lev_bounds.get(market_id)
+        if not hit or time.monotonic() - hit[0] > self.LEV_CACHE_SEC:
+            return lev
+        _, lo, hi = hit
+        return hi if (hi and lev > hi) else lo if (lo and lev < lo) else lev
+
+    def _increase_order(self, m, side, kind, notional, lev, what, trigger=None, deferred=False):
+        """Ордер, открывающий или увеличивающий позицию (market / limit): amount — котируемая сумма (маржа), leverage — плечо. Если плечо вне границ рынка / фазы счёта (invalid_leverage),
+        ордер повторяется один раз с ближайшим допустимым плечом: объём сделки (notional) сохраняется, поэтому маржа растёт (при плече ниже запрошенного). -> (ордер, плечо, маржа)."""
+        lev_used = self._clamp_leverage(m["id"], lev)
+        order = None
+        for attempt in (0, 1):
+            margin = notional / lev_used
+            body = {"accountId": self.account_id, "marketId": m["id"], "type": kind, "direction": side, "amount": to_fp9(margin), "leverage": to_fp9(lev_used)}
+            if trigger is not None:
+                body["triggerPrice"] = to_fp9(trigger)
+            try:
+                order = self._call("POST", "/orders", body=body, what=what)
+                break
+            except UpscaleError as e:
+                lo = from_fp9(e.payload.get("minLeverage")) if e.payload.get("minLeverage") else None
+                hi = from_fp9(e.payload.get("maxLeverage")) if e.payload.get("maxLeverage") else None
+                new = (hi if (hi and lev_used > hi) else lo if (lo and lev_used < lo) else None) if e.code == "invalid_leverage" else None
+                if attempt or new is None:
+                    raise
+                self._lev_bounds[m["id"]] = (time.monotonic(), lo, hi)
+                self._log("leverage_adjusted", "warn", requested=lev_used, used=new, min=lo, max=hi, what=what)
+                lev_used = new
+        return self._order_ok(order, what, deferred), lev_used, margin
+
     def _check_size(self, notional):
         if notional > self.max_usd + 1e-9:
             raise ExchangeError(f"Объём {notional:.2f} $ больше лимита TRADE_MAX_USD={self.max_usd:g} $ — ордер не отправлен.")
@@ -322,20 +364,20 @@ class UpscaleAdapter(ExchangeAdapter):
         price = self._price(m)
         before = self._find_position(symbol, side)
         size_before = from_fp9(before.get("size")) if before else 0.0
-        lev = max(1.0, float(leverage))
-        margin = notional / lev                                  # amount — котируемая сумма (маржа вместе с комиссией и спредом): фактический объём чуть меньше расчётного
-        body = {"accountId": self.account_id, "marketId": m["id"], "type": "market", "direction": side, "amount": to_fp9(margin), "leverage": to_fp9(lev)}
-        self._log("order_request", kind="open", symbol=symbol, side=side, notional=notional, margin=margin, price=price, leverage=lev, stop=stop, takes=takes)
-        order = self._order_ok(self._call("POST", "/orders", body=body, what="вход"), "вход")
-        self._log("order_ok", kind="entry", symbol=symbol, order=order.get("id"), status=order.get("status"))
+        lev = max(1.0, float(leverage))                          # amount — котируемая сумма (маржа вместе с комиссией и спредом): фактический объём чуть меньше расчётного
+        self._log("order_request", kind="open", symbol=symbol, side=side, notional=notional, margin=notional / lev, price=price, leverage=lev, stop=stop, takes=takes)
+        order, lev_used, margin = self._increase_order(m, side, "market", notional, lev, "вход")
+        self._log("order_ok", kind="entry", symbol=symbol, order=order.get("id"), status=order.get("status"), leverage=lev_used)
         pos = self._find_position(symbol, side)
         if pos is None:
             raise ExchangeError("Ордер на вход принят, но позиции на Upscale нет (ордер мог быть отклонён при исполнении) — проверьте счёт и журнал ордеров.")
         filled = from_fp9(pos.get("size")) - size_before
         if filled <= 0:
             raise ExchangeError("Ордер на вход принят, но размер позиции не вырос — проверьте счёт.")
-        res = {"status": "sent", "entry_order": order.get("id"), "symbol": symbol, "side": side, "amount": filled, "price": price, "notional": filled * price, "leverage": lev,
+        res = {"status": "sent", "entry_order": order.get("id"), "symbol": symbol, "side": side, "amount": filled, "price": price, "notional": filled * price, "leverage": lev_used, "margin": margin,
                "position": pos.get("idx"), "orders": []}
+        if abs(lev_used - lev) > 1e-9:
+            res.update(leverage_requested=lev, leverage_clamped=True)
         res["orders"] = self._protect(symbol, side, pos.get("idx"), filled, stop, takes)
         return res
 
@@ -378,12 +420,13 @@ class UpscaleAdapter(ExchangeAdapter):
         self._check_size(notional)
         m = self._market(symbol)
         lev = max(1.0, float(leverage))
-        margin = notional / lev
-        body = {"accountId": self.account_id, "marketId": m["id"], "type": "limit", "direction": side, "amount": to_fp9(margin), "leverage": to_fp9(lev), "triggerPrice": to_fp9(price)}
-        self._log("order_request", kind="limit_entry", symbol=symbol, side=side, notional=notional, margin=margin, price=price, leverage=lev)
-        order = self._order_ok(self._call("POST", "/orders", body=body, what="лимитный вход"), "лимитный вход", deferred=True)
-        self._log("order_ok", kind="limit_entry", symbol=symbol, order=order.get("id"))
-        return {"status": "sent", "order_id": order.get("id"), "symbol": symbol, "side": side, "price": price, "notional": notional, "leverage": lev}
+        self._log("order_request", kind="limit_entry", symbol=symbol, side=side, notional=notional, margin=notional / lev, price=price, leverage=lev)
+        order, lev_used, margin = self._increase_order(m, side, "limit", notional, lev, "лимитный вход", trigger=price, deferred=True)
+        self._log("order_ok", kind="limit_entry", symbol=symbol, order=order.get("id"), leverage=lev_used)
+        res = {"status": "sent", "order_id": order.get("id"), "symbol": symbol, "side": side, "price": price, "notional": notional, "leverage": lev_used, "margin": margin}
+        if abs(lev_used - lev) > 1e-9:
+            res.update(leverage_requested=lev, leverage_clamped=True)
+        return res
 
     def order_state(self, order_id, symbol):
         """Нет запроса «ордер по id»: стоит среди активных — open, иначе unknown (исполнился или снят — вызывающий смотрит позицию, как и у остальных бирж)."""

@@ -1077,6 +1077,15 @@ class SignalService:
         if status != "skipped" and ok_text:
             self.send(chat, ok_text)
 
+    def _lev_note(self, cfg, ex, r):
+        """Биржа ограничила плечо (Upscale: максимум зависит от счёта и фазы): вход выполнен с допустимым плечом и тем же объёмом — сообщаем, что маржи ушло больше (или меньше)."""
+        if not isinstance(r, dict) or not r.get("leverage_clamped"):
+            return
+        m = r.get("margin")
+        self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"ℹ️ {self._name(cfg, ex)}: плечо {r['leverage_requested']:g}× недоступно на {EXCHANGE_LABELS.get(ex, ex)} — вход выполнен с плечом {r['leverage']:g}× и тем же объёмом"
+                  + (f", под него уходит больше маржи ({fm.num(m, 2)} $)." if r["leverage"] < r["leverage_requested"] else ".")
+                  + " Своё плечо для биржи: /ex " + f"{cfg['id']} {ex} leverage=…")
+
     def _open_on(self, cfg, res, sig, plan, ex):
         """Вход или добор по новому сигналу на одной бирже. Перед ордером состояние сверяется с реальной биржей."""
         ecfg = cfg["ex"][ex]
@@ -1120,6 +1129,7 @@ class SignalService:
             self._open_failed(cfg, sig, add, r.get("error"), ex)
         else:
             self.db.clear_retry(cfg["id"], ex)
+            self._lev_note(cfg, ex, r)
             if held and st != "dry_run":
                 self.send(self.db.get_user(cfg["user_id"])["telegram_id"], f"🔓 {self._name(cfg, ex)}: {'добор' if add else 'вход'} выполнен БЕЗ стоп-ордера — стоп-лосс по маркету (настройка конфига). Бот сам закроет позицию по рынку: "
                                                                            "когда цена дойдёт до стопа, на следующем отчёте с метриками ниже порогов входа и ценой всё ещё за стопом. Между отчётами убыток по позиции на бирже не ограничен."
@@ -1241,6 +1251,7 @@ class SignalService:
                 self.send(chat, f"🧪 {name}: симуляция — поставил бы лимитку на {side_ru} по {fm.price(level)} ({pct:g}% {'ниже' if d == 1 else 'выше'} цены {fm.price(ref)}), ордер не отправлялся.")
                 return
             order_id = r.get("order_id")
+            self._lev_note(cfg, ex, r)
         self.db.set_pending(cfg["id"], cfg["user_id"], sig["ts"], p["symbol"], sig["side"], mode, level, ref, notional, margin, lev, order_id, self.clock() + ttl * 3600, exchange=ex)
         self.db.clear_retry(cfg["id"], ex)
         if mode == "pullback":

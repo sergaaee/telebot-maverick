@@ -27,6 +27,7 @@ class FakeUpscale:
         self.markets = [self.market(BTC, "BTC", price), self.market(ETH, "ETH", 3000.0)]
         self.positions, self.orders = [], []
         self.fail = {}                     # (метод, путь-префикс) -> (код, тело)
+        self.max_lev, self.min_lev = 50.0, 1.0   # границы плеча счёта / фазы (нарушение — 400 invalid_leverage с границами в теле)
         self.exec_error = None             # код, с которым движок отклоняет market-ордер при исполнении
         self.close_orders_fail = False     # стоп / тейк не принимаются
         self._n = 0
@@ -97,8 +98,8 @@ class FakeUpscale:
         if t in ("market", "limit"):
             mx = next((m for m in self.markets if m["id"] == body["marketId"]), None)
             lev = from_fp9(body["leverage"])
-            if lev > 50:
-                return 400, {"statusCode": 400, "message": "lev", "error": "invalid_leverage", "minLeverage": fp(1), "maxLeverage": fp(50)}, {}
+            if lev > self.max_lev + 1e-9 or lev < self.min_lev - 1e-9:
+                return 400, {"statusCode": 400, "message": "lev", "error": "invalid_leverage", "minLeverage": fp(self.min_lev), "maxLeverage": fp(self.max_lev)}, {}
             if mx["settings"]["isPaused"]:
                 return 403, {"statusCode": 403, "message": "paused", "error": "market_paused"}, {}
             if t == "limit":
@@ -227,8 +228,6 @@ def test_open_market_errors_are_clear_and_nothing_stays_unprotected():
         a.open_market("BTC/USDT:USDT", "long", 1000.0, 5.0)
     assert not writes(a.fake)
     a = adapter()
-    with pytest.raises(ExchangeError, match="плечо вне допустимых границ.*до 50"):
-        a.open_market("BTC/USDT:USDT", "long", 1000.0, 100.0)
     with pytest.raises(ExchangeError, match="нет рынка DOGE"):
         a.open_market("DOGE/USDT:USDT", "long", 100.0, 2.0)
     a.fake.markets[0]["settings"]["isPaused"] = True
@@ -373,3 +372,47 @@ def test_adapter_for_builds_upscale_from_the_saved_account_and_test_size_uses_it
     assert manage.test_size(adapter(), 1.0) == (4.4, 25.0)
     r = manage.test_open(db, adapter(), uid, "long", 1.0)
     assert r["status"] == "sent" and r["exchange"]["name"] == "upscale" and r["leverage"] == 25 and r["notional"] == pytest.approx(110.0)
+
+
+def entries(fake):
+    return [c["body"] for c in fake.calls if c["method"] == "POST" and c["path"] == "/orders" and c["body"]["type"] in ("market", "limit")]
+
+
+def test_leverage_above_the_account_maximum_is_lowered_keeping_the_notional():
+    """Счёт Upscale допускает плечо до 5×, а у конфига 10×: ордер повторяется с 5×, объём сделки прежний (маржа вдвое больше), а не «ошибка плеча»."""
+    a = adapter()
+    a.fake.max_lev = 5.0
+    r = a.open_market("BTC/USDT:USDT", "long", 1000.0, 10.0, stop=95000.0, takes=[(103000.0, 100)])
+    e = entries(a.fake)
+    assert [from_fp9(x["leverage"]) for x in e] == [10.0, 5.0] and [from_fp9(x["amount"]) for x in e] == [100.0, 200.0]                  # отказ -> повтор с плечом 5× и маржой 200 $
+    assert r["status"] == "sent" and r["leverage"] == 5.0 and r["leverage_requested"] == 10.0 and r["leverage_clamped"] is True and r["margin"] == 200.0
+    assert r["notional"] == pytest.approx(1000.0, rel=0.01)
+    assert from_fp9(a.fake.positions[0]["margin"]) == 200.0 and r["orders"] and [o["kind"] for o in r["orders"]] == ["stop", "take"]            # защита встала
+    n = len(entries(a.fake))
+    a.open_market("BTC/USDT:USDT", "long", 500.0, 10.0)                                                                                      # границы запомнены: сразу с 5×, без лишнего отказа
+    e2 = entries(a.fake)[n:]
+    assert len(e2) == 1 and from_fp9(e2[0]["leverage"]) == 5.0 and from_fp9(e2[0]["amount"]) == 100.0
+    a.LEV_CACHE_SEC = 0                                                                                                                       # память о границах истекла (например, счёт перешёл в другую фазу)
+    n = len(entries(a.fake))
+    a.fake.max_lev = 20.0
+    r3 = a.open_market("BTC/USDT:USDT", "long", 400.0, 10.0)
+    assert [from_fp9(x["leverage"]) for x in entries(a.fake)[n:]] == [10.0] and "leverage_clamped" not in r3                                   # максимум вырос — плечо как запрошено
+
+
+def test_leverage_below_the_minimum_is_raised_limit_orders_too_and_hopeless_cases_still_fail():
+    a = adapter()
+    a.fake.min_lev = 3.0
+    r = a.place_limit_entry("BTC/USDT:USDT", "long", 900.0, 99000.0, 1.0)
+    e = entries(a.fake)
+    assert [from_fp9(x["leverage"]) for x in e] == [1.0, 3.0] and from_fp9(e[-1]["amount"]) == 300.0 and e[-1]["type"] == "limit" and e[-1]["triggerPrice"] == fp(99000.0)
+    assert r["leverage"] == 3.0 and r["leverage_clamped"] and r["margin"] == 300.0 and r["order_id"]
+    b = adapter()
+    b.fake.fail[("POST", "/orders")] = (400, {"statusCode": 400, "message": "lev", "error": "invalid_leverage", "maxLeverage": fp(5)})            # отказ и после повтора
+    with pytest.raises(ExchangeError, match="плечо вне допустимых границ.*максимум 5×"):
+        b.open_market("BTC/USDT:USDT", "long", 1000.0, 10.0)
+    assert len(entries(b.fake)) == 2 and not b.fake.positions                                                                                  # ровно одна повторная попытка
+    c = adapter()
+    c.fake.fail[("POST", "/orders")] = (400, {"statusCode": 400, "message": "lev", "error": "invalid_leverage"})                                # без границ в теле угадывать нечего
+    with pytest.raises(ExchangeError, match="плечо вне допустимых границ"):
+        c.open_market("BTC/USDT:USDT", "long", 1000.0, 10.0)
+    assert len(entries(c.fake)) == 1
