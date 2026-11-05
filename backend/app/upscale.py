@@ -18,7 +18,7 @@ import uuid
 from decimal import ROUND_DOWN, Decimal
 
 from .tradelog import trade_error, trade_log
-from .trading import ExchangeAdapter, ExchangeError, NotConfigured
+from .trading import DEFAULT_MAX_USD, ExchangeAdapter, ExchangeError, NotConfigured
 
 BASE_URL = "https://api.upscale.trade"
 FP9 = Decimal(10) ** 9
@@ -133,7 +133,7 @@ class UpscaleAdapter(ExchangeAdapter):
         self.acct_type = acct_type if acct_type in ACCOUNT_TYPES else "real"        # неизвестный тип считаем боевым (осторожнее)
         self.testnet = self.acct_type == "demo"
         self.net = self.acct_type
-        self.max_usd = float(max_usd if max_usd is not None else (os.getenv("TRADE_MAX_USD") or 5000))
+        self.max_usd = float(max_usd if max_usd is not None else (os.getenv("TRADE_MAX_USD") or DEFAULT_MAX_USD))
         self.base_url = (base_url or os.getenv("UPSCALE_API_URL") or BASE_URL).rstrip("/")
         self._transport = transport or _requests_transport
         self._markets = None
