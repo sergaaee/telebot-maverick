@@ -10,7 +10,7 @@ import threading
 import time
 from html import escape as esc
 
-from app.db import EXCHANGES, DbError
+from app.db import EXCHANGES, HL_SLOTS, DbError, hl_slot, is_hl
 
 from . import formatting as fm
 from .configs import ConfigError, default_name, parse_configs, validate
@@ -306,11 +306,11 @@ class SignalService:
         elif kind == "fills":
             exname = self.EX_ALIASES.get(which.strip() or "hl")
             if not exname:
-                self.send(chat, "Биржа: hl (Hyperliquid), bybit или upscale — например, /export fills bybit.")
+                self.send(chat, "Биржа: hl (Hyperliquid), hl2 … (другие аккаунты Hyperliquid), bybit или upscale — например, /export fills bybit.")
                 return
             ad = self.adapter_for(user["id"], exname)
             if not ad.real:
-                self.send(chat, f"Счёт {EXCHANGE_LABELS[exname]} не подключён ({'/hl' if exname == 'hyperliquid' else '/bybit' if exname == 'bybit' else '/upscale'}) — реальных исполнений нет.")
+                self.send(chat, f"Счёт {EXCHANGE_LABELS[exname]} не подключён ({self.connect_cmd(exname)}) — реальных исполнений нет.")
                 return
             try:
                 body, name = exporter.fills_csv(ad.fills(500)), "maverick-fills.csv"
@@ -336,22 +336,38 @@ class SignalService:
                 log.exception("сводка для %s", u["login"])
             self.db.mark_digest_sent(u["id"], now)                   # и при сбое: не пытаться каждую минуту
 
+    @staticmethod
+    def connect_cmd(exname):
+        """Команда подключения счёта биржи: /hl, /hl 2 …, /bybit, /upscale."""
+        return "/bybit" if exname == "bybit" else "/upscale" if exname == "upscale" else "/hl" + (f" {hl_slot(exname)}" if hl_slot(exname) > 1 else "")
+
     def cmd_hl(self, chat, user, arg):
-        """Подключение счёта Hyperliquid (адрес кошелька + ключ API-кошелька) и состояние счёта."""
-        self.ui.open(chat, user, "x")
+        """Подключение счёта Hyperliquid (адрес кошелька + ключ API-кошелька) и состояние счёта. /hl — первый аккаунт, /hl 2, /hl 3 … — дополнительные (до HL_MAX_ACCOUNTS)."""
+        n = (arg or "").strip().lstrip("#")
+        if n and not (n.isdigit() and 1 <= int(n) <= len(HL_SLOTS)):
+            self.send(chat, f"Аккаунт Hyperliquid — номер от 1 до {len(HL_SLOTS)}: /hl (первый), " + ", ".join(f"/hl {i}" for i in range(2, len(HL_SLOTS) + 1)) + "." if len(HL_SLOTS) > 1
+                      else "Подключить можно один аккаунт Hyperliquid: /hl (число аккаунтов задаёт администратор: HL_MAX_ACCOUNTS).")
+            return
+        self.ui.open(chat, user, "x" if not n or int(n) == 1 else f"x:{int(n)}")
 
     # ---------------- подключение счёта Hyperliquid ----------------
     HL_TTL = 600
 
-    def start_hl_connect(self, chat, user, testnet=True):
+    def start_hl_connect(self, chat, user, testnet=True, slot="hyperliquid"):
+        slot = slot if is_hl(slot) else "hyperliquid"
         self._by.pop(user["id"], None)
         self._up.pop(user["id"], None)
-        self._hl[user["id"]] = {"step": "wallet", "testnet": bool(testnet), "until": time.time() + self.HL_TTL, "tries": 0}
+        self._hl[user["id"]] = {"step": "wallet", "testnet": bool(testnet), "until": time.time() + self.HL_TTL, "tries": 0, "slot": slot}
         net = "тестовая сеть" if testnet else "БОЕВАЯ сеть"
-        self.tg.send_message(chat, f"🔌 <b>Подключение Hyperliquid</b> ({net})\n\nШаг 1 из 2: пришлите <b>адрес основного кошелька</b> Hyperliquid (0x… и 40 символов) — это счёт, на котором лежат средства.\n\n"
+        label = EXCHANGE_LABELS[slot]
+        self.tg.send_message(chat, f"🔌 <b>Подключение {label}</b> ({net})\n\nШаг 1 из 2: пришлите <b>адрес основного кошелька</b> Hyperliquid (0x… и 40 символов) — это счёт, на котором лежат средства.\n\n"
                                    "Дальше я попрошу <b>ключ API-кошелька</b>: он умеет торговать, но не выводить средства (Hyperliquid → More → API). Ключ ОСНОВНОГО кошелька присылать нельзя — я его не приму.\n"
                                    "Ваши сообщения с адресом и ключом я удалю из чата сразу после обработки; ключ хранится в базе зашифрованным. Отмена — кнопка ниже или /cancel.",
-                             keyboard=[[("Отмена", "hlx")]])
+                             keyboard=[[("Отмена", self._hlx(slot))]])
+
+    @staticmethod
+    def _hlx(slot):
+        return "hlx" if slot == "hyperliquid" else f"hlx:{hl_slot(slot)}"
 
     def cancel_hl(self, user):
         """Отменяет незавершённое подключение счёта (Hyperliquid или Bybit)."""
@@ -370,9 +386,10 @@ class SignalService:
         st = self._hl.get(user["id"])
         if not st:
             return False
+        slot = st.get("slot", "hyperliquid")
         if time.time() > st["until"]:
             self._hl.pop(user["id"], None)
-            self.send(chat, "⌛ Время подключения вышло. Начните заново: /hl")
+            self.send(chat, f"⌛ Время подключения вышло. Начните заново: {self.connect_cmd(st.get('slot', 'hyperliquid'))}")
             return False
         if cmd:
             self._hl.pop(user["id"], None)
@@ -391,19 +408,24 @@ class SignalService:
                 self.send(chat, "Адрес должен быть вида <code>0x…</code> (42 символа). Пришлите ещё раз или нажмите «Отмена».")
                 return True
             st.update(wallet=wallet, step="key")
-            self.send(chat, "Шаг 2 из 2: пришлите <b>ключ API-кошелька</b> (64 символа, можно с 0x). Сообщение с ключом я удалю сразу.", keyboard=[[("Отмена", "hlx")]])
+            self.send(chat, "Шаг 2 из 2: пришлите <b>ключ API-кошелька</b> (64 символа, можно с 0x). Сообщение с ключом я удалю сразу.", keyboard=[[("Отмена", self._hlx(slot))]])
             return True
         wallet, key = (tokens[0], tokens[1]) if len(tokens) >= 2 else (st.get("wallet", ""), tokens[0])
         st["tries"] += 1
+        other = next((a for a in self.db.list_exchange_accounts(user["id"]) if is_hl(a["exchange"]) and a["exchange"] != slot and a["testnet"] == st["testnet"] and a["wallet"].lower() == wallet.lower()), None)
+        if other:                                                                  # один и тот же счёт в двух слотах — по сигналу открылись бы две одинаковые позиции подряд
+            self._hl.pop(user["id"], None)
+            self.send(chat, f"❌ Этот кошелёк уже подключён как <b>{EXCHANGE_LABELS[other['exchange']]}</b>. Для второго аккаунта нужен другой основной кошелёк; чтобы заменить счёт, сначала отключите тот (/monitor → 🏦 → 🔌 Отключить).")
+            return True
         try:
             res = verify_hyperliquid(wallet, key, st["testnet"], user_id=user["id"])
         except ValueError as e:
             if st["tries"] >= 5:
                 self._hl.pop(user["id"], None)
-                self.send(chat, f"❌ {esc(str(e))}\n\nСлишком много попыток — подключение отменено. Начните заново: /hl")
+                self.send(chat, f"❌ {esc(str(e))}\n\nСлишком много попыток — подключение отменено. Начните заново: {self.connect_cmd(slot)}")
                 return True
             st.update(wallet=wallet, step="key")
-            self.send(chat, f"❌ {esc(str(e))}\n\nПришлите ключ ещё раз (или «Отмена»).", keyboard=[[("Отмена", "hlx")]])
+            self.send(chat, f"❌ {esc(str(e))}\n\nПришлите ключ ещё раз (или «Отмена»).", keyboard=[[("Отмена", self._hlx(slot))]])
             return True
         try:
             enc = encrypt(key if key.startswith("0x") else "0x" + key, self.db.path)
@@ -411,16 +433,17 @@ class SignalService:
             self._hl.pop(user["id"], None)
             self.send(chat, f"⚠️ Не удалось сохранить ключ: {esc(str(e))}")
             return True
-        self.db.set_exchange_account(user["id"], "hyperliquid", wallet, enc, st["testnet"], res["agent"])
-        forget_adapter(user["id"])
+        self.db.set_exchange_account(user["id"], slot, wallet, enc, st["testnet"], res["agent"])
+        forget_adapter(user["id"], slot)
         self._hl.pop(user["id"], None)
-        self.db.add_auto_log(user["id"], None, "exchange_connected", None, None, "info", {"exchange": "hyperliquid", "testnet": st["testnet"], "wallet": mask_address(wallet)})
-        trade_log("account_connected", user=user["id"], exchange="hyperliquid", testnet=st["testnet"], wallet=wallet, agent=res["agent"], message_deleted=deleted)
+        self.db.add_auto_log(user["id"], None, "exchange_connected", None, None, "info", {"exchange": slot, "testnet": st["testnet"], "wallet": mask_address(wallet)})
+        trade_log("account_connected", user=user["id"], exchange=slot, testnet=st["testnet"], wallet=wallet, agent=res["agent"], message_deleted=deleted)
         eq = res["account"].get("equity")
-        self.send(chat, f"✅ <b>Hyperliquid подключён</b> ({'тестовая сеть' if st['testnet'] else '<b>БОЕВАЯ сеть</b>'})\nКошелёк <code>{mask_address(wallet)}</code> · API-кошелёк <code>{mask_address(res['agent'])}</code>"
+        self.send(chat, f"✅ <b>{EXCHANGE_LABELS[slot]} подключён</b> ({'тестовая сеть' if st['testnet'] else '<b>БОЕВАЯ сеть</b>'})\nКошелёк <code>{mask_address(wallet)}</code> · API-кошелёк <code>{mask_address(res['agent'])}</code>"
                         + (f"\nКапитал: {fm.num(eq, 2)} $" if eq is not None else "")
                         + ("\n🧹 Ваши сообщения с адресом и ключом удалены из чата." if deleted else "\n⚠️ Не удалось удалить ваше сообщение с ключом — удалите его вручную (у себя и «у всех»).")
-                        + "\n\nАвтомод по-прежнему выключен у всех конфигов: включайте его в /monitor. Счёт и позиции видны и на сайте (страница «Мониторинг»).",
+                        + (f"\n\nАвтомод на этом аккаунте выключен у всех конфигов: включайте его в /monitor (карточка конфига → {EXCHANGE_LABELS[slot]}). Размер и лимитный вход для аккаунта: /ex."
+                           if slot != "hyperliquid" else "\n\nАвтомод по-прежнему выключен у всех конфигов: включайте его в /monitor.") + " Счёт и позиции видны и на сайте (страница «Мониторинг»).",
                   )
         return True
 
@@ -583,7 +606,8 @@ class SignalService:
         """Подключение счёта Upscale (личный API-ключ и выбор счёта) и состояние счёта."""
         self.ui.open(chat, user, "xu")
 
-    EX_ALIASES = {"hl": "hyperliquid", "hyper": "hyperliquid", "hyperliquid": "hyperliquid", "by": "bybit", "bb": "bybit", "bybit": "bybit", "up": "upscale", "upscale": "upscale"}
+    EX_ALIASES = {"hl": "hyperliquid", "hyper": "hyperliquid", "by": "bybit", "bb": "bybit", "bybit": "bybit", "up": "upscale", "upscale": "upscale"} | {
+        alias: name for name in HL_SLOTS for alias in (name, f"hl{hl_slot(name)}", f"hyper{hl_slot(name)}")}                    # hl, hl2, hl3 … = аккаунты Hyperliquid
     EX_KEYS = ("trade_pct", "leverage", "pyramid_pct", "pyramid_leverage", "entry_limit_pct", "entry_limit_dir", "entry_limit_ttl_h")
 
     def cmd_ex(self, chat, user, arg):
@@ -592,7 +616,7 @@ class SignalService:
         parts = arg.replace(",", ".").split()
         if not parts or not parts[0].lstrip("#").isdigit():
             self.send(chat, "Настройки конфига отдельно для биржи:\n/ex № — показать\n/ex № bybit trade_pct=10 leverage=5 — 10% депозита с плечом 5× только на Bybit\n"
-                            "/ex № hl entry_limit_pct=0.3 entry_limit_dir=pullback entry_limit_ttl_h=4 — вход лимиткой на Hyperliquid\n"
+                            "/ex № hl entry_limit_pct=0.3 entry_limit_dir=pullback entry_limit_ttl_h=4 — вход лимиткой на Hyperliquid (hl2, hl3 … — другие аккаунты)\n"
                             "/ex № bybit trade_pct=- — убрать настройку (брать из конфига); /ex № bybit reset — убрать все\n"
                             f"Ключи: {', '.join(self.EX_KEYS)}.\nСигналы и правила выхода (стоп, тейки, БУ) общие — из конфига.")
             return
@@ -604,7 +628,7 @@ class SignalService:
             return
         name = self.EX_ALIASES.get(parts[1].lower())
         if not name:
-            self.send(chat, "Биржа: hl (Hyperliquid), bybit или upscale.")
+            self.send(chat, "Биржа: hl (Hyperliquid)" + ("".join(f", hl{i}" for i in range(2, len(HL_SLOTS) + 1)) + " (другие аккаунты Hyperliquid)" if len(HL_SLOTS) > 1 else "") + ", bybit или upscale.")
             return
         patch = {}
         for tok in parts[2:]:

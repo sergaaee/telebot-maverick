@@ -858,6 +858,7 @@ def scenario(pg, base, state_url):
     check("отключение счёта: блок снова «не подключён», в базе ключа нет", "не подключён" in pg.get_by_test_id("mon-exchange").inner_text() and E2E_DB.get_exchange_account(tid) is None and "симуляция" in pg.get_by_test_id("mon-banner").inner_text())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_role("button", name="Открыть", exact=True).click(); pg.get_by_test_id("mon-msg").wait_for(timeout=10000)
+    pg.get_by_test_id("mon-log").get_by_text("тестовая позиция").last.wait_for(timeout=10000)          # сообщение появляется раньше, чем страница перечитала журнал
     check("тестовая позиция $1: симуляция, запись в журнале", "Симуляция" in pg.get_by_test_id("mon-msg").inner_text() and "тестовая позиция" in pg.get_by_test_id("mon-log").last.inner_text())
     pg.once("dialog", lambda d: d.accept())
     card("Переименован").get_by_test_id("mon-auto").locator("input").nth(0).click(); pg.wait_for_timeout(1200)           # после паузы автомод был выключен — включаем снова, чтобы было что гасить
@@ -945,6 +946,36 @@ def scenario(pg, base, state_url):
     pg.get_by_test_id("exchange-disconnect-upscale").click(); pg.wait_for_timeout(1500)
     check("отключение Upscale: ключа в базе нет, блок снова «не подключён»", E2E_DB.get_exchange_account(tid, "upscale") is None and "не подключён" in pg.get_by_test_id("mon-exchange-upscale").inner_text()
           and card("Переименован").get_by_test_id("mon-auto-upscale").count() == 0)
+    # несколько аккаунтов Hyperliquid: второй — отдельная «биржа» со своим блоком, переключателями и настройками конфига (появляются, только когда аккаунт подключён через бота)
+    check("второй аккаунт Hyperliquid: пока не подключён — блока и переключателей нет, у первого блока подсказка про /hl 2; в тестовой позиции три биржи",
+          pg.get_by_test_id("mon-exchange-hyperliquid2").count() == 0 and "/hl 2" in pg.get_by_test_id("mon-exchange").inner_text() and card("Переименован").get_by_test_id("mon-auto-hyperliquid2").count() == 0
+          and pg.get_by_test_id("test-exchange").locator("option").count() == 3)
+    E2E_DB.set_exchange_account(tid, "hyperliquid2", "0x" + "cd" * 20, "не-шифртекст", True, "0x" + "ee" * 20)
+    pg.get_by_role("button", name="Обновить", exact=True).click(); pg.get_by_test_id("exchange-disconnect-hyperliquid2").wait_for(timeout=15000)
+    h2_text = pg.get_by_test_id("mon-exchange-hyperliquid2").inner_text()
+    check("блок «Hyperliquid 2»: подключённый аккаунт — тестовая сеть, замаскированный кошелёк, ключа на странице нет, баннер и тестовая позиция знают о нём",
+          "Hyperliquid 2" in h2_text and "тестовая сеть" in h2_text and "0xcdcd…cdcd" in h2_text and "не-шифртекст" not in pg.content() and "Hyperliquid 2" in pg.get_by_test_id("mon-banner").inner_text()
+          and pg.get_by_test_id("test-exchange").locator("option").count() == 4)
+    check("у карточки появились отдельные переключатели Hyperliquid 2 (выключены), у первого аккаунта всё как было",
+          card("Переименован").get_by_test_id("mon-auto-hyperliquid2").count() == 1 and not card("Переименован").get_by_test_id("mon-auto-hyperliquid2").locator("input").nth(0).is_checked()
+          and card("Переименован").get_by_test_id("mon-base-hyperliquid2").input_value() == "config" and card("Переименован").get_by_test_id("mon-auto").count() == 1)
+    pg.once("dialog", lambda d: d.accept())
+    card("Переименован").get_by_test_id("mon-auto-hyperliquid2").locator("input").nth(0).click(); pg.wait_for_timeout(1500)
+    c_h2 = E2E_DB.find_config(tid, "Переименован")
+    check("автомод второго аккаунта Hyperliquid включается отдельно от первого", c_h2["ex"]["hyperliquid2"]["open"] and not c_h2["ex"]["hyperliquid"]["open"] and not c_h2["auto"]["open"])
+    card("Переименован").get_by_test_id("mon-auto-hyperliquid2").locator("input").nth(0).click(); pg.wait_for_timeout(1000)
+    if not card("Переименован").get_by_test_id("mon-exover").evaluate("d => d.open"):
+        card("Переименован").get_by_test_id("mon-exover").locator("summary").click()
+    eh = card("Переименован").get_by_test_id("mon-ex-hyperliquid2")
+    eh.get_by_test_id("mon-ex-hyperliquid2-pct").fill("4"); eh.get_by_test_id("mon-ex-hyperliquid2-lev").fill("2"); eh.get_by_test_id("mon-ex-hyperliquid2-save").click(); pg.wait_for_timeout(1800)
+    c_h2 = E2E_DB.find_config(tid, "Переименован")
+    check("свои настройки размера у второго аккаунта сохранены только для него", c_h2["ex"]["hyperliquid2"]["over"] == {"trade_pct": 4.0, "leverage": 2.0} and c_h2["ex"]["hyperliquid"]["over"] == {} and c_h2["params"]["trade_pct"] != 4)
+    card("Переименован").get_by_test_id("mon-ex-hyperliquid2-reset").click(); pg.wait_for_timeout(1500)
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("exchange-disconnect-hyperliquid2").click(); pg.wait_for_timeout(1500)
+    check("отключение второго аккаунта: ключа в базе нет, блок и переключатели исчезли, первый аккаунт не тронут",
+          E2E_DB.get_exchange_account(tid, "hyperliquid2") is None and pg.get_by_test_id("mon-exchange-hyperliquid2").count() == 0 and card("Переименован").get_by_test_id("mon-auto-hyperliquid2").count() == 0
+          and card("Переименован").get_by_test_id("mon-auto").count() == 1 and pg.get_by_test_id("test-exchange").locator("option").count() == 3)
     check("кнопка «СТОП ВСЁ» с подсказкой", pg.get_by_test_id("panic").is_visible())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_test_id("panic").click(); pg.get_by_test_id("mon-msg").filter(has_text="СТОП ВСЁ").wait_for(timeout=10000)
