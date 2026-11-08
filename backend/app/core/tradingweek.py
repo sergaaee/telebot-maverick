@@ -37,3 +37,21 @@ def in_window(t_ms, before_min=0):
 
 def window_close(t_ms, before_min=0):
     return week_bounds(t_ms, before_min)[1]
+
+
+def next_close(t_ms, before_min=0):
+    """Ближайшее закрытие недели (с учётом сдвига before_min) строго после момента t_ms. Внутри торгового окна это закрытие текущей недели, а для момента в выходные
+    (позиция, открытая в субботу или воскресенье, когда вход в выходные разрешён) — закрытие следующей пятницы."""
+    c = week_bounds(t_ms, before_min)[1]
+    return c if t_ms < c else week_bounds(t_ms + 7 * 24 * HOUR_MS, before_min)[1]
+
+
+def options(p):
+    """Настройки выходных из параметров -> (не открывать по выходным, закрывать перед выходными, сдвиг закрытия в минутах).
+    Две независимые опции: weekend_no_entry — сигналы вне торгового окна (с пятницы после закрытия Нью-Йорка до открытия Токио в понедельник) пропускаются;
+    weekend_close — позиция закрывается по open свечи закрытия пятницы (метка WKND), на friday_close_before_min минут раньше.
+    Если опции не заданы (параметры старого вида), обе берутся из прежней галочки weekdays_only: она включала обе сразу."""
+    legacy = bool(p.get("weekdays_only"))
+    no_entry = p.get("weekend_no_entry")
+    close = p.get("weekend_close")
+    return (legacy if no_entry is None else bool(no_entry)), (legacy if close is None else bool(close)), float(p.get("friday_close_before_min") or 0.0)

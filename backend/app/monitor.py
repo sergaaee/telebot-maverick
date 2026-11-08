@@ -23,12 +23,12 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
                        "hold_h": t["hold_h"]} for t in [t for t in res["trades"] if t["reason"] != "OPEN"][-5:]][::-1],
            "settings": {"sl_pct": p["sl_pct"], "tps": p["tps"], "be_after_tp1": p["be_after_tp1"], "leverage": p["leverage"], "pyramid_leverage": p.get("pyramid_leverage"),
                         "funding_apr": p.get("funding_apr") or 0.0, "funding_period_h": p.get("funding_period_h") or 8, "trade_pct": p["trade_pct"], "pyramid_enabled": p["pyramid_enabled"], "pyramid_pct": p.get("pyramid_pct"), "deposit": p["deposit"], "liquidation_sim": p.get("liquidation_sim", False),
-                        "weekdays_only": p.get("weekdays_only", False), "side": p["side"], "sl_market": bool(p.get("sl_market")), "sl_hold_strong": bool(p.get("sl_hold_strong")),
+                        "weekdays_only": p.get("weekdays_only", False), "weekend_no_entry": tradingweek.options(p)[0], "weekend_close": tradingweek.options(p)[1], "exit_long_ds": p.get("exit_long_ds"), "exit_short_ds": p.get("exit_short_ds"), "side": p["side"], "sl_market": bool(p.get("sl_market")), "sl_hold_strong": bool(p.get("sl_hold_strong")),
                         "pyramid_leverage": p.get("pyramid_leverage"), "entry_limit_pct": p.get("entry_limit_pct") or 0.0, "entry_limit_dir": p.get("entry_limit_dir") or "pullback", "entry_limit_ttl_h": p.get("entry_limit_ttl_h") or 4.0}}
     if detail:                                             # подробности: статистика, вся история закрытых сделок (последние 300) и полные параметры
         t = res["stats"]["total"]
         keys = ("trades", "winrate", "profit_factor", "total_usd", "return_pct", "sharpe", "max_dd_usd", "max_dd_pct", "max_dd_real_usd", "max_dd_real_pct", "avg_pct",
-                "tp", "sl", "be", "rev", "liq", "wknd", "max_loss_streak", "exposure_pct", "positions", "adds", "funding_usd")
+                "tp", "sl", "be", "rev", "liq", "wknd", "ds", "max_loss_streak", "exposure_pct", "positions", "adds", "funding_usd")
         out["stats"] = {k: t.get(k) for k in keys}
         out["range"] = res["range"]
         out["params"] = p
@@ -68,7 +68,7 @@ def _view(res, price, latest, candle_ts, name, config_id, auto, paused, detail=F
     out["position"] = {
         "side": side, "opened_ts": first, "hold_h": ((candle_ts or first) - first) / 3.6e6, "legs": rows, "notional": notional, "margin": margin, "avg_entry": avg_entry,
         "pnl_usd": pnl, "funding_usd": sum(r["funding_usd"] for r in rows), "pnl_pct_deposit": pnl / p["deposit"] * 100 if p["deposit"] else None, "pnl_pct_margin": pnl / margin * 100 if margin else None,
-        "deadline_ts": tradingweek.window_close(first, p.get("friday_close_before_min") or 0) if p.get("weekdays_only") else None,
+        "deadline_ts": tradingweek.next_close(first, tradingweek.options(p)[2]) if tradingweek.options(p)[1] else None,
     }
     return out
 

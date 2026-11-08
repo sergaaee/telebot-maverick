@@ -144,12 +144,11 @@ class Engine:
                     out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid")),
                                 **{k: t[k] for k in ("avg_entry", "avg_tps", "avg_sl") if k in t}})
                 continue
-            if p.get("weekdays_only"):                                # режим «только будни»: вход вне торгового окна пропускается, а позиция прошлой недели к пятнице закрыта
-                bm = p.get("friday_close_before_min") or 0
-                if not tradingweek.in_window(s["ts"], bm):
-                    continue
-                if open_side and last_open_ts is not None and s["ts"] >= tradingweek.window_close(last_open_ts, bm):
-                    open_side, adds = None, 0
+            wk_entry, wk_close, bm = tradingweek.options(p)
+            if wk_entry and not tradingweek.in_window(s["ts"], bm):   # «не открывать позиции в выходные»: сигнал вне торгового окна пропускается
+                continue
+            if wk_close and open_side and last_open_ts is not None and s["ts"] >= tradingweek.next_close(last_open_ts, bm):       # «закрывать перед выходными»: позиция прошлой недели к этому сигналу уже закрыта
+                open_side, adds = None, 0
             if open_side == s["side"]:                               # позиция открыта в ту же сторону: добор или пропуск
                 if adds >= max_adds or (gap_pyr and last_leg_ts is not None and s["ts"] < last_leg_ts + gap_pyr):
                     continue

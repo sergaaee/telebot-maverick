@@ -763,9 +763,24 @@ def scenario(pg, base, state_url):
     check("API: закрытые + открытые = все сделки, медиана срока положительна", hold_api["sum"] + hold_api["open"] == hold_api["total"] and hold_api["med"] > 0, str(hold_api))
     base_split = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({})}).then(r => r.json()).then(j => [j.stats.total.trades, j.weekday_split.weekday.trades, j.weekday_split.weekend.trades, j.weekday_split.entered.weekend])""")
     check("API: сделки делятся на будни и выходные без потерь, выходные в демо-данных есть", base_split[0] == base_split[1] + base_split[2] and base_split[2] > 0 and base_split[3] > 0, str(base_split))
-    check("«Торговать только в будни» выключено по умолчанию, с «?», поле пятницы скрыто", not field(pg, "торговать только в будни").locator("input").is_checked() and field(pg, "торговать только в будни").locator(".help").count() == 1 and field(pg, "Закрыть в пятницу за").count() == 0)
-    field(pg, "торговать только в будни").locator("input").check()
-    check("при включении появляется «Закрыть в пятницу за» с «?»", field(pg, "Закрыть в пятницу за").locator(".help").count() == 1)
+    no_entry_f, close_f = field(pg, "не открывать позиции по сигналам в выходные"), field(pg, "закрывать позиции перед выходными")
+    check("две опции выходных выключены по умолчанию, у каждой «?», поле сдвига закрытия скрыто, прежней галочки «только будни» нет",
+          not no_entry_f.locator("input").is_checked() and not close_f.locator("input").is_checked() and no_entry_f.locator(".help").count() == 1 and close_f.locator(".help").count() == 1
+          and field(pg, "Закрытие недели раньше на").count() == 0 and field(pg, "торговать только в будни").count() == 0)
+    no_entry_f.locator("input").check()
+    check("при включении одной из опций появляется «Закрытие недели раньше на» с «?», вторая опция остаётся выключенной", field(pg, "Закрытие недели раньше на").locator(".help").count() == 1 and not close_f.locator("input").is_checked())
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    only_entry = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({weekend_no_entry: true, weekend_close: false})}).then(r => r.json()).then(j => ({
+        bad_entries: j.trades.filter(t => { const d = new Date(t.entry_ts); const dow = d.getUTCDay(); const h = d.getUTCHours(); return dow === 0 || dow === 6 || (dow === 5 && h >= 22); }).length,
+        wknd: j.stats.total.wknd, skipped: j.skipped_reasons, total: j.stats.total.trades, params: [j.params.weekend_no_entry, j.params.weekend_close]}))""")
+    check("API: только «не открывать по выходным» — входов в выходные нет, но пятничных закрытий (WKND) тоже нет", only_entry["bad_entries"] == 0 and only_entry["total"] > 0 and only_entry["wknd"] == 0 and only_entry["skipped"].get("выходные: вне торгового окна", 0) > 0 and only_entry["params"] == [True, False], str(only_entry))
+    only_close = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({weekend_no_entry: false, weekend_close: true})}).then(r => r.json()).then(j => ({
+        wknd: j.trades.filter(t => t.reason === 'WKND').map(t => { const d = new Date(t.exit_ts); return [d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes()]; }),
+        skipped: j.skipped_reasons, stat: j.stats.total.wknd}))""")
+    check("API: только «закрывать перед выходными» — закрытия WKND по пятницам в 21:00/22:00 UTC, сигналы выходных не пропускаются",
+          only_close["wknd"] and all(d == 5 and h in (21, 22) and m == 0 for d, h, m in only_close["wknd"]) and only_close["stat"] == len(only_close["wknd"]) and only_close["skipped"].get("выходные: вне торгового окна", 0) == 0, str(only_close["wknd"][:3]))
+    close_f.locator("input").check()
+    check("обе опции включены (как прежняя галочка «только будни»)", no_entry_f.locator("input").is_checked() and close_f.locator("input").is_checked())
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
     wk_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({weekdays_only: true})}).then(r => r.json()).then(j => ({
         bad_entries: j.trades.filter(t => { const d = new Date(t.entry_ts); const dow = d.getUTCDay(); const h = d.getUTCHours(); return dow === 0 || dow === 6 || (dow === 5 && h >= 22); }).length,
@@ -779,13 +794,34 @@ def scenario(pg, base, state_url):
     with pg.expect_download() as dl6:
         pg.get_by_role("button", name="Скачать конфиг").click()
     cfg6 = _json.loads(Path(dl6.value.path()).read_text(encoding="utf-8"))
-    check("в скачанном конфиге есть weekdays_only", cfg6["params"]["weekdays_only"] is True and "friday_close_before_min" in cfg6["params"])
-    for k in ("weekdays_only", "friday_close_before_min"):
-        cfg6["params"].pop(k)
+    check("в скачанном конфиге обе опции выходных и поля выхода по DS (по умолчанию пусты)", cfg6["params"]["weekend_no_entry"] is True and cfg6["params"]["weekend_close"] is True and "friday_close_before_min" in cfg6["params"]
+          and cfg6["params"]["exit_long_ds"] is None and cfg6["params"]["exit_short_ds"] is None)
+    old_cfg = _json.loads(_json.dumps(cfg6))
+    for k in ("weekdays_only", "weekend_no_entry", "weekend_close", "friday_close_before_min", "exit_long_ds", "exit_short_ds"):
+        old_cfg["params"].pop(k)
     pg.get_by_role("button", name="Загрузить…").click()
-    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(cfg6))
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(old_cfg))
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
-    check("старый конфиг без этих полей: режим «только будни» выключен", not field(pg, "торговать только в будни").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() == 0)
+    check("старый конфиг без этих полей: обе опции выходных выключены", not field(pg, "не открывать позиции по сигналам в выходные").locator("input").is_checked() and not field(pg, "закрывать позиции перед выходными").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() == 0)
+    legacy_cfg = _json.loads(_json.dumps(old_cfg))
+    legacy_cfg["params"]["weekdays_only"] = True                                                           # конфиг со старой общей галочкой
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(legacy_cfg))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("конфиг со старой галочкой «только будни»: включаются обе опции, закрытия WKND на месте", field(pg, "не открывать позиции по сигналам в выходные").locator("input").is_checked() and field(pg, "закрывать позиции перед выходными").locator("input").is_checked() and pg.locator("table.trades tbody tr .tag-WKND").count() > 0)
+    # закрытие по DS: пороги выхода отдельно для лонга и шорта (пусто = выключено)
+    ds_l, ds_s = field(pg, "Закрыть лонг при Scalp ≤"), field(pg, "Закрыть шорт при Scalp ≥")
+    check("поля выхода по DS пусты (выкл), у каждого «?»; сделок с меткой DS нет", ds_l.locator("input").input_value() == "" and ds_s.locator("input").input_value() == "" and ds_l.locator(".help").count() == 1 and ds_s.locator(".help").count() == 1
+          and pg.locator("table.trades tbody tr .tag-DS").count() == 0)
+    ds_l.locator("input").fill("10"); ds_s.locator("input").fill("0")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    ds_api = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({exit_long_ds: 10, exit_short_ds: 0})}).then(r => r.json()).then(j => ({
+        n: j.stats.total.ds, labelled: j.trades.filter(t => t.reason === 'DS').length, last: j.trades.filter(t => t.reason === 'DS').map(t => t.fills[t.fills.length - 1].label), warn: j.warnings}))""")
+    check("закрытие по DS: в таблице сделок метка DS, в API счётчик совпадает, есть предупреждение о пересечении порогов", pg.locator("table.trades tbody tr .tag-DS").count() > 0 and ds_api["n"] > 0 and ds_api["n"] == ds_api["labelled"]
+          and all(x == "DS" for x in ds_api["last"]) and any("Выход лонга по DS" in w for w in ds_api["warn"]), str(ds_api["n"]))
+    ds_l.locator("input").fill(""); ds_s.locator("input").fill("")
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    check("очистка полей выключает закрытие по DS", pg.locator("table.trades tbody tr .tag-DS").count() == 0)
 
     # --- страница мониторинга: все стратегии пользователя, подробности по клику, управление, автомод и тестовая позиция $1
     pg.wait_for_timeout(1500)                                         # состояние интерфейса сохраняется с задержкой 600 мс
@@ -915,7 +951,7 @@ def scenario(pg, base, state_url):
           c_bb["ex"]["bybit"]["over"] == {"trade_pct": 5.0, "leverage": 3.0, "entry_limit_pct": 0.3, "entry_limit_dir": "breakout", "entry_limit_ttl_h": 2.0} and c_bb["ex"]["hyperliquid"]["over"] == {}
           and c_bb["params"]["trade_pct"] == 10 and c_bb["params"]["leverage"] == 5 and c_bb["params"].get("entry_limit_pct") in (None, 0, 0.0))
     eh = card("Переименован").get_by_test_id("mon-ex-hyperliquid")
-    eh.get_by_test_id("mon-ex-hyperliquid-lev").fill("500"); eh.get_by_test_id("mon-ex-hyperliquid-save").click(); pg.wait_for_timeout(1200)
+    eh.get_by_test_id("mon-ex-hyperliquid-lev").fill("500"); eh.get_by_test_id("mon-ex-hyperliquid-save").click(); pg.locator(".banner.error").first.wait_for(timeout=8000)
     check("недопустимое значение для биржи отклоняется с ошибкой, в базе ничего не появилось", E2E_DB.find_config(tid, "Переименован")["ex"]["hyperliquid"]["over"] == {} and pg.locator(".banner.error").count() >= 1)
     pg.get_by_role("button", name="Обновить", exact=True).click(); pg.wait_for_timeout(1500)
     eb = card("Переименован").get_by_test_id("mon-ex-bybit")

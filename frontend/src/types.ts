@@ -67,9 +67,18 @@ export interface Params {
   /** размер добора, % депозита */
   pyramid_pct: number;
   pyramid_gap_h: number;
-  /** вход только с открытия Токио в понедельник; позиция, оставшаяся открытой, закрывается к закрытию Нью-Йорка в пятницу (на столько минут раньше) */
+  /** устаревшая общая галочка «только будни» (= обе опции ниже); новые конфиги пишут две опции отдельно */
   weekdays_only: boolean;
+  /** не открывать позиции (и доборы, и развороты) по сигналам в выходные: вход только с открытия Токио в понедельник до закрытия Нью-Йорка в пятницу */
+  weekend_no_entry: boolean;
+  /** закрывать позиции перед выходными: остаток закрывается по рынку к закрытию Нью-Йорка в пятницу */
+  weekend_close: boolean;
+  /** на столько минут раньше закрытия Нью-Йорка (и запрет входа в эти минуты) */
   friday_close_before_min: number;
+  /** закрыть лонг, когда в новом отчёте DS (Scalp) не выше значения; null — не закрывать по DS */
+  exit_long_ds: number | null;
+  /** закрыть шорт, когда в новом отчёте DS (Scalp) не ниже значения; null — не закрывать по DS */
+  exit_short_ds: number | null;
   /** плечо доборов; null — как у первой ноги */
   pyramid_leverage: number | null;
   /** моделировать ликвидацию: касание цены ликвидации закрывает ногу с потерей всей маржи; поддерживающая маржа — % объёма */
@@ -141,7 +150,7 @@ export interface AppConfig {
   data: DataInfo;
 }
 
-export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME' | 'LIQ' | 'WKND';
+export type Reason = 'TP' | 'SL' | 'BE' | 'REV' | 'OPEN' | 'TIME' | 'LIQ' | 'WKND' | 'DS';
 
 /** Частичное или финальное закрытие: метка TP1..TP3 / SL / BE / REV / OPEN, доля от исходной позиции (0..1). */
 export interface Fill {
@@ -231,7 +240,7 @@ export interface PendingSignal {
 /** Исходы сделок отдельно для будней и выходных (по моменту выхода); entered — число входов по моменту входа. */
 export interface WeekdayBucket {
   trades: number;
-  reasons: Record<'TP' | 'BE' | 'SL' | 'REV' | 'LIQ' | 'WKND' | 'OPEN', number>;
+  reasons: Record<'TP' | 'BE' | 'SL' | 'REV' | 'LIQ' | 'WKND' | 'DS' | 'OPEN', number>;
   pnl_usd: number;
   wins: number;
 }
@@ -302,6 +311,8 @@ export interface Stats {
   liq?: number;
   /** закрыто в пятницу к концу торговой недели */
   wknd?: number;
+  /** закрыто по DS нового отчёта */
+  ds?: number;
   /** сколько сделок дошли до 1-го / 2-го / 3-го тейка */
   tp_reach: number[];
 }
