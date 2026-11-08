@@ -14,7 +14,7 @@ export function Card({ label, value, cls = '', sub, help }: { label: string; val
   );
 }
 
-const SPLIT_ROWS: [keyof WeekdayBucket['reasons'], string][] = [['TP', 'Тейки'], ['BE', 'Безубыток'], ['SL', 'Стопы'], ['REV', 'Развороты'], ['LIQ', 'Ликвидации'], ['WKND', 'Закрыто в пятницу'], ['OPEN', 'Открыто']];
+const SPLIT_ROWS: [keyof WeekdayBucket['reasons'], string][] = [['TP', 'Тейки'], ['BE', 'Безубыток'], ['SL', 'Стопы'], ['REV', 'Развороты'], ['LIQ', 'Ликвидации'], ['WKND', 'Закрыто в пятницу'], ['DS', 'Закрыто по DS'], ['OPEN', 'Открыто']];
 
 /** Исходы сделок в будни и в выходные: сколько и какой процент от сделок группы. */
 function WeekdayTable({ split }: { split: WeekdaySplit }) {
@@ -40,7 +40,7 @@ function WeekdayTable({ split }: { split: WeekdaySplit }) {
 }
 
 const DAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-const REASON_NAMES: Record<string, string> = { TP: 'тейк', BE: 'БУ', SL: 'стоп', REV: 'разворот', LIQ: 'ликвидация', WKND: 'закрытие пт', OPEN: 'открыто' };
+const REASON_NAMES: Record<string, string> = { TP: 'тейк', BE: 'БУ', SL: 'стоп', REV: 'разворот', LIQ: 'ликвидация', WKND: 'закрытие пт', DS: 'закрытие по DS', OPEN: 'открыто' };
 
 function timeRow(name: string, b: TimeBucket, hint?: string) {
   const pct = (n: number) => (b.trades ? `${((n / b.trades) * 100).toFixed(0)}%` : '–');
@@ -150,7 +150,7 @@ export default function StatsPanel({ result }: { result: BacktestResult }) {
     <div className="stats">
       <div className="cards">
         <Card label="Итого" value={fmtUsd(t.total_usd)} cls={signClass(t.total_usd)} sub={t.return_pct != null ? `${fmtPct(t.return_pct, 1)} от депозита ${result.params.deposit.toLocaleString('ru-RU')} $` : undefined} />
-        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev}${t.liq ? ` · ликвид. ${t.liq}` : ''}${t.wknd ? ` · пятница ${t.wknd}` : ''} · откр. ${t.open}`} />
+        <Card label="Сделок" value={String(t.trades)} sub={`TP ${t.tp} · БУ ${t.be} · SL ${t.sl} · разворот ${t.rev}${t.liq ? ` · ликвид. ${t.liq}` : ''}${t.wknd ? ` · пятница ${t.wknd}` : ''}${t.ds ? ` · по DS ${t.ds}` : ''} · откр. ${t.open}`} />
         <Card label="Коэф. Шарпа" value={t.sharpe == null ? '–' : t.sharpe.toFixed(2)} cls={t.sharpe == null ? '' : signClass(t.sharpe)} sub="годовой, по дням" />
         <Card label="Winrate" value={`${t.winrate.toFixed(1)}%`} />
         <Card label="Profit factor" value={fmtPf(t.profit_factor)} />

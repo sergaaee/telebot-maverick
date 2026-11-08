@@ -1442,8 +1442,8 @@ class SignalService:
             ad = self.adapter_for(cfg["user_id"], ex)
             if ev.get("tp1_be"):
                 self._do(cfg, "move_stop", sym, side, lambda: ad.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]}, ad=ad, ex=ex)
-            if ev["label"] in ("WKND", "REV"):
-                self._do(cfg, "close_weekend" if ev["label"] == "WKND" else "close_reverse", sym, side,
+            if ev["label"] in ("WKND", "REV", "DS"):
+                self._do(cfg, {"WKND": "close_weekend", "REV": "close_reverse", "DS": "close_ds"}[ev["label"]], sym, side,
                          lambda: ad.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]}, ad=ad, ex=ex)
 
     def _send_fills(self, cfg, res, chat, label, upd):

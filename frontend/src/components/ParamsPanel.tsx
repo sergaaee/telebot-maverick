@@ -124,6 +124,11 @@ function Section({ title, help, children, open = true }: { title: string; help?:
 
 export default function ParamsPanel({ params: p, sources, assets, activeJobs, onAddAsset, onRemoveAsset, loading, elapsed = 0, onChange, onRun, onSwitch, onReset, onImportConfig, tfMode }: Props) {
   const set = <K extends keyof Params>(k: K, v: Params[K]) => onChange({ ...p, [k]: v });
+  // две опции выходных; прежнее поле weekdays_only держим равным «обе включены» (так его понимает старый код и сторонние читатели конфига)
+  const setWeekend = (patch: Partial<Pick<Params, 'weekend_no_entry' | 'weekend_close'>>) => {
+    const next = { ...p, ...patch };
+    onChange({ ...next, weekdays_only: next.weekend_no_entry && next.weekend_close });
+  };
   const num = (k: NumKey) => (v: number | null) => onChange({ ...p, [k]: v } as Params);
   const coolMode: 'off' | 'drop' | 'declines' = p.cool_drop != null ? 'drop' : p.cool_declines != null ? 'declines' : 'off';
   const setCoolMode = (m: string) =>
@@ -311,10 +316,14 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
           </select>
         </label>
         <label className="field check">
-          <input type="checkbox" checked={p.weekdays_only} onChange={(e) => set('weekdays_only', e.target.checked)} />
-          <Label text="торговать только в будни" help="weekdays_only" />
+          <input type="checkbox" checked={p.weekend_no_entry} onChange={(e) => setWeekend({ weekend_no_entry: e.target.checked })} data-testid="weekend-no-entry" />
+          <Label text="не открывать позиции по сигналам в выходные" help="weekend_no_entry" />
         </label>
-        {p.weekdays_only && <Num label="Закрыть в пятницу за" help="friday_close_before_min" value={p.friday_close_before_min} step={5} suffix="мин" onChange={(v) => set('friday_close_before_min', Math.max(0, v ?? 0))} />}
+        <label className="field check">
+          <input type="checkbox" checked={p.weekend_close} onChange={(e) => setWeekend({ weekend_close: e.target.checked })} data-testid="weekend-close" />
+          <Label text="закрывать позиции перед выходными" help="weekend_close" />
+        </label>
+        {(p.weekend_no_entry || p.weekend_close) && <Num label="Закрытие недели раньше на" help="friday_close_before_min" value={p.friday_close_before_min} step={5} suffix="мин" onChange={(v) => set('friday_close_before_min', Math.max(0, v ?? 0))} />}
         <Num label="Подтверждение, отчётов" help="confirm" value={p.confirm} step={1} onChange={(v) => set('confirm', Math.max(1, Math.round(v ?? 1)))} />
       </Section>
 
@@ -322,12 +331,14 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         <Num label="Local ≥" help="local_min" value={p.local_min} onChange={num('local_min')} />
         <Num label="Scalp ≥" help="scalp_min" value={p.scalp_min} onChange={num('scalp_min')} />
         <Num label="Global ≥" help="global_min" value={p.global_min} placeholder="выкл" onChange={num('global_min')} />
+        <Num label="Закрыть лонг при Scalp ≤" help="exit_long_ds" value={p.exit_long_ds} placeholder="выкл" onChange={(v) => set('exit_long_ds', v)} />
       </Section>
 
       <Section title="Шорт: Deep ≤" help="groupShort">
         <Num label="Local ≤" help="short_local_max" value={p.short_local_max} onChange={num('short_local_max')} />
         <Num label="Scalp ≤" help="short_scalp_max" value={p.short_scalp_max} onChange={num('short_scalp_max')} />
         <Num label="Global ≤" help="short_global_max" value={p.short_global_max} placeholder="выкл" onChange={num('short_global_max')} />
+        <Num label="Закрыть шорт при Scalp ≥" help="exit_short_ds" value={p.exit_short_ds} placeholder="выкл" onChange={(v) => set('exit_short_ds', v)} />
       </Section>
 
       <Section title="Выход и издержки" help="groupExit">

@@ -8,7 +8,7 @@ import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
-  open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту',
+  open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS',
   test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
@@ -128,7 +128,7 @@ function StatsTab({ e }: { e: MonitorEntry }) {
   return (
     <div className="cards mon-cards" data-testid="mon-stats">
       <StatCard label="Итого" value={fmtUsd(n('total_usd'))} cls={signClass(n('total_usd'))} sub={t.return_pct != null ? `${fmtPct(t.return_pct as number, 1)} от депозита` : undefined} />
-      <StatCard label="Сделок" value={String(n('trades'))} sub={`TP ${n('tp')} · БУ ${n('be')} · SL ${n('sl')} · разворот ${n('rev')}${n('liq') ? ` · ликвид. ${n('liq')}` : ''}${n('wknd') ? ` · пятница ${n('wknd')}` : ''}`} />
+      <StatCard label="Сделок" value={String(n('trades'))} sub={`TP ${n('tp')} · БУ ${n('be')} · SL ${n('sl')} · разворот ${n('rev')}${n('liq') ? ` · ликвид. ${n('liq')}` : ''}${n('wknd') ? ` · пятница ${n('wknd')}` : ''}${n('ds') ? ` · по DS ${n('ds')}` : ''}`} />
       <StatCard label="Winrate" value={`${n('winrate').toFixed(1)}%`} />
       {!!t.funding_usd && <StatCard label="Фандинг" value={fmtUsd(-(t.funding_usd as number))} />}
       <StatCard label="Profit factor" value={fmtPf((t.profit_factor as number | null) ?? null)} />
@@ -153,7 +153,7 @@ function ParamsTab({ e }: { e: MonitorEntry }) {
     ['Выход', `SL ${p.sl_pct}% · TP ${(p.tps as { pct: number; share: number }[]).map((t) => `${t.pct}%×${t.share}`).join(' / ')}${p.be_after_tp1 ? ' · БУ после TP1' : ''}`],
     ['Вход', p.entry_limit_pct ? `${p.entry_limit_dir === 'breakout' ? 'по ходу цены' : 'лимиткой на откат'} ${p.entry_limit_pct}% · ордер живёт ${p.entry_limit_ttl_h ?? 4} ч` : 'по рынку'], ['Фандинг', p.funding_apr ? `${p.funding_apr}% годовых · период ${p.funding_period_h ?? 8} ч${p.funding_mode === 'cost' ? ' · платят обе стороны' : ''}` : 'не учитывается'], ['Размер', `депозит ${fmtUsd(p.deposit as number)} · ${p.trade_pct}% · плечо ${p.leverage}× · ${p.compound ? 'сложный %' : 'фикс. сумма'}`],
     ['Пирамидинг', p.pyramid_enabled ? `до ${p.pyramid_max} × ${p.pyramid_pct}%${p.pyramid_avg ? ' с усреднением' : ''}${p.pyramid_leverage ? `, плечо ${p.pyramid_leverage}×` : ''}${p.pyramid_move_pct ? `, движение ≥ ${p.pyramid_move_pct}%` : ''}` : 'выключен'],
-    ['Только будни', on('weekdays_only')], ['Моделировать ликвидацию', on('liquidation_sim')], ['Не ставить SL, пока метрики сильны', on('sl_hold_strong')], ['Стоп-лосс по маркету (решает отчёт)', on('sl_market')],
+    ['Не открывать по выходным', on('weekend_no_entry')], ['Закрывать перед выходными', p.weekend_close ? `да${p.friday_close_before_min ? ` (за ${String(p.friday_close_before_min)} мин до закрытия NY)` : ''}` : 'нет'], ['Закрытие по DS', p.exit_long_ds != null || p.exit_short_ds != null ? [p.exit_long_ds != null ? `лонг при DS ≤ ${p.exit_long_ds}` : '', p.exit_short_ds != null ? `шорт при DS ≥ ${p.exit_short_ds}` : ''].filter(Boolean).join(' · ') : 'выключено'], ['Моделировать ликвидацию', on('liquidation_sim')], ['Не ставить SL, пока метрики сильны', on('sl_hold_strong')], ['Стоп-лосс по маркету (решает отчёт)', on('sl_market')],
     ['Пауза после стопа / между сигналами', `${p.cooldown_h} ч / ${p.signal_gap_h} ч`], ['Топ-коины', on('top_enabled')], ['Создан', e.created ? fmtTs(e.created * 1000) : '–'], ['Уведомлений', String(e.alerts ?? 0)],
   ];
   return <div className="mon-params" data-testid="mon-params">{rows.map(([k, v]) => <Row key={k} label={k}>{v}</Row>)}</div>;

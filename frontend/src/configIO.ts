@@ -12,10 +12,10 @@ export function configFileName(p: Params): string {
 }
 
 /** параметры, у которых null означает «выключено», даже если в .env задано значение */
-const NULLABLE = new Set(['pyramid_leverage', 'only', 'global_min', 'short_global_max', 'liq_source', 'cool_drop', 'cool_declines', 'liq_hours', 'date_from', 'date_to']);
+const NULLABLE = new Set(['pyramid_leverage', 'only', 'global_min', 'short_global_max', 'liq_source', 'cool_drop', 'cool_declines', 'liq_hours', 'exit_long_ds', 'exit_short_ds', 'date_from', 'date_to']);
 
 /** Возможности, появившиеся позже: в старом конфиге их нет, и они ДОЛЖНЫ быть выключены (а не браться из умолчаний .env), чтобы результат не менялся. */
-export const LEGACY_OFF = { pyramid_enabled: false, pyramid_avg: false, signal_gap_h: 0, sl_hold_strong: false, sl_market: false, pyramid_move_pct: 0, pyramid_move_dir: 'any', pyramid_leverage: null, liquidation_sim: false, weekdays_only: false, friday_close_before_min: 0, global_min: null, short_global_max: null, entry_limit_pct: 0, entry_limit_dir: 'pullback', entry_limit_ttl_h: 4, funding_apr: 0, funding_period_h: 8, funding_mode: 'signed' } as const;
+export const LEGACY_OFF = { pyramid_enabled: false, pyramid_avg: false, signal_gap_h: 0, sl_hold_strong: false, sl_market: false, pyramid_move_pct: 0, pyramid_move_dir: 'any', pyramid_leverage: null, liquidation_sim: false, weekdays_only: false, weekend_no_entry: false, weekend_close: false, friday_close_before_min: 0, exit_long_ds: null, exit_short_ds: null, global_min: null, short_global_max: null, entry_limit_pct: 0, entry_limit_dir: 'pullback', entry_limit_ttl_h: 4, funding_apr: 0, funding_period_h: 8, funding_mode: 'signed' } as const;
 
 const kind = (v: unknown) => (Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v);
 
@@ -48,6 +48,7 @@ export function parseConfig(text: string, envDefaults: Params): { params: Params
     else ignored.push(k);
   }
   for (const [k, v] of Object.entries(LEGACY_OFF)) if (!(k in src)) out[k] = v;
+  for (const k of ['weekend_no_entry', 'weekend_close']) if (!(k in src) && 'weekdays_only' in src) out[k] = !!out.weekdays_only;       // конфиг со старой общей галочкой «только будни»: обе опции сразу
   const tf = obj.tf === 'auto' || typeof obj.tf === 'number' ? (obj.tf as TfMode) : null;
   return { params: out as unknown as Params, tf, ignored };
 }

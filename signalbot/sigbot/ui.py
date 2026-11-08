@@ -11,6 +11,7 @@ import time
 from html import escape as esc
 
 from app import manage
+from app.core import tradingweek
 from app.db import EXCHANGES, HL_SLOTS, hl_name, hl_slot, is_hl
 from app.monitor import evaluate_entry
 from app.trading import EXCHANGE_LABELS
@@ -326,11 +327,11 @@ class MonitorUI:
                     + f" · ликвидации {'вкл' if p.get('liq_hours') is not None else 'выкл'} · тренд {'вкл' if p.get('trend_enabled') else 'выкл'}\n"
                     f"SL {p.get('sl_pct')}% · TP {tps}" + (" · БУ после TP1" if p.get("be_after_tp1") else "") + "\n"
                     f"Депозит {p.get('deposit'):g} $ · {p.get('trade_pct')}% · плечо {p.get('leverage')}× · {'сложный %' if p.get('compound') else 'фикс. сумма'}\n"
-                    f"Пирамидинг {'вкл' if p.get('pyramid_enabled') else 'выкл'} · только будни {'да' if p.get('weekdays_only') else 'нет'} · ликвидация в расчёте {'да' if p.get('liquidation_sim') else 'нет'}\n"
+                    f"Пирамидинг {'вкл' if p.get('pyramid_enabled') else 'выкл'} · не открывать по выходным {'да' if tradingweek.options(p)[0] else 'нет'} · закрывать перед выходными {'да' if tradingweek.options(p)[1] else 'нет'} · ликвидация в расчёте {'да' if p.get('liquidation_sim') else 'нет'}\n"
                     f"Уведомлений: {c['alerts']}")
         else:
             log_ = self.db.list_auto_log(user["id"], HIST_N, c["id"])
-            names = {"open": "вход", "add": "добор", "move_stop": "стоп → БУ", "close_weekend": "закрытие к концу недели", "close_reverse": "закрытие по развороту",
+            names = {"open": "вход", "add": "добор", "move_stop": "стоп → БУ", "close_weekend": "закрытие к концу недели", "close_reverse": "закрытие по развороту", "close_ds": "закрытие по DS",
                      "auto_toggle": "автомод", "pause": "пауза", "resume": "возобновлён"}
             body = f"📋 {title} · журнал действий\n" + ("\n".join(f"{fm.ts_str(int(x['ts'] * 1000))[5:]} · {names.get(x['kind'], x['kind'])} · {x['status']}" + (f" — {esc(str(x['details'].get('error'))[:80])}" if x["details"].get("error") else "")
                                                        for x in log_) or "пока пусто")

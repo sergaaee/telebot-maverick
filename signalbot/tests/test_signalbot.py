@@ -768,10 +768,34 @@ def test_ready_message_format():
 
 # ---------------- «только будни» ----------------
 def test_old_stored_config_ignores_env_weekdays_default(env):
-    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items() if k not in ("weekdays_only", "friday_close_before_min")}
-    env.s.defaults.update(weekdays_only=True)
-    assert env.engine.evaluate(old)["params"]["weekdays_only"] is False
-    assert validate(UI_CONFIG["params"], env.s.defaults)[0]["weekdays_only"] is True
+    old = {k: v for k, v in validate(UI_CONFIG["params"], env.s.defaults)[0].items() if k not in ("weekdays_only", "weekend_no_entry", "weekend_close", "friday_close_before_min", "exit_long_ds", "exit_short_ds")}
+    env.s.defaults.update(weekdays_only=True, weekend_no_entry=True, weekend_close=True, exit_long_ds=1.0, exit_short_ds=2.0)
+    res = env.engine.evaluate(old)["params"]
+    assert res["weekdays_only"] is False and res["weekend_no_entry"] is False and res["weekend_close"] is False and res["exit_long_ds"] is None and res["exit_short_ds"] is None
+    new = validate(UI_CONFIG["params"], env.s.defaults)[0]
+    assert new["weekdays_only"] is True and new["weekend_no_entry"] is True and new["weekend_close"] is True and new["exit_long_ds"] == 1.0
+    legacy_on = {**old, "weekdays_only": True}                                                 # старый конфиг с галочкой «только будни» остаётся «обе опции»
+    assert env.engine.evaluate(legacy_on)["params"]["weekend_close"] is True and env.engine.evaluate(legacy_on)["params"]["weekend_no_entry"] is True
+
+
+def test_new_signals_weekend_options_are_independent():
+    from datetime import datetime, timezone
+    def ms(*a):
+        return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
+    base = {"candles_last_ts": ms(2026, 1, 5, 0, 0)}
+    trade = {"side": "long", "reason": "OPEN", "group": 1, "leg": 1, "entry_ts": ms(2026, 1, 5, 1, 0), "entry": 100.0, "signal_ts": ms(2026, 1, 5, 1, 0)}
+    def run(ts, **kw):
+        sig = {"ts": ts, "side": "long", "taken": False, "trend_blocked": False}
+        res = {"params": {"pyramid_enabled": False, "trade_pct": 10, "pyramid_pct": 5, "pyramid_max": 3, **kw}, "range": base, "trades": [trade], "last_signals": [sig]}
+        return Engine.new_signals(res, 0)
+    sat, nxt_week = ms(2026, 1, 10, 12), ms(2026, 1, 12, 3)
+    assert run(sat, weekend_no_entry=True, weekend_close=False) == []                      # суббота: вход запрещён
+    assert run(nxt_week, weekend_no_entry=True, weekend_close=False) == []                 # позиция не закрывалась в пятницу — она всё ещё открыта, повторный вход в ту же сторону пропущен
+    assert len(run(nxt_week, weekend_no_entry=False, weekend_close=True)) == 1             # закрыта в пятницу — новый вход
+    new_sat = run(sat, weekend_no_entry=False, weekend_close=True)                         # суббота: вход разрешён, а позиция недели уже закрыта
+    assert len(new_sat) == 1 and new_sat[0]["pyramid"] is False
+    assert run(ms(2026, 1, 7, 12), weekend_no_entry=False, weekend_close=False) == []      # обе опции выключены — как без режима: позиция открыта, пирамидинга нет
+    assert run(sat, weekdays_only=True) == [] and len(run(nxt_week, weekdays_only=True)) == 1       # прежняя галочка работает как обе опции
 
 
 def test_new_signals_skips_weekend_and_expires_previous_week_position():
@@ -796,7 +820,15 @@ def test_weekend_close_fill_message_and_summary():
           "entry": 99.0, "entry_ts": 1, "closed": True, "reason": "WKND", "pnl_usd": 12.0, "pnl_pct": 1.0, "hold_h": 80.0, "be": False, "tp1_be": False}
     t = fm.fill_message({"name": "x"}, {"params": {"symbol": "BTC/USDT:USDT"}}, ev, "Coinbase")
     assert "Закрытие к концу недели" in t and "3.3 сут" in t
-    assert "только будни" in fm.config_summary({"params": {"source": "a", "symbol": "b", "side": "both", "confirm": 2, "weekdays_only": True}})
+    base = {"source": "a", "symbol": "b", "side": "both", "confirm": 2}
+    both = fm.config_summary({"params": {**base, "weekdays_only": True}})                                       # прежняя галочка = обе опции
+    assert "не открывать по выходным" in both and "закрывать перед выходными" in both
+    one = fm.config_summary({"params": {**base, "weekend_close": True, "friday_close_before_min": 30}})
+    assert "закрывать перед выходными (за 30 мин" in one and "не открывать по выходным" not in one
+    ds = fm.config_summary({"params": {**base, "exit_long_ds": 1.05, "exit_short_ds": 1.95}})
+    assert "закрыть лонг при DS ≤ 1.05" in ds and "закрыть шорт при DS ≥ 1.95" in ds and "DS" not in fm.config_summary({"params": base})
+    ev["label"], ev["reason"] = "DS", "DS"
+    assert "Закрытие по DS" in fm.fill_message({"name": "x"}, {"params": {"symbol": "BTC/USDT:USDT"}}, ev, "Coinbase")
 
 
 # ---------------- автомод (симуляция действий) ----------------
@@ -823,6 +855,32 @@ def test_auto_mode_is_off_by_default_and_logs_dry_run_actions_when_enabled(env):
     op = next(x for x in log if x["kind"] == "open")
     assert op["symbol"] == "BTC/USDT:USDT" and op["side"] == "long" and op["details"]["notional"] > 0 and op["details"]["exchange"] == "dry-run"
     assert op["details"]["stop"] is not None or op["details"]["takes"] is None        # план со стопом и тейками, если известна цена
+
+
+def test_ds_exit_closes_the_position_and_manage_mode_sends_the_close(env):
+    cfg_json = json.loads(json.dumps(UI_CONFIG))
+    cfg_json["params"].update(tps=[{"pct": 100, "share": 100}], sl_pct=99, be_after_tp1=False, exit_long_ds=1.5)        # тейк и стоп недостижимы: позицию закрывает только DS нового отчёта
+    env.handle_update(msg(json.dumps(cfg_json)))
+    env.cycle()
+    cfg = env.db.list_configs(env.alice["id"])[0]
+    assert cfg["params"]["exit_long_ds"] == 1.5 and cfg["params"]["exit_short_ds"] is None
+    env.db.set_auto(env.alice["id"], cfg["id"], True, True)
+    start = T0 + 10 * H // 2
+    append_reports(env.hist, LONG(start, 3), 11)
+    env.now["t"] = (start + 3 * H // 2) / 1000
+    env.cycle()
+    assert {x["kind"] for x in env.db.list_auto_log(env.alice["id"])} >= {"open"} and not any(x["kind"] == "close_ds" for x in env.db.list_auto_log(env.alice["id"]))
+    nxt = start + 3 * H // 2
+    env.db.update_config(cfg["id"], fill_ts=nxt - 1)                                       # свечи фикстуры идут дальше «текущего времени» бота (в расчёте без новых отчётов тейк есть в будущем): отметка исполнений — на момент теста
+    append_reports(env.hist, NEUTRAL(2, nxt), 14)                                          # DS отчётов 1.0 <= 1.5: пора закрывать лонг
+    env.now["t"] = (nxt + 3 * H // 2) / 1000
+    env.cycle()
+    closes = [x for x in env.db.list_auto_log(env.alice["id"]) if x["kind"] == "close_ds"]
+    assert len(closes) == 1 and closes[0]["side"] == "long" and closes[0]["status"] == "dry_run" and closes[0]["details"]["share"] == 1.0
+    assert any("Закрытие по DS" in t and "Метрики в этот момент" in t for _c, t in env.tg.fills)           # уведомление об исполнении (в тестовом Telegram они лежат отдельно от остальных сообщений)
+    env.cycle()
+    assert len([x for x in env.db.list_auto_log(env.alice["id"]) if x["kind"] == "close_ds"]) == 1       # повторно не закрывается
+    env.db.set_auto(env.alice["id"], cfg["id"], True, False)
 
 
 def test_auto_only_open_does_not_manage(env):

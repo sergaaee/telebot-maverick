@@ -2,6 +2,8 @@
 from datetime import datetime, timezone
 from html import escape as esc
 
+from app.core import tradingweek
+
 
 def num(v, d=2):
     return "–" if v is None else f"{v:,.{d}f}".replace(",", " ")
@@ -124,8 +126,15 @@ def config_summary(cfg, result=None):
         bits.append("SL после остывания метрик")
     if p.get("sl_market"):
         bits.append("SL по маркету (решает отчёт)")
-    if p.get("weekdays_only"):
-        bits.append("только будни (пн Токио → пт Нью-Йорк)")
+    wk_entry, wk_close, wk_bm = tradingweek.options(p)
+    if wk_entry:
+        bits.append("не открывать по выходным (вход пн Токио → пт Нью-Йорк)")
+    if wk_close:
+        bits.append("закрывать перед выходными" + (f" (за {wk_bm:g} мин до закрытия Нью-Йорка)" if wk_bm else " (к закрытию Нью-Йорка в пятницу)"))
+    if p.get("exit_long_ds") is not None:
+        bits.append(f"закрыть лонг при DS ≤ {p['exit_long_ds']:g}")
+    if p.get("exit_short_ds") is not None:
+        bits.append(f"закрыть шорт при DS ≥ {p['exit_short_ds']:g}")
     if p.get("liquidation_sim"):
         bits.append(f"ликвидация {p.get('maint_margin_pct', 0.5):g}%")
     if p.get("entry_limit_pct"):
@@ -179,7 +188,7 @@ def signal_message(cfg, result, sig, report, plan, entry_price, top, source_labe
     return "\n\n".join(blocks)
 
 
-FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>", "LIQ": "💥 <b>ЛИКВИДАЦИЯ</b>", "WKND": "📅 <b>Закрытие к концу недели (пятница, закрытие Нью-Йорка)</b>"}
+FILL_TITLES = {"TP": "✅ <b>{label} исполнен</b>", "SL": "🛑 <b>Стоп-лосс</b>", "BE": "⚖️ <b>Закрытие в безубытке</b>", "REV": "🔄 <b>Разворот — позиция закрыта по рынку</b>", "LIQ": "💥 <b>ЛИКВИДАЦИЯ</b>", "WKND": "📅 <b>Закрытие к концу недели (пятница, закрытие Нью-Йорка)</b>", "DS": "📉 <b>Закрытие по DS — позиция закрыта по рынку</b>"}
 
 
 def fill_message(cfg, result, ev, source_label):

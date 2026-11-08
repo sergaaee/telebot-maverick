@@ -47,6 +47,10 @@ def effective_params(defaults: dict, p: BacktestParams) -> dict:
     if "tp_pct" in p.model_fields_set and "tps" not in p.model_fields_set and p.tp_pct is not None:
         eff["tps"] = [{"pct": p.tp_pct, "share": 100.0}]          # совместимость: один тейк на всю позицию
     eff.pop("tp_pct", None)
+    if "weekdays_only" in p.model_fields_set:                       # прежняя общая галочка «только будни» задаёт обе новые опции выходных, если они не заданы явно
+        for k in ("weekend_no_entry", "weekend_close"):
+            if k not in p.model_fields_set:
+                eff[k] = bool(p.weekdays_only)
     eff["tps"] = [l.model_dump() if hasattr(l, "model_dump") else dict(l) for l in eff["tps"]]
     eff["top_tps"] = [l.model_dump() if hasattr(l, "model_dump") else dict(l) for l in eff["top_tps"]]
     eff.setdefault("date_from", None)
@@ -209,7 +213,7 @@ def waiting_lines(d, w):
     return out
 
 
-SPLIT_REASONS = ("TP", "BE", "SL", "REV", "LIQ", "WKND", "OPEN")
+SPLIT_REASONS = ("TP", "BE", "SL", "REV", "LIQ", "WKND", "DS", "OPEN")
 
 
 def weekday_split(trades, before_min=0.0):
@@ -514,7 +518,14 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             warnings.append(f"Пирамидинг: {eff['trade_pct']:g}% + {eff['pyramid_max']} × {eff['pyramid_pct']:g}% больше депозита — доборов не больше {room}")
         pyramid, pyr_pct = {"max": min(eff["pyramid_max"], room), "gap_h": eff.get("pyramid_gap_h") or 0.0, "move_pct": eff.get("pyramid_move_pct") or 0.0, "move_dir": eff.get("pyramid_move_dir") or "any", "avg": bool(eff.get("pyramid_avg")),
                             "w0": eff["trade_pct"] * lev, "w": eff["pyramid_pct"] * lev_add}, eff["pyramid_pct"]      # веса усреднения — объём (доля × плечо)
-    week = {"before_min": eff.get("friday_close_before_min") or 0.0} if eff.get("weekdays_only") else None
+    wk_entry, wk_close, wk_before = tradingweek.options(eff)
+    week = {"before_min": wk_before, "no_entry": wk_entry, "close": wk_close} if (wk_entry or wk_close) else None
+    lx, sx = eff.get("exit_long_ds"), eff.get("exit_short_ds")
+    dsx = backtest.ds_exit_checker(sigs, lx, sx) if (lx is not None or sx is not None) else None
+    if lx is not None and eff["side"] != "short" and eff.get("scalp_min") is not None and lx >= eff["scalp_min"] and eff["only"] != "local":
+        warnings.append(f"Выход лонга по DS ≤ {lx:g} не ниже порога входа DS ≥ {eff['scalp_min']:g}: лонг, открытый при DS от {eff['scalp_min']:g} до {lx:g}, закроется уже на следующем отчёте")
+    if sx is not None and eff["side"] != "long" and eff.get("short_scalp_max") is not None and sx <= eff["short_scalp_max"] and eff["only"] != "local":
+        warnings.append(f"Выход шорта по DS ≥ {sx:g} не выше порога входа DS ≤ {eff['short_scalp_max']:g}: шорт, открытый при DS от {sx:g} до {eff['short_scalp_max']:g}, закроется уже на следующем отчёте")
     lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
     pend = []
     confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est)     # все подтверждённые сигналы (с пропущенными)
@@ -525,7 +536,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0} if eff.get("entry_limit_pct") else None
     lim_ttl_ms = int(entry_limit["ttl_h"] * 3.6e6) if entry_limit else 0
     run_kw = dict(sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"], cooldown_h=extra.get("cooldown_h", 0.0), be_after_tp1=bool(eff.get("be_after_tp1")), pyramid=pyramid,
-                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=None if sl_market else hold, mstop=hold if sl_market else None, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week, entry_limit=entry_limit)
+                  signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=None if sl_market else hold, mstop=hold if sl_market else None, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week, entry_limit=entry_limit, dsx=dsx)
     kept, kept_skipped, resume, from_ts = [], [], None, None
     if snap and snap.get("sim"):
         kept, kept_skipped, resume, from_ts = _closed_prefix(snap["sim"], lim_ttl_ms)

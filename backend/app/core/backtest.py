@@ -262,9 +262,10 @@ def normalize_tps(tps):
     return [(p, s / 100) for p, s in levels]
 
 
-def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None, until=None, no_tp_first=False, mstop=None):
+def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None, until=None, no_tp_first=False, mstop=None, dsx=None):
     """Ход позиции, открытой на open свечи i. tps: [(цена, доля)]. Возвращает события [(idx, цена, доля, метка)],
-    метки: TP1..TP3, SL, BE (стоп в безубытке), LIQ (ликвидация), WKND (закрытие по расписанию — конец торговой недели), OPEN (данные кончились).
+    метки: TP1..TP3, SL, BE (стоп в безубытке), LIQ (ликвидация), WKND (закрытие по расписанию — конец торговой недели), DS (закрытие по значению DS нового отчёта),
+    OPEN (данные кончились).
 
     until (мс) — необязательно: на первой свече, начавшейся не раньше этого момента, остаток закрывается по её open (режим «только будни»).
 
@@ -282,13 +283,19 @@ def _scan(candles, i, d, entry, tps, sl, slip, be, hold=None, liq=None, until=No
 
     mstop=(множество индексов свечей с новым отчётом, strong(ts_мс) -> bool) (необязательно) — «стоп-лосс по маркету»: стоп-ордера нет, касание цены им ничего не закрывает.
     Решает только отчёт: на свече, где пришёл новый отчёт, если метрики ниже порогов входа (не strong) и цена на open свечи всё ещё за стопом — остаток закрывается по рынку
-    (по open этой свечи, с проскальзыванием; метка SL), иначе позиция остаётся и ждёт следующего отчёта. Стоп в безубытке после TP1 это не касается; hold при этом не нужен."""
+    (по open этой свечи, с проскальзыванием; метка SL), иначе позиция остаётся и ждёт следующего отчёта. Стоп в безубытке после TP1 это не касается; hold при этом не нужен.
+
+    dsx=(множество индексов свечей с новым отчётом, exit(ts_мс) -> bool) (необязательно) — закрытие по DS: на свече, где пришёл новый отчёт (не на свече входа), если его DS за
+    порогом выхода (лонг: DS не выше порога, шорт: DS не ниже порога), остаток закрывается по open этой свечи (с проскальзыванием; метка DS). Порог выхода не зависит от порога входа."""
     stop, stop_label = sl, "SL"
     remaining, k_tp, events = 1.0, 0, []
     for k in range(i, len(candles)):
         _, o, h, l, _ = candles[k]
         if until is not None and candles[k][0] >= until:
             events.append((k, o * (1 - slip) if d == 1 else o * (1 + slip), remaining, "WKND"))
+            return events
+        if dsx is not None and k > i and k in dsx[0] and dsx[1](candles[k][0]):
+            events.append((k, o * (1 - slip) if d == 1 else o * (1 + slip), remaining, "DS"))
             return events
         gated = mstop is not None and stop_label == "SL"
         if gated and k > i and k in mstop[0] and not mstop[1](candles[k][0]) and ((o <= stop) if d == 1 else (o >= stop)):         # отчёт ниже порогов, а цена всё ещё за стопом: закрываем по рынку
@@ -380,9 +387,10 @@ class AvgPosition:
     с обычной одиночной сделкой, а после добора остаток делится между оставшимися тейками в прежних пропорциях.
     Порядок внутри свечи и правила исполнения — те же, что в _scan (стоп → тейки → возврат в безубыток в той же свече, гэпы по open, hold)."""
 
-    def __init__(self, candles, d, i0, price0, w0, levels, sl_pct, slip, be, hold=None, lev0=1.0, mmr=None, until=None, mstop=None):
+    def __init__(self, candles, d, i0, price0, w0, levels, sl_pct, slip, be, hold=None, lev0=1.0, mmr=None, until=None, mstop=None, dsx=None):
         self.c, self.d, self.n = candles, d, len(candles)
         self.mstop, self.k0 = mstop, i0  # «стоп-лосс по маркету» (см. _scan) и свеча входа
+        self.dsx = dsx                   # закрытие по DS нового отчёта (см. _scan)
         self.until = until               # закрыть остаток на первой свече не раньше этого момента (конец торговой недели)
         self.mmr = mmr                   # доля поддерживающей маржи (None — ликвидация не моделируется)
         self.M = w0 / (lev0 or 1.0)      # маржа в тех же весах: вес / плечо
@@ -432,6 +440,10 @@ class AvgPosition:
             _, o, h, l, _c = self.c[k]
             if self.until is not None and self.c[k][0] >= self.until:
                 self._close(k, o * (1 - slip) if d == 1 else o * (1 + slip), self.q, "WKND")
+                self.done = True
+                break
+            if self.dsx is not None and k > self.k0 and k in self.dsx[0] and self.dsx[1](self.c[k][0]):
+                self._close(k, o * (1 - slip) if d == 1 else o * (1 + slip), self.q, "DS")
                 self.done = True
                 break
             stop = self.A if self.label == "BE" else self.sl()
@@ -506,7 +518,7 @@ class AvgPosition:
 
 
 def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0, cooldown_h=0.0, be_after_tp1=False, notional=None,
-               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None, week=None, resume=None, entry_limit=None, mstop=None):
+               pyramid=None, signal_gap_h=0.0, hold=None, skipped=None, leverage=1.0, add_leverage=None, mmr=None, week=None, resume=None, entry_limit=None, mstop=None, dsx=None):
     """Прогоняет готовые события входа [(ts_мс, +1 лонг / -1 шорт)] по свечам. levels — результат normalize_tps. notional (USD) задаёт размер
     позиции в долларах вместо size (в единицах актива).
 
@@ -520,9 +532,11 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
       cooldown_h — пауза после стопа; signal_gap_h — минимум часов между открытиями позиций (включая развороты);
       leverage / add_leverage (плечо первой ноги / доборов; доборы по умолчанию с тем же плечом) и mmr (доля поддерживающей маржи, 0.005 = 0.5%) нужны, только
         чтобы моделировать ликвидацию (mmr задан): иначе плечо на ход сделки не влияет, а размер считается после (apply_sizing);
-      week={"before_min": X} — режим «только будни»: вход (и добор, и разворот) разрешён с открытия Токио в понедельник до закрытия Нью-Йорка в пятницу (core/tradingweek.py),
-        остальные сигналы пропускаются; позиция, оставшаяся открытой, закрывается по open свечи закрытия пятницы (метка WKND), раньше на X минут;
+      week={"before_min": X, "no_entry": True, "close": True} — выходные, две независимые опции (core/tradingweek.py; без ключей no_entry / close обе включены).
+        no_entry: вход (и добор, и разворот) разрешён только с открытия Токио в понедельник до закрытия Нью-Йорка в пятницу, сигналы в выходные пропускаются.
+        close: позиция закрывается по open свечи закрытия пятницы (метка WKND), раньше на X минут; позиция, открытая в выходные, — в ближайшую пятницу;
       hold(d, ts_мс) -> bool — «стоп-лосс не ставить, пока метрики сильны» (см. _scan);
+      dsx — результат ds_exit_checker, если заданы пороги выхода по DS (см. _scan): позиция закрывается по open свечи с новым отчётом, чей DS за порогом выхода (метка DS);
       mstop — результат strong_checker, если включён «стоп-лосс по маркету» (см. _scan): стоп закрывает позицию по рынку только на свече с новым отчётом, если метрики ниже порогов
         входа, а цена всё ещё за стопом; касания стопа между отчётами ничего не закрывают. Заменяет hold;
       entry_limit={"pct": X, "dir": "pullback"|"breakout", "ttl_h": H} — первая нога позиции входит НЕ по рынку, а ордером на X % движения цены от цены сигнала (open свечи входа):
@@ -547,6 +561,12 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
     if mstop is not None:                                    # свечи, на которых пришёл новый отчёт: первая свеча не раньше времени отчёта
         gate = {k for k in (bisect_left(ts, r) for r in getattr(mstop, "rep_ts", ())) if k < n}
         hold = None
+    dgate = None
+    if dsx is not None and getattr(dsx, "rep_ts", None):     # то же для закрытия по DS
+        dgate = {k for k in (bisect_left(ts, r) for r in dsx.rep_ts) if k < n}
+    wk_before = float((week or {}).get("before_min") or 0.0)
+    wk_entry = bool(week) and bool(week.get("no_entry", True))      # не открывать позиции в выходные
+    wk_close = bool(week) and bool(week.get("close", True))         # закрывать позиции перед выходными
 
     def skip(sts, side, reason):
         if skipped is not None:
@@ -569,8 +589,9 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             leg["sl_market"] = True
         lev = leverage if leg_no == 1 else (add_leverage or leverage)
         liq = (entry * (1 - d * (1 / lev - mmr)), entry * (1 - d / lev)) if mmr is not None else None
-        until = tradingweek.window_close(candles[i][0], week["before_min"]) if week else None
-        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d, liq, until, no_tp_first, ms), candles, fee, size, notional)
+        until = tradingweek.next_close(candles[i][0], wk_before) if wk_close else None
+        dx = (dgate, (lambda t, d=d: dsx(d, t))) if dgate is not None else None
+        _finalize(leg, _scan(candles, i, d, entry, list(zip(prices, levels_shares)), sl, slip, be, hold_d, liq, until, no_tp_first, ms, dx), candles, fee, size, notional)
         trades.append(leg)
         open_legs.append(leg)
         return leg
@@ -588,7 +609,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             tk = candles[k][0]
             if tk > end_ts:
                 return "expired", None, None, end_ts
-            if week and not tradingweek.in_window(tk, week["before_min"]):
+            if wk_entry and not tradingweek.in_window(tk, wk_before):
                 return "expired", None, None, tk
             _, o, h, l, _c = candles[k]
             if mode == "pullback":
@@ -604,7 +625,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         if i >= n:
             skip(sts, side, "нет свечи входа")
             continue
-        if week and not tradingweek.in_window(candles[i][0], week["before_min"]):
+        if wk_entry and not tradingweek.in_window(candles[i][0], wk_before):
             skip(sts, side, "выходные: вне торгового окна")
             continue
         if standing is not None:                            # ордер, который в расчёте не исполнится, но ещё «стоит» (живёт до срока или до конца данных): новых входов по той же стороне пока нет
@@ -703,8 +724,9 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             entry = fill_px if fill_px is not None else candles[i][1] * (1 + d * slip)
             hold_d = (lambda t, d=d: hold(d, t)) if hold else None
             ms = (gate, (lambda t, d=d: mstop(d, t))) if gate is not None else None
+            dx = (dgate, (lambda t, d=d: dsx(d, t))) if dgate is not None else None
             avg_pos = AvgPosition(candles, d, fill_i, entry, pyramid["w0"], levels, sl_pct, slip, be, hold_d, leverage, mmr,
-                                  tradingweek.window_close(candles[fill_i][0], week["before_min"]) if week else None, ms)
+                                  tradingweek.next_close(candles[fill_i][0], wk_before) if wk_close else None, ms, dx)
             if lim:
                 avg_pos.no_tp_k = fill_i
             avg_trade = {"side": side, "signal_ts": sts, "entry_ts": candles[fill_i][0], "entry_first": entry, "be": be, "leg": 1, "group": group,
@@ -763,9 +785,26 @@ def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_
     return hold
 
 
+def ds_exit_checker(signals, long_ds=None, short_ds=None):
+    """exit(d, ts_мс) -> пора ли закрыть позицию по DS (Scalp) последнего отчёта не позже ts_мс: лонг закрывается, если DS <= long_ds, шорт — если DS >= short_ds.
+    Пороги выхода задаются отдельно от порогов входа. Порог не задан (None), нет отчёта или в нём нет DS — не закрывать. Без порогов rep_ts пуст (решений по отчётам нет)."""
+    rep_ts = [s[0] for s in signals]
+    ds = [s[2] for s in signals]
+
+    def exit_(d, t):
+        thr = long_ds if d == 1 else short_ds
+        if thr is None:
+            return False
+        k = bisect_right(rep_ts, t) - 1
+        v = ds[k] if k >= 0 else None
+        return v is not None and ((v <= thr) if d == 1 else (v >= thr))
+    exit_.rep_ts = rep_ts if (long_ds is not None or short_ds is not None) else []
+    return exit_
+
+
 def stats(trades):
     if not trades:
-        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "time": 0, "rev": 0, "liq": 0, "wknd": 0, "winrate": 0, "total_usd": 0,
+        return {"trades": 0, "tp": 0, "sl": 0, "be": 0, "open": 0, "time": 0, "rev": 0, "liq": 0, "wknd": 0, "ds": 0, "winrate": 0, "total_usd": 0,
                 "avg_pct": 0, "profit_factor": 0, "max_dd_usd": 0}
     wins = [t["pnl_usd"] for t in trades if t["pnl_usd"] > 0]
     losses = [-t["pnl_usd"] for t in trades if t["pnl_usd"] <= 0]
@@ -783,10 +822,11 @@ def stats(trades):
             "rev": sum(t["reason"] == "REV" for t in trades),
             "liq": sum(t["reason"] == "LIQ" for t in trades),
             "wknd": sum(t["reason"] == "WKND" for t in trades),
+            "ds": sum(t["reason"] == "DS" for t in trades),
             "winrate": 100 * len(wins) / len(trades),
             "total_usd": eq,
             "avg_pct": sum(t["pnl_pct"] for t in trades) / len(trades),
-            "profit_factor": sum(wins) / sum(losses) if losses else float("inf"),
+            "profit_factor": sum(wins) / sum(losses) if sum(losses) > 0 else float("inf"),
             "max_dd_usd": dd}
 
 
