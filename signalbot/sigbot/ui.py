@@ -261,7 +261,7 @@ class MonitorUI:
             if a["over"]:
                 lines.append(f"⚙️ Свои настройки{f' ({EXC_LABEL[n]})' if multi else ''}: {fm.over_line(a['over'])}")
         for pe in self.db.pending_of(c["id"]):
-            lines.append(f"⏳ Ждёт вход{f' ({EXC_LABEL[pe["exchange"]]})' if multi else ''}: {'лонг' if pe['side'] == 'long' else 'шорт'} по <b>{fm.price(pe['level'])}</b> "
+            lines.append(f"⏳ Ждёт {'добор' if pe.get('pyramid') else 'вход'}{f' ({EXC_LABEL[pe["exchange"]]})' if multi else ''}: {'лонг' if pe['side'] == 'long' else 'шорт'} по <b>{fm.price(pe['level'])}</b> "
                          f"({'лимитка на бирже' if pe['order_id'] else 'вход по рынку при касании цены'}), до {fm.ts_str(int(pe['expires'] * 1000))[5:]}")
         cu = c["catchup"]
         lines.append(f"⏩ Догнать свежий сигнал при включении: <b>{'вкл' if cu['on'] else 'выкл'}</b>" + (f" (не старше {cu['age_min']:g} мин, цена не дальше {cu['move_pct']:g}% в прибыль)" if cu["on"] else ""))

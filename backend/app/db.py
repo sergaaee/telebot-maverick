@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS pending_entries (
     order_id TEXT,
     created REAL NOT NULL,
     expires REAL NOT NULL,
+    pyramid INTEGER NOT NULL DEFAULT 0,
+    leg INTEGER,
+    base_size REAL,
     PRIMARY KEY (config_id, exchange)
 );
 CREATE TABLE IF NOT EXISTS auto_retry (
@@ -251,6 +254,10 @@ class Database:
                 INSERT INTO pending_entries(config_id, exchange, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires)
                     SELECT config_id, 'hyperliquid', user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires FROM pending_entries_old;
                 DROP TABLE pending_entries_old;""")
+        if "pyramid" not in {r["name"] for r in c.execute("PRAGMA table_info(pending_entries)")}:      # доборы лимиткой: ожидающий вход может быть добором (pyramid, номер ноги leg)
+            c.execute("ALTER TABLE pending_entries ADD COLUMN pyramid INTEGER NOT NULL DEFAULT 0")
+            c.execute("ALTER TABLE pending_entries ADD COLUMN leg INTEGER")
+            c.execute("ALTER TABLE pending_entries ADD COLUMN base_size REAL")           # размер позиции на бирже в момент постановки добора: по нему видно, сколько добавилось
         if pk("auto_retry") == ["config_id"]:
             c.execute("ALTER TABLE auto_retry RENAME TO auto_retry_old")
             c.executescript("""CREATE TABLE auto_retry (
@@ -432,12 +439,12 @@ class Database:
             c.execute("INSERT INTO user_prefs(user_id, key, value) VALUES (?,?,?) ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (user_id, key, json.dumps(value, ensure_ascii=False)))
 
     # ---------------- ожидающие входы: лимитный ордер на вход / ожидание цены для входа по ходу ----------------
-    def set_pending(self, config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, expires, exchange="hyperliquid"):
+    def set_pending(self, config_id, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, expires, exchange="hyperliquid", pyramid=False, leg=None, base_size=None):
         with self.conn() as c:
-            c.execute("INSERT INTO pending_entries(config_id, exchange, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            c.execute("INSERT INTO pending_entries(config_id, exchange, user_id, signal_ts, symbol, side, mode, level, ref, notional, margin, leverage, order_id, created, expires, pyramid, leg, base_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                       "ON CONFLICT(config_id, exchange) DO UPDATE SET user_id=excluded.user_id, signal_ts=excluded.signal_ts, symbol=excluded.symbol, side=excluded.side, mode=excluded.mode, level=excluded.level, "
-                      "ref=excluded.ref, notional=excluded.notional, margin=excluded.margin, leverage=excluded.leverage, order_id=excluded.order_id, created=excluded.created, expires=excluded.expires",
-                      (config_id, exchange, user_id, int(signal_ts), symbol, side, mode, level, ref, notional, margin, leverage, None if order_id is None else str(order_id), time.time(), expires))
+                      "ref=excluded.ref, notional=excluded.notional, margin=excluded.margin, leverage=excluded.leverage, order_id=excluded.order_id, created=excluded.created, expires=excluded.expires, pyramid=excluded.pyramid, leg=excluded.leg, base_size=excluded.base_size",
+                      (config_id, exchange, user_id, int(signal_ts), symbol, side, mode, level, ref, notional, margin, leverage, None if order_id is None else str(order_id), time.time(), expires, int(bool(pyramid)), leg, base_size))
 
     def get_pending(self, config_id, exchange="hyperliquid"):
         with self.conn() as c:

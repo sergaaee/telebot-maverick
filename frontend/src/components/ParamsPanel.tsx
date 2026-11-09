@@ -368,6 +368,10 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
               </select>
             </label>
             <Num label="Ордер живёт" help="entry_limit_ttl_h" value={p.entry_limit_ttl_h ?? 4} step={1} suffix="ч" onChange={(v) => set('entry_limit_ttl_h', Math.max(0.1, v ?? 4))} />
+            <label className="field check">
+              <input type="checkbox" checked={!!p.entry_limit_adds} onChange={(e) => set('entry_limit_adds', e.target.checked)} data-testid="limit-adds" />
+              <Label text="доборы пирамидинга тоже лимиткой" help="entry_limit_adds" />
+            </label>
           </>
         )}
         <Num label="Фандинг, % годовых" help="funding_apr" value={p.funding_apr ?? 0} step={1} suffix="%" onChange={(v) => set('funding_apr', v ?? 0)} />

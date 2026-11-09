@@ -143,6 +143,8 @@ class Engine:
                     t = by_signal.get(s["ts"], {})
                     out.append({**s, "leg": t.get("leg", 1), "pyramid": bool(t.get("pyramid")),
                                 **{k: t[k] for k in ("avg_entry", "avg_tps", "avg_sl") if k in t}})
+                elif p.get("entry_limit_pct") and p.get("entry_limit_adds") and s.get("reason") == backtest.LIMIT_ADD_PENDING:        # добор лимиткой: ордер по сигналу в расчёте ещё ждёт — добор, номер ноги следующий
+                    out.append({**s, "leg": adds + 2, "pyramid": True})
                 continue
             wk_entry, wk_close, bm = tradingweek.options(p)
             if wk_entry and not tradingweek.in_window(s["ts"], bm):   # «не открывать позиции в выходные»: сигнал вне торгового окна пропускается

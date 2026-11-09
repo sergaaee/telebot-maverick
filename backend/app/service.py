@@ -533,7 +533,10 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     levels = backtest.normalize_tps(tps)
     sl_market = bool(eff.get("sl_market"))
     hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm) if (eff.get("sl_hold_strong") or sl_market) else None
-    entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0} if eff.get("entry_limit_pct") else None
+    entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0,
+                   "adds": bool(eff.get("entry_limit_adds") and pyramid)} if eff.get("entry_limit_pct") else None
+    if eff.get("entry_limit_adds") and not (eff.get("entry_limit_pct") and pyramid):
+        warnings.append("Доборы лимиткой: нужны включённый пирамидинг и вход лимиткой (% движения цены больше 0) — пока опция ни на что не влияет")
     lim_ttl_ms = int(entry_limit["ttl_h"] * 3.6e6) if entry_limit else 0
     run_kw = dict(sl_pct=eff["sl_pct"], fee=eff["fee"], size=eff["size"], slip=eff["slip"], cooldown_h=extra.get("cooldown_h", 0.0), be_after_tp1=bool(eff.get("be_after_tp1")), pyramid=pyramid,
                   signal_gap_h=eff.get("signal_gap_h") or 0.0, hold=None if sl_market else hold, mstop=hold if sl_market else None, leverage=lev, add_leverage=lev_add, mmr=mmr, week=week, entry_limit=entry_limit, dsx=dsx)

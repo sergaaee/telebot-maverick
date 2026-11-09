@@ -9,7 +9,7 @@ import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
   open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS',
-  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
+  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', limit_add: 'лимитка добора', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
 
@@ -151,7 +151,7 @@ function ParamsTab({ e }: { e: MonitorEntry }) {
     ['Подтверждение', `${p.confirm} отчётов подряд`], ['Остывание', p.cool_drop != null ? `откат ${p.cool_drop} (${p.cool_metric})` : p.cool_declines != null ? `${p.cool_declines} отчётов подряд (${p.cool_metric})` : 'выключено'],
     ['Ликвидации (фильтр)', p.liq_hours != null ? `окно ${p.liq_hours} ч, ≤ ${p.liq_frac} пика, перцентиль ${p.liq_pct}` : 'выключено'], ['Тренд', p.trend_enabled ? `EMA ${(p.trend_emas as number[]).join('/')} на ${p.trend_tf}` : 'выключен'],
     ['Выход', `SL ${p.sl_pct}% · TP ${(p.tps as { pct: number; share: number }[]).map((t) => `${t.pct}%×${t.share}`).join(' / ')}${p.be_after_tp1 ? ' · БУ после TP1' : ''}`],
-    ['Вход', p.entry_limit_pct ? `${p.entry_limit_dir === 'breakout' ? 'по ходу цены' : 'лимиткой на откат'} ${p.entry_limit_pct}% · ордер живёт ${p.entry_limit_ttl_h ?? 4} ч` : 'по рынку'], ['Фандинг', p.funding_apr ? `${p.funding_apr}% годовых · период ${p.funding_period_h ?? 8} ч${p.funding_mode === 'cost' ? ' · платят обе стороны' : ''}` : 'не учитывается'], ['Размер', `депозит ${fmtUsd(p.deposit as number)} · ${p.trade_pct}% · плечо ${p.leverage}× · ${p.compound ? 'сложный %' : 'фикс. сумма'}`],
+    ['Вход', p.entry_limit_pct ? `${p.entry_limit_dir === 'breakout' ? 'по ходу цены' : 'лимиткой на откат'} ${p.entry_limit_pct}% · ордер живёт ${p.entry_limit_ttl_h ?? 4} ч${p.entry_limit_adds ? ' · доборы тоже лимиткой' : ''}` : 'по рынку'], ['Фандинг', p.funding_apr ? `${p.funding_apr}% годовых · период ${p.funding_period_h ?? 8} ч${p.funding_mode === 'cost' ? ' · платят обе стороны' : ''}` : 'не учитывается'], ['Размер', `депозит ${fmtUsd(p.deposit as number)} · ${p.trade_pct}% · плечо ${p.leverage}× · ${p.compound ? 'сложный %' : 'фикс. сумма'}`],
     ['Пирамидинг', p.pyramid_enabled ? `до ${p.pyramid_max} × ${p.pyramid_pct}%${p.pyramid_avg ? ' с усреднением' : ''}${p.pyramid_leverage ? `, плечо ${p.pyramid_leverage}×` : ''}${p.pyramid_move_pct ? `, движение ≥ ${p.pyramid_move_pct}%` : ''}` : 'выключен'],
     ['Не открывать по выходным', on('weekend_no_entry')], ['Закрывать перед выходными', p.weekend_close ? `да${p.friday_close_before_min ? ` (за ${String(p.friday_close_before_min)} мин до закрытия NY)` : ''}` : 'нет'], ['Закрытие по DS', p.exit_long_ds != null || p.exit_short_ds != null ? [p.exit_long_ds != null ? `лонг при DS ≤ ${p.exit_long_ds}` : '', p.exit_short_ds != null ? `шорт при DS ≥ ${p.exit_short_ds}` : ''].filter(Boolean).join(' · ') : 'выключено'], ['Моделировать ликвидацию', on('liquidation_sim')], ['Не ставить SL, пока метрики сильны', on('sl_hold_strong')], ['Стоп-лосс по маркету (решает отчёт)', on('sl_market')],
     ['Пауза после стопа / между сигналами', `${p.cooldown_h} ч / ${p.signal_gap_h} ч`], ['Топ-коины', on('top_enabled')], ['Создан', e.created ? fmtTs(e.created * 1000) : '–'], ['Уведомлений', String(e.alerts ?? 0)],
@@ -399,7 +399,7 @@ function Row2({ e, open, exchange, exchanges, account, accounts, onToggleOpen, o
   const names = exNames(exchanges);
   const shown = names.filter((n) => n === 'hyperliquid' || infoOf(n)?.real || cfgOf(n).open || cfgOf(n).manage || Object.keys(cfgOf(n).over).length > 0);
   const multi = shown.length > 1;
-  const pend: Record<string, { side: 'long' | 'short'; level: number; order_id: string | null } | undefined> = { ...(e.pending_entries ?? {}), ...(e.pending_entries?.hyperliquid || !e.pending_entry ? {} : { hyperliquid: e.pending_entry }) };
+  const pend: Record<string, { side: 'long' | 'short'; level: number; order_id: string | null; pyramid?: number } | undefined> = { ...(e.pending_entries ?? {}), ...(e.pending_entries?.hyperliquid || !e.pending_entry ? {} : { hyperliquid: e.pending_entry }) };
   return (
     <div className="mon-row" data-status={st.cls}>
       <span className={`mon-dot ${st.cls}`} title={st.text} />
@@ -408,7 +408,7 @@ function Row2({ e, open, exchange, exchanges, account, accounts, onToggleOpen, o
         <span className={st.cls === 'open' ? (pos?.side === 'long' ? 'pos' : 'neg') : 'muted'}>{st.text}</span>
         {pos && <> · <b className={signClass(pos.pnl_usd)}>{fmtUsd(pos.pnl_usd)}</b> <span className="muted small">{pos.pnl_pct_deposit != null ? fmtPct(pos.pnl_pct_deposit, 2) : ''} · {held(pos.hold_h)}{pos.legs_n && pos.legs_n > 1 ? ` · ног ${pos.legs_n}` : ''}</span></>}
         {pos?.danger && <span className="bad-text small" title="цена за оценочной ценой ликвидации"> ⚠ ликвидация</span>}
-        {names.map((n) => { const pe = pend[n]; return pe ? <span key={n} className="warn-text small" data-testid="mon-pending" title={pe.order_id ? `лимитный ордер ${pe.order_id} на бирже` : 'бот следит за ценой и войдёт по рынку при касании уровня'}> · ⏳ {multi ? `${exLabel(n)}: ` : ''}ждёт вход {pe.side === 'long' ? 'лонг' : 'шорт'} по {fmtPrice(pe.level)}</span> : null; })}
+        {names.map((n) => { const pe = pend[n]; return pe ? <span key={n} className="warn-text small" data-testid="mon-pending" title={pe.order_id ? `лимитный ордер ${pe.order_id} на бирже` : 'бот следит за ценой и сделает это по рынку при касании уровня'}> · ⏳ {multi ? `${exLabel(n)}: ` : ''}ждёт {pe.pyramid ? 'добор' : 'вход'} {pe.side === 'long' ? 'лонг' : 'шорт'} по {fmtPrice(pe.level)}</span> : null; })}
         {!pos && e.ready_now && e.ready_now[0] && <span className="muted small"> · {e.ready_now[0].waiting.map((w) => ({ cool: 'откат', liq: 'ликвидации', trend: 'тренд' })[w]).join(' + ')}</span>}
         {e.baseline === false && !e.paused && <span className="muted small" title="Бот ещё не обработал этот конфиг (первый расчёт идёт или бот не запущен)"> · бот ещё не посчитал</span>}
         {stale != null && stale > 20 && <span className="warn-text small"> · свечи {ago(e.candle_ts)}</span>}
@@ -570,7 +570,9 @@ function ExchangeBlock({ name = 'hyperliquid', state, error, moreHl = 0, onDisco
 /** Страница мониторинга: ВСЕ стратегии пользователя (конфиги, отправленные боту), по клику «Подробнее» — позиция, история, статистика, параметры и журнал; управление (автомод, пауза, имя, удаление). От бэктеста не зависит. */
 export default function MonitorPage() {
   const [data, setData] = useState<MonitorResponse | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErrRaw] = useState<string | null>(null);
+  const errGen = useRef(0);                               // номер последней записанной ошибки: обновление, начатое до неё, её не стирает
+  const setErr = useCallback((m: string | null) => { if (m !== null) errGen.current += 1; setErrRaw(m); }, []);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [testSide, setTestSide] = useState<'long' | 'short'>('long');
@@ -582,10 +584,11 @@ export default function MonitorPage() {
 
   const load = useCallback(async () => {
     try {
+      const gen = errGen.current;
       const r = await getMonitor();
       if (alive.current) {
         setData(r);
-        setErr(null);
+        if (errGen.current === gen) setErr(null);        // ошибка действия, возникшая, пока шёл запрос, остаётся на экране
       }
       // подключённый счёт на бирже (реальные позиции, баланс, ордера, исполнения); сбой биржи не мешает остальной странице
       for (const n of exNames(r.exchanges).filter((x) => isMain(x) || r.exchanges?.[x]?.real)) {                  // дополнительные аккаунты Hyperliquid спрашиваем, только если они подключены

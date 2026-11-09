@@ -641,6 +641,19 @@ def scenario(pg, base, state_url):
     pg.get_by_test_id("limit-dir").select_option("breakout")
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
     check("режим «по ходу» тоже считается (сделки на месте)", pg.locator("table.trades tbody tr").count() >= 1)
+    la = pg.get_by_test_id("limit-adds")
+    check("«доборы пирамидинга тоже лимиткой»: есть при включённом входе лимиткой, выключено по умолчанию, с «?»", la.count() == 1 and not la.is_checked() and field(pg, "доборы пирамидинга тоже лимиткой").locator(".help").count() == 1)
+    adds_api = pg.evaluate("""() => { const body = (adds) => JSON.stringify({pyramid_enabled: true, pyramid_max: 3, pyramid_pct: 5, trade_pct: 10, entry_limit_pct: 0.3, entry_limit_dir: 'breakout', entry_limit_ttl_h: 2, entry_limit_adds: adds});
+        const go = (adds) => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: body(adds)}).then(r => r.json());
+        return Promise.all([go(false), go(true)]).then(([m, l]) => ({
+            market_limit_adds: m.trades.filter(t => t.pyramid && t.limit).length, market_adds: m.trades.filter(t => t.pyramid).length,
+            limit_adds: l.trades.filter(t => t.pyramid), warn: l.warnings.filter(w => w.includes('Доборы лимиткой')).length})); }""")
+    check("API: доборы по рынку — без лимитки; с entry_limit_adds доборы — ноги с limit.add, исполненные не раньше сигнала (и без предупреждения о бесполезной опции)",
+          adds_api["market_adds"] > 0 and adds_api["market_limit_adds"] == 0 and len(adds_api["limit_adds"]) > 0 and all(t["limit"]["add"] is True and t["entry_ts"] >= t["signal_ts"] for t in adds_api["limit_adds"]) and adds_api["warn"] == 0, str(len(adds_api["limit_adds"])))
+    la.check()
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("с включённой опцией расчёт идёт, сделки на месте", pg.locator("table.trades tbody tr").count() >= 1)
+    la.uncheck()
     num(pg, "Вход лимиткой").fill("0")
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
     check("процент 0: вход по рынку, итог вернулся к прежнему", pg.locator("table.trades td", has_text="⏱").count() == 0 and pg.locator(".card", has_text="Итого").first.inner_text() == tot_before)

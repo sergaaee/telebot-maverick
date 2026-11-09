@@ -242,6 +242,7 @@ def fetch_candles(exchange, symbol, tf, since_ms, cache_dir=CACHE_DIR, progress=
 
 
 MAX_TPS = 3
+LIMIT_ADD_PENDING = "лимитка добора ждёт исполнения"   # то же для добора пирамидинга: сигнал добора подтверждён, ордер ещё не исполнен, а данные кончились
 LIMIT_PENDING = "лимитка ждёт исполнения"       # сигнал подтверждён, ордер ещё не исполнен, а данные кончились (в бэктесте — не пропуск, а ожидание)
 
 
@@ -543,7 +544,9 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         pullback — лимитка на откат (лонг ниже, шорт выше): исполняется, когда цена дошла до уровня (по уровню, а если свеча открылась за ним — по open); breakout — вход по ходу
         (лонг выше, шорт ниже, стоп-вход): исполняется при касании уровня, с проскальзыванием. Ордер живёт ttl_h часов (и до конца торгового окна в режиме «только будни»); не исполнился — сигнал
         пропускается. Пока ордер стоит, повторные сигналы той же стороны игнорируются, обратный — отменяет его. В свече исполнения тейки не засчитываются (порядок внутри свечи неизвестен).
-        Доборы пирамидинга по-прежнему идут по рынку;
+        Доборы пирамидинга идут по рынку, если не задано "adds": True: тогда добор тоже входит лимиткой с теми же X, направлением и сроком — от цены open свечи сигнала добора. Пока лимитка добора
+        стоит, повторные сигналы той же стороны пропускаются, обратный сигнал отменяет её; если позиция закрылась до исполнения, добор отменяется; исполненный добор — отдельная нога
+        (или добор в усреднённую позицию) с входом по цене лимитки в свече исполнения (тейки в ней не засчитываются);
       skipped — список, в который дописываются (ts, сторона, причина) пропущенных сигналов;
       resume={"group": номер последней уже закрытой позиции, "last_group": её сделки, "last_open_ts": время её открытия} — продолжение после закрытых позиций: events
         должны начинаться с первого события после них, возвращаются только новые сделки (паузы после стопа и между сигналами учитывают сохранённую позицию)."""
@@ -597,6 +600,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         return leg
 
     lim = entry_limit if (entry_limit and entry_limit.get("pct")) else None
+    add_pend, add_standing = None, None                 # ожидающий добор лимиткой {fk, fpx, sts, d, side, i, ref, group} и момент (мс), до которого «лимитка добора уже стоит»
     pend_state, standing = {}, None                     # состояние до открытия ноги (чтобы отмена лимитки его вернула) и «ордер ещё стоит, хотя в расчёте он уже не исполнится»: (сторона, до какого времени | None — до конца данных)
 
     def limit_fill(i, d):
@@ -619,12 +623,40 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
                 return "fill", k, (max(lvl, o) * (1 + slip) if d == 1 else min(lvl, o) * (1 - slip)), None     # стоп-вход: гэп — по open, плюс проскальзывание
         return "wait", None, None, None
 
+    def flush_add():
+        """Лимитка добора исполнилась на свече fk: если позиция в этот момент ещё открыта — добор (нога или добор в усреднённую позицию), иначе добор отменяется."""
+        nonlocal add_pend, adds, last_leg_ts, last_leg_px
+        a, add_pend = add_pend, None
+        fk, fpx = a["fk"], a["fpx"]
+        if a["group"] != group:
+            skip(a["sts"], a["side"], "позиция закрыта до исполнения лимитки добора")
+            return
+        if avg_pos is not None and open_legs:
+            if avg_pos.advance(fk):                         # позиция закрылась сама до исполнения добора
+                skip(a["sts"], a["side"], "позиция закрыта до исполнения лимитки добора")
+                return
+            adds += 1
+            avg_pos.add(fk, fpx, pyramid["w"], add_leverage or leverage)
+            avg_pos.no_tp_k = fk                            # в свече исполнения тейки не засчитываются (порядок внутри минуты неизвестен)
+            avg_trade["add_signals"].append(a["sts"])
+        else:
+            if not any(leg["_j"] > fk or (leg["_j"] == fk and leg["reason"] not in ("WKND", "DS", "REV")) for leg in open_legs):
+                skip(a["sts"], a["side"], "позиция закрыта до исполнения лимитки добора")
+                return
+            adds += 1
+            leg = open_leg(a["sts"], a["d"], a["side"], fk, adds + 1, entry_px=fpx, no_tp_first=True)
+            leg["limit"] = {"level": fpx, "ref": a["ref"], "dir": lim.get("dir", "pullback"), "wait_h": (candles[fk][0] - candles[a["i"]][0]) / 3.6e6, "add": True}
+            last_group.append(leg)
+        last_leg_ts, last_leg_px = candles[fk][0], fpx
+
     for sts, d in events:
         side = "long" if d == 1 else "short"
         i = bisect_left(ts, sts)
         if i >= n:
             skip(sts, side, "нет свечи входа")
             continue
+        if add_pend is not None and add_pend["fk"] < i:
+            flush_add()                                     # лимитка добора исполнилась раньше этого сигнала
         if wk_entry and not tradingweek.in_window(candles[i][0], wk_before):
             skip(sts, side, "выходные: вне торгового окна")
             continue
@@ -656,6 +688,9 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             still = [leg for leg in open_legs if leg["_j"] >= i]
             if len(still) != len(open_legs):
                 open_legs[:] = still
+        if add_pend is not None and not open_legs:
+            skip(add_pend["sts"], add_pend["side"], "позиция закрыта до исполнения лимитки добора")
+            add_pend = None
         if not open_legs:
             # позиции нет (закрылась сама по SL/TP): паузы перед новым открытием
             last = max(last_group, key=lambda t: t["exit_ts"]) if last_group else None
@@ -681,6 +716,20 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
                 if not ((mv >= pyramid["move_pct"]) if mode == "favor" else (-mv >= pyramid["move_pct"]) if mode == "against" else (abs(mv) >= pyramid["move_pct"])):
                     skip(sts, side, "мало движения от последнего входа")
                     continue
+            if lim and lim.get("adds"):                      # добор тоже лимиткой: ордер ставится сейчас, исполнится на свече fk (применится при следующем сигнале или в конце данных)
+                if add_pend is not None or (add_standing is not None and candles[i][0] < add_standing):
+                    skip(sts, side, "лимитка добора уже стоит")
+                    continue
+                kind, fk, fpx, life_end = limit_fill(i, d)
+                if kind == "expired":
+                    skip(sts, side, f"лимитка добора не исполнилась за {lim['ttl_h']:g} ч")
+                    add_standing = life_end
+                elif kind == "wait":
+                    skip(sts, side, LIMIT_ADD_PENDING)
+                    add_standing = 1 << 62
+                else:
+                    add_pend = {"fk": fk, "fpx": fpx, "sts": sts, "d": d, "side": side, "i": i, "ref": candles[i][1], "group": group}
+                continue
             adds += 1
             if avg:
                 avg_pos.add(i, candles[i][1] * (1 + d * slip), pyramid["w"], add_leverage or leverage)
@@ -694,6 +743,9 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
             if signal_gap_h and last_open_ts is not None and sts < last_open_ts + signal_gap_h * 3.6e6:
                 skip(sts, side, "пауза между сигналами")
                 continue
+            if add_pend is not None:                        # обратный сигнал отменяет лимитку добора
+                skip(add_pend["sts"], add_pend["side"], "лимитка добора отменена: пришёл обратный сигнал")
+                add_pend = None
             # разворот на open свечи входа: исполненные тейки остаются, остаток каждой ноги закрывается по рынку
             o = candles[i][1]
             if avg_pos is not None:
@@ -720,6 +772,7 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         saved = (group, last_group, last_open_ts, last_leg_ts, last_leg_px, adds)
         group += 1
         adds = 0
+        add_pend = add_standing = None
         if avg:
             entry = fill_px if fill_px is not None else candles[i][1] * (1 + d * slip)
             hold_d = (lambda t, d=d: hold(d, t)) if hold else None
@@ -742,6 +795,8 @@ def run_events(events, candles, levels, sl_pct, fee=0.00055, size=0.1, slip=0.0,
         last_group = [leg]
         last_open_ts = last_leg_ts = candles[fill_i][0]
         last_leg_px = fill_px if fill_px is not None else candles[i][1]
+    if add_pend is not None:                                # лимитка добора исполнилась на свече в пределах данных
+        flush_add()
     if avg_pos is not None and "exit_ts" not in avg_trade:  # данные кончились, пока позиция открыта
         avg_pos.advance(n)
         fin_avg()

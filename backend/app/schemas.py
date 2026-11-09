@@ -37,6 +37,7 @@ class BacktestParams(BaseModel):
     entry_limit_pct: Optional[float] = Field(None, ge=0, le=20, description="вход лимитным ордером на столько % движения цены от цены сигнала; 0 — по рынку")
     entry_limit_dir: Optional[Literal["pullback", "breakout"]] = Field(None, description="pullback — на откат (лонг ниже, шорт выше); breakout — по ходу (лонг выше, шорт ниже)")
     entry_limit_ttl_h: Optional[float] = Field(None, gt=0, le=72, description="сколько часов живёт ордер на вход")
+    entry_limit_adds: Optional[bool] = Field(None, description="доборы пирамидинга тоже лимиткой (те же %, направление и срок, что у входа); работает при включённых пирамидинге и входе лимиткой")
     funding_apr: Optional[float] = Field(None, ge=-1000, le=1000, description="фандинг, % годовых (+ лонг платит, шорт получает); 0 — не учитывать")
     funding_period_h: Optional[Literal[1, 2, 4, 8, 12, 24]] = Field(None, description="период списания фандинга, часов")
     funding_mode: Optional[Literal["signed", "cost"]] = Field(None, description="signed — по знаку ставки; cost — платят обе стороны")
