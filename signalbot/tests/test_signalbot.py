@@ -825,6 +825,8 @@ def test_weekend_close_fill_message_and_summary():
     assert "не открывать по выходным" in both and "закрывать перед выходными" in both
     one = fm.config_summary({"params": {**base, "weekend_close": True, "friday_close_before_min": 30}})
     assert "закрывать перед выходными (за 30 мин" in one and "не открывать по выходным" not in one
+    assert "доборы тоже лимиткой" in fm.config_summary({"params": {**base, "entry_limit_pct": 0.3, "pyramid_enabled": True, "pyramid_max": 2, "pyramid_pct": 5, "entry_limit_adds": True}})
+    assert "доборы тоже лимиткой" not in fm.config_summary({"params": {**base, "entry_limit_pct": 0.3, "pyramid_enabled": True, "pyramid_max": 2, "pyramid_pct": 5}})
     ds = fm.config_summary({"params": {**base, "exit_long_ds": 1.05, "exit_short_ds": 1.95}})
     assert "закрыть лонг при DS ≤ 1.05" in ds and "закрыть шорт при DS ≥ 1.95" in ds and "DS" not in fm.config_summary({"params": base})
     ev["label"], ev["reason"] = "DS", "DS"

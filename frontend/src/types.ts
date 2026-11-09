@@ -45,6 +45,8 @@ export interface Params {
   entry_limit_pct: number;
   entry_limit_dir: 'pullback' | 'breakout';
   entry_limit_ttl_h: number;
+  /** доборы пирамидинга тоже лимиткой (те же %, направление и срок); работает при включённых пирамидинге и входе лимиткой */
+  entry_limit_adds: boolean;
   funding_apr: number;
   funding_period_h: 1 | 2 | 4 | 8 | 12 | 24;
   funding_mode: 'signed' | 'cost';
@@ -560,7 +562,7 @@ export interface MonitorEntry {
   auto: { open: boolean; manage: boolean; base?: 'config' | 'account' } | null;
   /** Автомод и собственные настройки конфига для каждой биржи (Hyperliquid — то же, что auto). */
   ex?: Record<ExchangeName, ExchangeCfg>;
-  pending_entries?: Partial<Record<ExchangeName, { side: 'long' | 'short'; mode: 'pullback' | 'breakout'; level: number; order_id: string | null; expires: number }>>;
+  pending_entries?: Partial<Record<ExchangeName, { side: 'long' | 'short'; mode: 'pullback' | 'breakout'; level: number; order_id: string | null; expires: number; pyramid?: number; leg?: number | null }>>;
   catchup?: { on: boolean; age_min: number; move_pct: number; armed: boolean };
   pending_entry?: { side: 'long' | 'short'; mode: 'pullback' | 'breakout'; level: number; ref: number; order_id: string | null; expires: number } | null;
   paused: boolean;
@@ -571,7 +573,7 @@ export interface MonitorEntry {
   ready_now?: PendingSignal[];
   recent?: { side: 'long' | 'short'; entry_ts: number; exit_ts: number; reason: Reason; pnl_usd: number; pnl_pct: number; hold_h: number }[];
   settings?: { sl_pct: number; tps: TpLevel[]; be_after_tp1: boolean; leverage: number; pyramid_leverage: number | null; trade_pct: number; pyramid_enabled: boolean; pyramid_pct?: number | null; deposit: number; liquidation_sim: boolean; weekdays_only: boolean; side: Side;
-    entry_limit_pct?: number; entry_limit_dir?: 'pullback' | 'breakout'; entry_limit_ttl_h?: number };
+    entry_limit_pct?: number; entry_limit_dir?: 'pullback' | 'breakout'; entry_limit_ttl_h?: number; entry_limit_adds?: boolean };
   position: MonitorPositionSummary | null;
   stats?: Record<string, number | null>;
   params?: Record<string, unknown>;
