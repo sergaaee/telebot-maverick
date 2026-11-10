@@ -214,3 +214,116 @@ def test_cards_show_that_the_stop_is_not_in_force_while_metrics_are_strong(env, 
     _cool(env)
     env.handle_update(cb(f"c:{cid}"))
     assert "пока не действует" not in env.tg.edits[-1][2] and "запас" in env.tg.edits[-1][2]
+
+
+def _drop_candles_from(env, ts_from, k=0.5):
+    """Цена с момента ts_from (мс) падает в k раз: свечи в кеше теста переписываются, как будто рынок на самом деле упал (а не только цена бота)."""
+    import csv
+    from app.core import backtest
+    path = backtest.cache_path("binanceusdm", "BTC/USDT:USDT", "1m", str(env.tmp / "cache"))
+    rows = backtest.read_cache(path)
+    rows = [(r[0], *[x * k for x in r[1:5]]) if r[0] >= ts_from else tuple(r[:5]) for r in rows]
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+    env.engine.store.reload_candles("BTC/USDT:USDT")
+    return next(r for r in rows if r[0] >= ts_from)[1]
+
+
+def test_calculation_closes_at_stop_when_metrics_cool_and_price_is_already_beyond_it_the_exchange_position_is_closed_too(env, fake_verify, monkeypatch):
+    """Настоящий ход событий: рынок упал за стоп, пока метрики были сильны (стопа на бирже нет), потом пришёл отчёт с остывшими метриками. Расчёт к этому моменту уже видит выход по стопу
+    (свеча отчёта есть в кеше), позиции с признаком OPEN в нём нет — раньше бот присылал «Стоп-лосс», а позицию на бирже не закрывал."""
+    book = _hl(env, fake_verify, monkeypatch)
+    cid = _hold_cfg(env, "Упало")
+    cool_ts = START + 3 * H // 2
+    _drop_candles_from(env, cool_ts)
+    env.engine.price_fn = lambda sym: 1000.0                                                              # цена бота: вход по любой цене (размер считается по балансу счёта)
+    _signal_cycle(env)
+    assert len(book.opened) == 1 and book.opened[0][4] is None and book.closed == []                          # вход без стопа: метрики сильны, падение пока ничего не значит
+    entry = _entry_px(env, cid)
+    env.engine.price_fn = lambda sym: entry * 0.5                                                           # реальная цена уже далеко за стопом (−40% от входа)
+    _cool(env)
+    env.cycle()
+    assert book.closed == [("long", 1.0)] and book.stops == [] and book.positions == []
+    kinds = [(x["kind"], x["status"]) for x in env.db.list_auto_log(env.alice["id"], 20)]
+    assert ("close_sl", "sent") in kinds
+    texts = env.tg.texts(CHAT) + [t for _c, t in env.tg.fills]
+    assert any("Стоп-лосс" in t for t in texts) and any("по расчёту сработал стоп" in t and "закрыл по рынку" in t for t in texts)
+    env.cycle()
+    assert book.closed == [("long", 1.0)]                                                                    # повторно не закрывается
+
+
+def _stopped_by_calculation(env, fake_verify, monkeypatch, name="Упало", **extra):
+    """Общая подготовка: вход без стопа, рынок упал за стоп, метрики остыли — но ещё не обработаны (последний цикл — следующий вызов env.cycle())."""
+    book = _hl(env, fake_verify, monkeypatch)
+    cid = add_cfg(env, name, **{"sl_hold_strong": True, "be_after_tp1": False, **extra})
+    for a in (f"ay:{cid}:o", f"ay:{cid}:m", f"ab:{cid}"):
+        env.handle_update(cb(a))
+    _drop_candles_from(env, START + 3 * H // 2)
+    env.engine.price_fn = lambda sym: 1000.0
+    _signal_cycle(env)
+    entry = _entry_px(env, cid)
+    env.engine.price_fn = lambda sym: entry * 0.5
+    _cool(env)
+    return book, cid
+
+
+def test_a_failed_close_is_repeated_until_the_position_is_gone(env, fake_verify, monkeypatch):
+    from app import trading
+    book, cid = _stopped_by_calculation(env, fake_verify, monkeypatch)
+    real_close = trading.HyperliquidAdapter.close_market
+    monkeypatch.setattr(trading.HyperliquidAdapter, "close_market", lambda s, sym, side, share=1.0: (_ for _ in ()).throw(trading.ExchangeError("биржа не отвечает")))
+    env.cycle()
+    assert book.closed == [] and book.positions                                                          # позиция осталась
+    assert any("закрыть её на бирже НЕ удалось" in t and "биржа не отвечает" in t for t in env.tg.texts(CHAT))
+    assert env.db.get_meta(f"slc:{cid}:hyperliquid")                                                      # долг запомнен
+    env.cycle()
+    assert sum("закрыть её на бирже НЕ удалось" in t for t in env.tg.texts(CHAT)) == 1                      # то же сообщение не повторяется каждую проверку
+    monkeypatch.setattr(trading.HyperliquidAdapter, "close_market", lambda s, sym, side, share=1.0: book.closed.append((side, share)) or setattr(book, "positions", []) or {"status": "sent"})
+    env.now["t"] += 600                                                                                    # следующий период проверки исполнений
+    env.cycle()
+    assert book.closed == [("long", 1.0)] and not env.db.get_meta(f"slc:{cid}:hyperliquid")
+    assert any("позицию закрыл по рынку" in t for t in env.tg.texts(CHAT))
+    del real_close
+
+
+def test_nothing_is_sent_when_the_exchange_already_closed_the_position(env, fake_verify, monkeypatch):
+    book, cid = _stopped_by_calculation(env, fake_verify, monkeypatch)
+    book.positions = []                                                                                   # стоп-ордер на бирже стоял и сработал сам
+    env.cycle()
+    assert book.closed == [] and not any(x["kind"] == "close_sl" for x in env.db.list_auto_log(env.alice["id"], 20))
+
+
+def test_a_plain_stop_is_left_to_the_exchange_order(env, fake_verify, monkeypatch):
+    """Без «не ставить SL, пока метрики сильны» и без стопа по маркету стоп — обычный ордер на бирже: исполнение стопа из расчёта бот сам не дублирует."""
+    book = _hl(env, fake_verify, monkeypatch)
+    cid = add_cfg(env, "Обычный", be_after_tp1=False)
+    for a in (f"ay:{cid}:o", f"ay:{cid}:m", f"ab:{cid}"):
+        env.handle_update(cb(a))
+    env.engine.price_fn = lambda sym: 1000.0
+    _signal_cycle(env)
+    assert book.opened[0][4] is not None                                                                  # стоп встал вместе со входом
+    entry = _entry_px(env, cid)
+    _drop_candles_from(env, START + 3 * H // 2)                                                           # рынок падает уже после входа
+    env.engine.price_fn = lambda sym: entry * 0.5
+    _cool(env)
+    env.cycle()
+    assert book.closed == [] and not any(x["kind"] == "close_sl" for x in env.db.list_auto_log(env.alice["id"], 20))
+
+
+def test_stop_by_market_rule_is_also_closed_on_the_exchange_when_the_calculation_already_sees_it(env, fake_verify, monkeypatch):
+    book, cid = _stopped_by_calculation(env, fake_verify, monkeypatch, "По маркету", sl_hold_strong=False, sl_market=True)
+    env.cycle()
+    assert book.closed == [("long", 1.0)] and any(x["kind"] == "close_sl" for x in env.db.list_auto_log(env.alice["id"], 20))
+
+
+def test_the_last_fill_of_a_leg_closes_the_whole_remaining_position_not_a_share_of_the_original_size():
+    from sigbot.bot import SignalService
+    trades = [{"side": "long", "entry_ts": 1, "leg": 1, "reason": "WKND", "exit_ts": 100}]
+    ev = {"side": "long", "ts": 100, "share": 0.5, "closed": True, "entry_ts": 1, "leg": 1, "label": "WKND"}        # половину позиции уже забрал TP1 — на бирже осталась вторая половина
+    assert SignalService._close_share({"trades": trades}, ev) == 1.0
+    assert SignalService._close_share({"trades": trades}, {**ev, "closed": False}) == 0.5                                # не последнее исполнение — как в расчёте
+    other = {"side": "long", "entry_ts": 50, "leg": 2, "reason": "OPEN"}                                                   # открыта ещё одна нога пирамидинга
+    assert SignalService._close_share({"trades": trades + [other]}, ev) == 0.5
+    both_close = {"side": "long", "entry_ts": 50, "leg": 2, "reason": "REV", "exit_ts": 100}                               # вторая нога закрывается в ту же минуту — первое закрытие снимает всё
+    assert SignalService._close_share({"trades": trades + [both_close]}, ev) == 1.0
+    assert SignalService._close_share({"trades": trades}, {"side": "long", "ts": 2, "share": 1.0, "label": "WKND"}) == 1.0

@@ -897,6 +897,7 @@ class SignalService:
             if sent:
                 upd["alerts"] = cfg["alerts"] + sent
             self._send_fills(cfg, res, chat, label, upd)             # исполнения в счётчик «сигналов» (alerts) не входят
+            self._retry_stopped(cfg, chat)                           # закрытие по стопу из расчёта, которое не удалось, — повторить
             self._sync_stops(cfg, res, chat)                         # «не ставить SL, пока метрики сильны»: стоп на бирже — как в расчёте сейчас
             self._market_stop(cfg, res, chat)                        # «стоп-лосс по маркету»: на новом отчёте закрыть по рынку, если метрики ниже порогов, а цена за стопом
             self._send_ready(cfg, res, chat, label, upd, entered=sent > 0)
@@ -1510,8 +1511,66 @@ class SignalService:
             if ev.get("tp1_be"):
                 self._do(cfg, "move_stop", sym, side, lambda: ad.set_stop(sym, side, ev["entry"]), {"to": "безубыток", "price": ev["entry"], "ts": ev["ts"]}, ad=ad, ex=ex)
             if ev["label"] in ("WKND", "REV", "DS"):
+                share = self._close_share(res, ev)
                 self._do(cfg, {"WKND": "close_weekend", "REV": "close_reverse", "DS": "close_ds"}[ev["label"]], sym, side,
-                         lambda: ad.close_market(sym, side, ev["share"]), {"ts": ev["ts"], "share": ev["share"]}, ad=ad, ex=ex)
+                         lambda: ad.close_market(sym, side, share), {"ts": ev["ts"], "share": share}, ad=ad, ex=ex)
+            elif ev["label"] == "SL" and (res["params"].get("sl_hold_strong") or res["params"].get("sl_market")):
+                # стоп этого конфига может быть «не на бирже»: при «не ставить SL, пока метрики сильны» и «стоп-лосс по маркету» ордера нет (или встанет только когда метрики остынут), поэтому
+                # выход по стопу из расчёта сама биржа не исполнит — позицию закрывает бот; если стоп-ордер на бирже всё же стоял и сработал, позиции уже нет и закрывать нечего
+                self._close_stopped(cfg, ex, ad, sym, side, self._close_share(res, ev), ev["ts"], self.db.get_user(cfg["user_id"])["telegram_id"])
+
+    @staticmethod
+    def _close_share(res, ev):
+        """Доля ТЕКУЩЕЙ позиции на бирже, которую закрывает исполнение из расчёта. Последнее исполнение ноги забирает всё, что от неё осталось: если других открытых ног нет — это вся позиция
+        (а не доля от первоначального размера: часть уже могла уйти тейками). Есть другие ноги (пирамидинг) или исполнение не последнее — доля, как в расчёте."""
+        if not ev.get("closed") or "entry_ts" not in ev:
+            return ev["share"]
+        others = [t for t in res.get("trades", []) if t["side"] == ev["side"] and t["entry_ts"] <= ev["ts"] and not (t["entry_ts"] == ev["entry_ts"] and t.get("leg", 1) == ev.get("leg", 1))
+                  and (t["reason"] == "OPEN" or t.get("exit_ts", 0) > ev["ts"])]
+        return ev["share"] if others else 1.0
+
+    def _close_stopped(self, cfg, ex, ad, sym, side, share, ts, chat):
+        """Расчёт закрыл позицию по стопу, которого на бирже не было, — закрываем остаток по рынку. Не получилось — запоминаем и повторяем при каждой проверке, пока позиция не закроется
+        (оставить убыточную позицию без стопа нельзя)."""
+        key = f"slc:{cfg['id']}:{ex}"
+        base, name = sym.split("/")[0], self._name(cfg, ex)
+        if ad.real:
+            try:
+                present = any((x.get("symbol") or "").split("/")[0] == base and x["side"] == side for x in ad.positions())
+            except Exception as e:
+                present = True                                                              # не удалось проверить — пробуем закрыть (лишний вызов безвреден: позиции нет — биржа скажет)
+                log.warning("позиции перед закрытием по стопу %s (%s): %s", cfg["name"], ex, e)
+            if not present:
+                self.db.set_meta(key, "")
+                return
+        st, r = self._do(cfg, "close_sl", sym, side, lambda: ad.close_market(sym, side, share),
+                         {"ts": ts, "share": share, "reason": "расчёт закрыл позицию по стопу, стоп-ордера на бирже не было"}, ad=ad, ex=ex)
+        if st == "error":
+            self.db.set_meta(key, json.dumps({"side": side, "share": share, "ts": ts}))
+            msg, prev = str(r.get("error") or ""), self._sl_err.get((cfg["id"], ex, "slc"))
+            if not prev or prev[0] != msg or self.clock() - prev[1] > self.SL_SYNC_MSG_SEC:
+                self._sl_err[(cfg["id"], ex, "slc")] = (msg, self.clock())
+                self.send(chat, f"🚨 {name}: расчёт закрыл позицию по стопу, а закрыть её на бирже НЕ удалось: {esc(msg[:250])}. Повторю при следующей проверке — проверьте позицию на бирже вручную!")
+            return
+        self.db.set_meta(key, "")
+        self._sl_err.pop((cfg["id"], ex, "slc"), None)
+        if st == "sent":
+            self.send(chat, f"🛑 {name}: по расчёту сработал стоп, а стоп-ордера на бирже не было (стоп не ставится, пока метрики сильны) — позицию закрыл по рынку.")
+
+    def _retry_stopped(self, cfg, chat):
+        """Незавершённое закрытие по стопу из расчёта (биржа не ответила): повторяем при каждой проверке конфига."""
+        sym = cfg["params"]["symbol"]
+        for ex in EXCHANGES:
+            key = f"slc:{cfg['id']}:{ex}"
+            raw = self.db.get_meta(key, "")
+            if not raw or not cfg["ex"][ex]["manage"]:
+                continue
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                self.db.set_meta(key, "")
+                continue
+            self._close_stopped(cfg, ex, self.adapter_for(cfg["user_id"], ex), sym, d["side"], d["share"], d["ts"], chat)
 
     def _send_fills(self, cfg, res, chat, label, upd):
         """Уведомления об исполнениях (TP / SL / БУ / разворот) после отметки fill_ts. У конфига без отметки (создан до этой функции) прошлое не присылаем:
