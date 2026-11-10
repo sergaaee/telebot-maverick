@@ -255,6 +255,43 @@ def test_close(db, adapter, uid):
     return {"status": res.get("status", "sent"), "result": res, "exchange": adapter.describe()}
 
 
+def close_position(db, adapter, uid, symbol, side, share=1.0, exchange="hyperliquid"):
+    """Ручное закрытие позиции на бирже по рынку (reduce-only): ЛЮБАЯ позиция счёта, в том числе открытая не ботом. share — доля позиции (0 < share <= 1). Позиция ищется среди реальных позиций
+    счёта по монете (база символа без учёта регистра) и стороне. При полном закрытии адаптер снимает и висящие стопы / тейки. Расчёт стратегии это не меняет: пока он считает позицию открытой,
+    бот новых входов по ней не делает, а добор к закрытой позиции на бирже пропускает («добирать нечего»)."""
+    exchange = exchange_name(exchange)
+    label = EXCHANGE_LABELS.get(exchange, exchange)
+    if side not in ("long", "short"):
+        raise ManageError("Сторона позиции: long или short", 422)
+    try:
+        share = float(share)
+    except (TypeError, ValueError):
+        raise ManageError("Доля позиции — число от 0 до 1", 422)
+    if not (0 < share <= 1):
+        raise ManageError("Доля позиции — больше 0 и не больше 1 (1 — позиция целиком)", 422)
+    base = str(symbol or "").split("/")[0].strip()
+    if not base:
+        raise ManageError("Не указан контракт позиции", 422)
+    if not adapter.real:
+        raise ManageError(f"Счёт {label} не подключён — закрывать нечего", 409)
+    try:
+        pos = next((p for p in adapter.positions() if str(p.get("symbol") or "").split("/")[0].casefold() == base.casefold() and p.get("side") == side), None)
+    except (NotConfigured, ExchangeError) as e:
+        raise ManageError(str(e), 503 if isinstance(e, NotConfigured) else 502)
+    if pos is None:
+        raise ManageError(f"На {label} нет позиции {base} {'лонг' if side == 'long' else 'шорт'} (возможно, уже закрыта)", 404)
+    try:
+        res = adapter.close_market(pos["symbol"], side, share)
+    except (NotConfigured, ExchangeError) as e:
+        db.add_auto_log(uid, None, "manual_close", pos["symbol"], side, "error", {"error": str(e), "share": share, "exchange": adapter.name})
+        trade_log("manual_close_fail", "error", user=uid, symbol=pos["symbol"], side=side, share=share, exchange=adapter.name, error=str(e))
+        raise ManageError(str(e), 503 if isinstance(e, NotConfigured) else 502)
+    status = res.get("status", "sent")
+    db.add_auto_log(uid, None, "manual_close", pos["symbol"], side, status, {**res, "share": share, "size": pos.get("size"), "exchange": adapter.name})
+    trade_log("manual_close", "warn", user=uid, symbol=pos["symbol"], side=side, share=share, size=pos.get("size"), status=status, exchange=adapter.name)
+    return {"status": status, "symbol": pos["symbol"], "side": side, "share": share, "size": pos.get("size"), "result": res, "exchange": adapter.describe()}
+
+
 def exchange_state(adapter, detail=False):
     """Состояние счёта на бирже: баланс и позиции (detail — ещё открытые ордера и последние исполнения). В симуляции — пусто."""
     d = adapter.describe()

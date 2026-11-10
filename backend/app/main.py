@@ -579,6 +579,14 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
         """Закрыть позицию по BTC на бирже целиком (reduce-only по рынку) и снять висящие ордера."""
         return _guard(test_close, db, _adapter(request, db, body.get("exchange") or "hyperliquid"), request.state.user["id"])
 
+    @app.post("/api/trading/close-position")
+    def close_position_ep(request: Request, body: dict = Body(...)):
+        """Закрыть по рынку любую позицию на счёте (контракт и сторона — из списка позиций биржи), целиком или долей (share, 0…1). Нужно явное подтверждение; только реальный счёт."""
+        if body.get("confirm") is not True:
+            raise HTTPException(422, "Нужно подтверждение (confirm: true)")
+        exchange = body.get("exchange") or "hyperliquid"
+        return _guard(manage_mod.close_position, db, _adapter(request, db, exchange), request.state.user["id"], body.get("symbol"), body.get("side"), body.get("share", 1.0), exchange)
+
     @app.get("/api/exchange/account")
     def exchange_account(request: Request, exchange: str = "hyperliquid"):
         """Подключённый счёт пользователя на бирже (hyperliquid по умолчанию, bybit): кто подключён (адрес / ключ маскируется, секрет не отдаётся никогда), баланс, позиции, открытые ордера, последние исполнения."""

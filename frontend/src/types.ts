@@ -618,6 +618,9 @@ export interface ExchangeInfo {
 }
 
 /** Подключённый счёт на бирже: кто подключён (адрес маскируется, ключ наружу не отдаётся), баланс, позиции, открытые ордера, последние исполнения. */
+/** Реальная позиция на счёте биржи. */
+export interface ExchangePosition { symbol: string; side: 'long' | 'short'; size: number; entry: number | null; mark: number | null; liq: number | null; pnl_usd: number | null; leverage: number | null; margin: number | null; notional: number | null }
+
 export interface ExchangeAccount {
   connected: boolean;
   exchange: ExchangeInfo;
@@ -628,7 +631,7 @@ export interface ExchangeAccount {
   verified: number | null;
   error: string | null;
   account: { equity?: number | null; free?: number | null; used?: number | null };
-  positions: { symbol: string; side: 'long' | 'short'; size: number; entry: number | null; mark: number | null; liq: number | null; pnl_usd: number | null; leverage: number | null; margin: number | null; notional: number | null }[];
+  positions: ExchangePosition[];
   orders: { symbol: string; side: string; type: string; amount: number | null; price: number | null; trigger: number | null; reduce_only: boolean; ts: number | null }[];
   fills: { symbol: string; side: string; amount: number | null; price: number | null; fee: number | null; pnl: string | null; ts: number | null }[];
 }

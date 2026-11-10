@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoOffAll, closeTestPosition, panicStop, setCatchup, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto, setExchangeOver } from '../api';
+import { autoOffAll, closeExchangePosition, closeTestPosition, panicStop, setCatchup, setSizing, deleteConfig, disconnectExchange, exportBotConfig, getExchangeAccount, getMonitor, getMonitorDetail, openTestPosition, pauseConfig, renameConfig, setAuto, setExchangeOver } from '../api';
 import { fmtPct, fmtPf, fmtPrice, fmtTs, fmtUsd, signClass } from '../format';
 import { downloadText } from '../tradesCsv';
 import { HELP } from '../helpTexts';
-import type { AutoLogItem, ExchangeAccount, ExchangeInfo, ExchangeName, ExchangeOverrides, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
+import type { AutoLogItem, ExchangeAccount, ExchangeInfo, ExchangeName, ExchangeOverrides, ExchangePosition, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
 import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
-  open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS', close_sl: 'закрытие по стопу расчёта',
+  open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS', close_sl: 'закрытие по стопу расчёта', manual_close: 'ручное закрытие',
   test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', limit_add: 'лимитка добора', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
@@ -492,7 +492,20 @@ function ExchangeBanner({ info, all }: { info?: ExchangeInfo; all?: MonitorRespo
 }
 
 /** Подключённый счёт на бирже: подключение, баланс, позиции, открытые ордера, последние исполнения (реальные данные биржи, не расчёт стратегий). */
-function ExchangeBlock({ name = 'hyperliquid', state, error, moreHl = 0, onDisconnect }: { name?: ExchangeName; state: ExchangeAccount | null; error: string | null; moreHl?: number; onDisconnect: () => void }) {
+/** Кнопка ручного закрытия позиции на бирже: доля (25 / 50 / 75 / 100 %) и «Закрыть». */
+function PositionCloser({ onClose, testId }: { onClose: (share: number) => void; testId: string }) {
+  const [pct, setPct] = useState(100);
+  return (
+    <span className="mon-closer">
+      <select value={pct} onChange={(e) => setPct(Number(e.target.value))} aria-label="Доля позиции для закрытия" data-testid={`${testId}-share`}>
+        {[25, 50, 75, 100].map((v) => <option key={v} value={v}>{v}%</option>)}
+      </select>
+      <button type="button" className="ghost bad-text" onClick={() => onClose(pct / 100)} data-testid={testId}>Закрыть</button>
+    </span>
+  );
+}
+
+function ExchangeBlock({ name = 'hyperliquid', state, error, moreHl = 0, onDisconnect, onClosePosition }: { name?: ExchangeName; state: ExchangeAccount | null; error: string | null; moreHl?: number; onDisconnect: () => void; onClosePosition?: (p: ExchangePosition, share: number) => void }) {
   const bybit = name === 'bybit';
   const upscale = name === 'upscale';
   const sfx = name === 'hyperliquid' ? '' : `-${name}`;                                        // testid: у первого аккаунта Hyperliquid — прежние, у остальных с именем биржи
@@ -536,11 +549,12 @@ function ExchangeBlock({ name = 'hyperliquid', state, error, moreHl = 0, onDisco
           {state.positions.length === 0 ? <div className="muted small">Открытых позиций на бирже нет.</div> : (
             <div className="table-wrap mon-legs">
               <table className="trades">
-                <thead><tr><th>контракт</th><th>сторона</th><th>размер</th><th>вход</th><th>цена</th><th>ликвид.</th><th>плечо</th><th>маржа</th><th>PnL</th></tr></thead>
+                <thead><tr><th>контракт</th><th>сторона</th><th>размер</th><th>вход</th><th>цена</th><th>ликвид.</th><th>плечо</th><th>маржа</th><th>PnL</th>{onClosePosition && <th>закрыть по рынку<Help text={HELP.close_position} /></th>}</tr></thead>
                 <tbody>{state.positions.map((p, i) => (
                   <tr key={i}><td>{p.symbol}</td><td className={p.side === 'long' ? 'pos' : 'neg'}>{p.side === 'long' ? 'лонг' : 'шорт'}</td><td>{p.size}</td>
                     <td>{p.entry != null ? fmtPrice(p.entry) : '–'}</td><td>{p.mark != null ? fmtPrice(p.mark) : '–'}</td><td>{p.liq != null ? fmtPrice(p.liq) : '–'}</td>
-                    <td>{p.leverage ?? '–'}×</td><td>{p.margin != null ? fmtUsd(p.margin, 2) : '–'}</td><td className={signClass(p.pnl_usd ?? 0)}>{p.pnl_usd != null ? fmtUsd(p.pnl_usd, 2) : '–'}</td></tr>
+                    <td>{p.leverage ?? '–'}×</td><td>{p.margin != null ? fmtUsd(p.margin, 2) : '–'}</td><td className={signClass(p.pnl_usd ?? 0)}>{p.pnl_usd != null ? fmtUsd(p.pnl_usd, 2) : '–'}</td>
+                    {onClosePosition && <td><PositionCloser testId={`pos-close${sfx}-${i}`} onClose={(share) => onClosePosition(p, share)} /></td>}</tr>
                 ))}</tbody>
               </table>
             </div>
@@ -691,6 +705,21 @@ export default function MonitorPage() {
     await load();
   };
 
+  const closePos = async (n: ExchangeName, p: ExchangePosition, share: number) => {
+    const what = share >= 0.999 ? 'позицию целиком' : `${Math.round(share * 100)}% позиции`;
+    if (!window.confirm(`Закрыть ${what} ${p.symbol} (${p.side === 'long' ? 'лонг' : 'шорт'}, ${p.size}) на ${exLabel(n)} по рынку? Это реальный ордер.${share >= 0.999 ? ' Висящие стоп и тейки позиции будут сняты.' : ''}`)) return;
+    setBusy(true);
+    try {
+      const r = await closeExchangePosition(n, p.symbol, p.side, share);
+      setMsg(r.status === 'skipped' ? `Не закрыто: ${r.result.note ?? 'биржа пропустила ордер'}` : `${exLabel(n)}: ${p.symbol} ${p.side === 'long' ? 'лонг' : 'шорт'} — закрыто ${Math.round(share * 100)}% по рынку.`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+      await load();
+    }
+  };
+
   const closeTest = async () => {
     if (!window.confirm('Закрыть позицию по BTC на бирже целиком (рыночным ордером) и снять висящие ордера?')) return;
     setBusy(true);
@@ -739,7 +768,7 @@ export default function MonitorPage() {
         {msg && <span className="muted small" data-testid="mon-msg"> {msg}</span>}
       </div>
       {names.filter((n) => isMain(n) || (infoOf(n)?.real && ex[n]?.connected)).map((n) => (
-        <ExchangeBlock key={n} name={n} state={ex[n] ?? null} error={exErr[n] ?? null} moreHl={n === 'hyperliquid' ? hlSlots - 1 : 0} onDisconnect={() => void disconnect(n)} />
+        <ExchangeBlock key={n} name={n} state={ex[n] ?? null} error={exErr[n] ?? null} moreHl={n === 'hyperliquid' ? hlSlots - 1 : 0} onDisconnect={() => void disconnect(n)} onClosePosition={(p, share) => void closePos(n, p, share)} />
       ))}
       {!data && !err && <div className="empty">Загрузка…</div>}
       {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Отправьте конфиг боту в Telegram (файлом или текстом) — он появится здесь.</div>}

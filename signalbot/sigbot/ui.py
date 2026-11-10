@@ -157,7 +157,7 @@ class MonitorUI:
         kind, *a = screen.split(":")
         fn = {"m": self._s_list, "c": self._s_card, "v": self._s_tab, "x": self._s_exchange_hl, "xb": self._s_exchange_bybit, "xu": self._s_exchange_upscale, "t": self._s_test, "ca": self._s_confirm_auto, "cd": self._s_confirm_del,
               "cty": self._s_confirm_test, "ctc": self._s_confirm_close, "coff": self._s_confirm_off, "cpn": self._s_confirm_panic, "sz": self._s_sizing, "chl": self._s_confirm_hl, "cdx": self._s_confirm_disconnect,
-              "cx": self._s_exsettings, "cby": self._s_confirm_bybit_live, "cdb": self._s_confirm_disconnect_bybit, "cdu": self._s_confirm_disconnect_upscale, "cup": self._s_confirm_upscale_account}.get(kind)
+              "cx": self._s_exsettings, "cl": self._s_close_list, "clc": self._s_close_confirm, "cby": self._s_confirm_bybit_live, "cdb": self._s_confirm_disconnect_bybit, "cdu": self._s_confirm_disconnect_upscale, "cup": self._s_confirm_upscale_account}.get(kind)
         if fn is None:
             return self._s_list(user, live)
         return fn(user, *a, live=live)
@@ -169,7 +169,7 @@ class MonitorUI:
         cfgs = self.db.list_configs(user["id"])
         rows, kb = [], []
         if not cfgs:
-            return ("📡 <b>Мониторинг</b>\nУ вас пока нет конфигов. Пришлите конфиг сообщением или файлом (кнопка «Скачать конфиг» на сайте) — он появится здесь.", [[("🔄 Обновить", "m")]])
+            return ("📡 <b>Мониторинг</b>\nУ вас пока нет конфигов. Пришлите конфиг сообщением или файлом (кнопка «Скачать конфиг» на сайте) — он появится здесь.", [[("🔄 Обновить", "m"), ("❌ Закрыть позицию", "cl")]])
         total, opened = 0.0, 0
         for c in cfgs[:MAX_BUTTONS]:
             e = self._entry(c)
@@ -205,7 +205,7 @@ class MonitorUI:
         ads = self._ads(user)
         exb = [(f"🏦 {EXC_LABEL[n]}", EX_SCREEN[n]) for n in EX_ORDER if not is_hl(n) or n == "hyperliquid" or ads[n].real]          # дополнительные аккаунты Hyperliquid — только подключённые
         kb += [exb[i:i + 3] for i in range(0, len(exb), 3)]
-        kb.append([("🧪 Тест $1", "t")])
+        kb.append([("🧪 Тест $1", "t"), ("❌ Закрыть позицию", "cl")])
         kb.append([("⛔ Автомод выкл. везде", "coff"), ("🚨 СТОП ВСЁ", "cpn")])
         return body, kb
 
@@ -331,7 +331,7 @@ class MonitorUI:
                     f"Уведомлений: {c['alerts']}")
         else:
             log_ = self.db.list_auto_log(user["id"], HIST_N, c["id"])
-            names = {"open": "вход", "add": "добор", "move_stop": "стоп → БУ", "close_weekend": "закрытие к концу недели", "close_reverse": "закрытие по развороту", "close_ds": "закрытие по DS", "close_sl": "закрытие по стопу расчёта",
+            names = {"open": "вход", "add": "добор", "move_stop": "стоп → БУ", "close_weekend": "закрытие к концу недели", "close_reverse": "закрытие по развороту", "close_ds": "закрытие по DS", "close_sl": "закрытие по стопу расчёта", "manual_close": "ручное закрытие",
                      "auto_toggle": "автомод", "pause": "пауза", "resume": "возобновлён"}
             body = f"📋 {title} · журнал действий\n" + ("\n".join(f"{fm.ts_str(int(x['ts'] * 1000))[5:]} · {names.get(x['kind'], x['kind'])} · {x['status']}" + (f" — {esc(str(x['details'].get('error'))[:80])}" if x["details"].get("error") else "")
                                                        for x in log_) or "пока пусто")
@@ -391,10 +391,62 @@ class MonitorUI:
             for f in info["fills"][:5]:
                 lines.append(f"• {fm.ts_str(int(f['ts']))[5:] if f.get('ts') else ''} {f['side']} {f['amount']:g} @ {fm.price(f['price'])}" + (f" · PnL {f['pnl']}" if f.get("pnl") not in (None, "", "0.0", "0") else ""))
         test = "t" if exn == "hyperliquid" else f"t:{EXC_CODE[exn]}"
-        return "\n".join(lines), [[("🔄", home), self._live_btn(home, live)], [("🔌 Отключить", EX_DISCONNECT[exn]), ("🧪 Тест", test)], *nav]
+        return "\n".join(lines), [[("🔄", home), self._live_btn(home, live)], [("🔌 Отключить", EX_DISCONNECT[exn]), ("🧪 Тест", test)], [("❌ Закрыть позицию", f"cl:{EXC_CODE[exn]}")], *nav]
 
     def _s_exchange_hl(self, user, n="1", live=False):
         return self._s_exchange(user, live, _hl_n(n))
+
+    SIDE_LS = {"long": "l", "short": "s"}
+
+    @staticmethod
+    def _pos_line(label, p):
+        """Позиция одной строкой: «🟢 Hyperliquid · BTC лонг 0.5 · вход 100 · PnL +12 $»."""
+        base = str(p.get("symbol") or "?").split("/")[0]
+        pnl = p.get("pnl_usd")
+        return (f"{'🟢' if p.get('side') == 'long' else '🔴'} <b>{esc(label)}</b> · {esc(base)} {'лонг' if p.get('side') == 'long' else 'шорт'} {p.get('size', 0):g}"
+                + (f" · вход {fm.price(p['entry'])}" if p.get("entry") else "") + (f" · PnL {fm.usd(pnl, 2)}" if pnl is not None else ""))
+
+    def _real_positions(self, user, only=None):
+        """Реальные позиции на подключённых счетах: ([(биржа, позиция)], [ошибки]). only — только эта биржа."""
+        rows, errs = [], []
+        for n, ad in self._ads(user).items():
+            if (only and n != only) or not ad.real:
+                continue
+            try:
+                rows += [(n, p) for p in ad.positions()]
+            except Exception as e:
+                errs.append(f"{EXC_LABEL[n]}: {str(e)[:120]}")
+        return rows, errs
+
+    def _s_close_list(self, user, code=None, live=False):
+        """Ручное закрытие: все реальные позиции на подключённых счетах (или одного счёта), по кнопке на каждую."""
+        only = EXC.get(code) if code else None
+        rows, errs = self._real_positions(user, only)
+        lines = ["❌ <b>Закрыть позицию</b>" + (f" · {EXC_LABEL[only]}" if only else ""), "Любая позиция на счёте — в том числе открытая не ботом. Закрывается по рынку, целиком или долей: нажмите на позицию и выберите долю."]
+        kb = []
+        for n, p in rows[:12]:
+            base = str(p.get("symbol") or "?").split("/")[0]
+            ls = self.SIDE_LS.get(p.get("side"), "l")
+            lines.append(self._pos_line(EXC_LABEL[n], p))
+            kb.append([(f"❌ {EXC_SHORT[n]} · {base} {'лонг' if ls == 'l' else 'шорт'}", f"clc:{EXC_CODE[n]}:{base}:{ls}")])
+        if len(rows) > 12:
+            lines.append(f"…и ещё {len(rows) - 12}: остальные закрываются на экране биржи или командой /close.")
+        if not rows and not errs:
+            lines.append("Открытых позиций на бирже нет." if any(a.real for a in self._ads(user).values()) else "Биржа не подключена — закрывать нечего.")
+        lines += [f"⚠️ {esc(e)}" for e in errs]
+        kb.append([("🔄", f"cl:{code}" if code else "cl"), ("← К списку", "m")])
+        return "\n".join(lines), kb
+
+    def _s_close_confirm(self, user, code, base, ls, live=False):
+        exn, side = _exn(code), "long" if ls == "l" else "short"
+        rows, errs = self._real_positions(user, exn)
+        pos = next((p for _n, p in rows if str(p.get("symbol") or "").split("/")[0] == base and p.get("side") == side), None)
+        back = [("← Позиции", f"cl:{code}")]
+        if pos is None:
+            return f"❌ Позиции {esc(base)} ({'лонг' if side == 'long' else 'шорт'}) на {EXC_LABEL[exn]} уже нет.", [back]
+        body = ["❌ <b>Закрыть по рынку?</b>", self._pos_line(EXC_LABEL[exn], pos),
+                "Выберите долю позиции. Полное закрытие снимает и висящие стоп и тейки; расчёт стратегии по этой позиции продолжается, но новых входов по ней бот не делает."]
+        return "\n".join(body), [[(f"{v}%", f"cly:{code}:{base}:{ls}:{v}") for v in (25, 50, 75)], [("100% — вся позиция", f"cly:{code}:{base}:{ls}:100")], [("Отмена", f"cl:{code}")]]
 
     def _s_exchange_bybit(self, user, live=False):
         return self._s_exchange(user, live, "bybit")
@@ -673,6 +725,19 @@ class MonitorUI:
         if kind == "dxb":
             manage.disconnect_account(self.db, uid, "bybit")
             return "Счёт Bybit отключён, автомод на нём выключен", False, "xb"
+        if kind == "cly":                                                          # закрыть позицию (долю) по рынку: cly:КОД:МОНЕТА:l|s:ПРОЦЕНТ
+            code, base, ls, pct = a[0], a[1], a[2], a[3]
+            exn, side = _exn(code), "long" if ls == "l" else "short"
+            try:
+                share = int(pct) / 100
+                r = manage.close_position(self.db, self._ad(user, exn), uid, base, side, share, exn)
+            except ValueError:
+                return "Неверная доля", True, f"cl:{code}"
+            except manage.ManageError as e:
+                return str(e)[:190], True, f"cl:{code}"
+            if r["status"] == "skipped":
+                return (str((r.get("result") or {}).get("note") or "Не закрыто")[:190]), True, f"cl:{code}"
+            return (f"{EXC_LABEL[exn]}: {base} {'лонг' if side == 'long' else 'шорт'} — закрыто {pct}%" + ("" if r["status"] == "sent" else f" ({r['status']})")), False, f"cl:{code}"
         if kind == "pny":
             r = manage.panic(self.db, self._ads(user), uid)
             txt = f"Автомод выкл. у {r['auto_off']}; закрыто позиций {len(r['closed'])}, снято ордеров {r['cancelled']}" + (f"; ОШИБКИ: {len(r['errors'])} — см. /tradelog" if r["errors"] else "")

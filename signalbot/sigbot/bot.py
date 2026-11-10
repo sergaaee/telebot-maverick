@@ -26,7 +26,7 @@ from app.upscale import ACCOUNT_TYPES as UP_TYPES, verify_upscale
 from app.trading import BYBIT_KEY
 
 from .engine import Cancelled, EvalError, fingerprint
-from .ui import MonitorUI
+from .ui import EXC_CODE, MonitorUI
 from .transport import TelegramError
 
 log = logging.getLogger("signalbot")
@@ -216,6 +216,18 @@ class SignalService:
     def cmd_panic(self, chat, user, arg):
         """Аварийная кнопка: подтверждение → автомод выкл. везде, все позиции закрыть, все ордера снять."""
         self.ui.open(chat, user, "cpn")
+
+    def cmd_close(self, chat, user, arg):
+        """Закрыть любую позицию на счёте по рынку (целиком или долей): /close — все счета, /close hl|hl2|bybit|upscale — один счёт."""
+        want = (arg or "").strip().lower()
+        if want:
+            name = self.EX_ALIASES.get(want)
+            if not name:
+                self.send(chat, "Биржа: hl, hl2 …, bybit или upscale — например, /close bybit. Без названия — позиции на всех счетах.")
+                return
+            self.ui.open(chat, user, f"cl:{EXC_CODE[name]}")
+            return
+        self.ui.open(chat, user, "cl")
 
     def cmd_tradelog(self, chat, user, arg):
         """Последние записи лога автоторговли по вашему аккаунту (ошибки биржи, решения автомода, запросы/ответы). Полный файл — trading.log рядом с базой."""
