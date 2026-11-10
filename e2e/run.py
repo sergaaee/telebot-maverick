@@ -1025,6 +1025,28 @@ def scenario(pg, base, state_url):
     check("отключение второго аккаунта: ключа в базе нет, блок и переключатели исчезли, первый аккаунт не тронут",
           E2E_DB.get_exchange_account(tid, "hyperliquid2") is None and pg.get_by_test_id("mon-exchange-hyperliquid2").count() == 0 and card("Переименован").get_by_test_id("mon-auto-hyperliquid2").count() == 0
           and card("Переименован").get_by_test_id("mon-auto").count() == 1 and pg.get_by_test_id("test-exchange").locator("option").count() == 3)
+    # ручное закрытие любой позиции на бирже (поддельный счёт в e2e/server.py): доля и «Закрыть» в таблице позиций
+    E2E_DB.set_exchange_account(tid, "hyperliquid3", "0x" + "ee" * 20, "не-шифртекст", True, "0x" + "ff" * 20)
+    pg.get_by_role("button", name="Обновить", exact=True).click(); pg.get_by_test_id("exchange-account-hyperliquid3").wait_for(timeout=15000)
+    h3 = pg.get_by_test_id("mon-exchange-hyperliquid3")
+    check("в блоке счёта у каждой позиции есть выбор доли и «Закрыть» (с «?» в заголовке)", h3.get_by_test_id("pos-close-hyperliquid3-0").count() == 1 and h3.get_by_test_id("pos-close-hyperliquid3-1").count() == 1
+          and h3.get_by_test_id("pos-close-hyperliquid3-0-share").input_value() == "100" and h3.locator("th", has_text="закрыть по рынку").locator(".help").count() == 1 and "kPEPE" in h3.inner_text())
+    pg.once("dialog", lambda d: d.dismiss())
+    h3.get_by_test_id("pos-close-hyperliquid3-0").click(); pg.wait_for_timeout(800)
+    n_pos = pg.evaluate("""() => fetch('/api/exchange/account?exchange=hyperliquid3', {headers: {'x-maverick': '1'}}).then(r => r.json()).then(j => j.positions.length)""")
+    check("отказ в подтверждении ничего не закрывает", n_pos == 2, str(n_pos))
+    h3.get_by_test_id("pos-close-hyperliquid3-0-share").select_option("50")
+    pg.once("dialog", lambda d: d.accept())
+    h3.get_by_test_id("pos-close-hyperliquid3-0").click(); pg.get_by_test_id("mon-msg").filter(has_text="закрыто 50%").wait_for(timeout=10000)
+    h3.get_by_text("0.2", exact=True).first.wait_for(timeout=10000)          # таблица счёта перечитана после закрытия
+    manual = [x for x in E2E_DB.list_auto_log(tid, 20) if x["kind"] == "manual_close"]
+    check("закрытие половины позиции: сообщение, размер уменьшился вдвое, запись в журнале", "BTC" in pg.get_by_test_id("mon-msg").inner_text() and len(manual) == 1 and manual[0]["details"]["share"] == 0.5 and manual[0]["status"] == "sent")
+    pg.once("dialog", lambda d: d.accept())
+    h3.get_by_test_id("pos-close-hyperliquid3-1").click(); pg.get_by_test_id("mon-msg").filter(has_text="закрыто 100%").wait_for(timeout=10000); pg.wait_for_timeout(500)
+    check("закрытие позиции целиком: в таблице осталась одна позиция", h3.get_by_test_id("pos-close-hyperliquid3-1").count() == 0 and h3.get_by_test_id("pos-close-hyperliquid3-0").count() == 1)
+    pg.once("dialog", lambda d: d.accept())
+    pg.get_by_test_id("exchange-disconnect-hyperliquid3").click(); pg.wait_for_timeout(1500)
+    check("служебный счёт отключён", E2E_DB.get_exchange_account(tid, "hyperliquid3") is None)
     check("кнопка «СТОП ВСЁ» с подсказкой", pg.get_by_test_id("panic").is_visible())
     pg.once("dialog", lambda d: d.accept())
     pg.get_by_test_id("panic").click(); pg.get_by_test_id("mon-msg").filter(has_text="СТОП ВСЁ").wait_for(timeout=10000)

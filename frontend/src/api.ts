@@ -157,6 +157,12 @@ export const openTestPosition = (side: 'long' | 'short', exchange: ExchangeName 
 export const closeTestPosition = (exchange: ExchangeName = 'hyperliquid') =>
   request<{ status: string; result: Record<string, unknown>; exchange: ExchangeInfo }>('/api/trading/test-position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ exchange }) });
 
+/** Закрыть по рынку любую позицию на счёте биржи (share — доля позиции, 1 — целиком). */
+export const closeExchangePosition = (exchange: ExchangeName, symbol: string, side: 'long' | 'short', share: number) =>
+  request<{ status: string; symbol: string; side: string; share: number; result: { note?: string; closed?: number }; exchange: ExchangeInfo }>('/api/trading/close-position', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true, exchange, symbol, side, share }),
+  });
+
 export const getExchangeAccount = (exchange: ExchangeName = 'hyperliquid') => request<ExchangeAccount>(`/api/exchange/account?exchange=${exchange}`);
 
 export const disconnectExchange = (exchange: ExchangeName = 'hyperliquid') => request<{ removed: boolean }>(`/api/exchange/account?exchange=${exchange}`, { method: 'DELETE' });

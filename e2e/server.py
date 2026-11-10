@@ -81,6 +81,46 @@ def sync_exporter(path, chat):
     return 1
 
 
+# Поддельный счёт Hyperliquid для проверки ручного закрытия позиций: для кошелька E2E_WALLET позиции и закрытия «живут» в памяти процесса, остальные счета работают как обычно.
+E2E_WALLET = "0x" + "ee" * 20
+E2E_POSITIONS = [
+    {"symbol": "BTC/USDC:USDC", "side": "long", "size": 0.4, "entry": 100.0, "mark": 101.0, "liq": 60.0, "pnl_usd": 12.0, "leverage": 5, "margin": 8.0, "notional": 40.0},
+    {"symbol": "kPEPE/USDC:USDC", "side": "short", "size": 1000.0, "entry": 0.01, "mark": 0.0103, "liq": 0.02, "pnl_usd": -3.0, "leverage": 3, "margin": 3.3, "notional": 10.0},
+]
+E2E_CLOSED = []
+
+
+def _patch_fake_account():
+    from app.trading import HyperliquidAdapter as HL
+    real = {k: getattr(HL, k) for k in ("positions", "account", "open_orders", "fills", "close_market")}
+
+    def mine(self):
+        return self.wallet == E2E_WALLET
+
+    def positions(self):
+        return [dict(p) for p in E2E_POSITIONS] if mine(self) else real["positions"](self)
+
+    def close_market(self, symbol, side, share=1.0):
+        if not mine(self):
+            return real["close_market"](self, symbol, side, share)
+        for p in list(E2E_POSITIONS):
+            if p["symbol"].split("/")[0] == symbol.split("/")[0] and p["side"] == side:
+                E2E_CLOSED.append((p["symbol"], side, share))
+                if share >= 0.999:
+                    E2E_POSITIONS.remove(p)
+                else:
+                    p["size"] *= 1 - share
+                return {"status": "sent", "symbol": symbol, "closed": p["size"] * share}
+        return {"status": "skipped", "note": "позиции на бирже нет — закрывать нечего", "symbol": symbol}
+
+    HL.positions = positions
+    HL.close_market = close_market
+    HL.account = lambda self: {"equity": 500.0, "free": 450.0, "used": 50.0} if mine(self) else real["account"](self)
+    HL.open_orders = lambda self: [] if mine(self) else real["open_orders"](self)
+    HL.fills = lambda self, limit=20: [] if mine(self) else real["fills"](self, limit)
+
+
+_patch_fake_account()
 _settings = load_settings()
 app = create_app(_settings, markets=MarketsCache(lambda: EXCHANGE_SYMBOLS), runner=runner, top_runner=top_runner,
                  sync=HistorySync(list(_settings.sources.values()), _settings.sync_min, exporter=sync_exporter))
