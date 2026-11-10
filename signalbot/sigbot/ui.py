@@ -331,7 +331,7 @@ class MonitorUI:
                     f"Уведомлений: {c['alerts']}")
         else:
             log_ = self.db.list_auto_log(user["id"], HIST_N, c["id"])
-            names = {"open": "вход", "add": "добор", "move_stop": "стоп → БУ", "close_weekend": "закрытие к концу недели", "close_reverse": "закрытие по развороту", "close_ds": "закрытие по DS",
+            names = {"open": "вход", "add": "добор", "move_stop": "стоп → БУ", "close_weekend": "закрытие к концу недели", "close_reverse": "закрытие по развороту", "close_ds": "закрытие по DS", "close_sl": "закрытие по стопу расчёта",
                      "auto_toggle": "автомод", "pause": "пауза", "resume": "возобновлён"}
             body = f"📋 {title} · журнал действий\n" + ("\n".join(f"{fm.ts_str(int(x['ts'] * 1000))[5:]} · {names.get(x['kind'], x['kind'])} · {x['status']}" + (f" — {esc(str(x['details'].get('error'))[:80])}" if x["details"].get("error") else "")
                                                        for x in log_) or "пока пусто")

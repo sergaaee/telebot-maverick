@@ -63,10 +63,10 @@ def build_digest(db, store, defaults, user, adapter, available_fn=None, mode="da
     if log:
         kinds = {}
         for x in log:
-            if x["kind"] in ("open", "add", "move_stop", "close_weekend", "close_reverse", "close_ds", "panic"):
+            if x["kind"] in ("open", "add", "move_stop", "close_weekend", "close_reverse", "close_ds", "close_sl", "panic"):
                 k = (x["kind"], x["status"])
                 kinds[k] = kinds.get(k, 0) + 1
-        names = {"open": "входов", "add": "доборов", "move_stop": "стопов в БУ", "close_weekend": "закрытий к концу недели", "close_reverse": "закрытий по развороту", "close_ds": "закрытий по DS", "panic": "СТОП ВСЁ"}
+        names = {"open": "входов", "add": "доборов", "move_stop": "стопов в БУ", "close_weekend": "закрытий к концу недели", "close_reverse": "закрытий по развороту", "close_ds": "закрытий по DS", "close_sl": "закрытий по стопу расчёта", "panic": "СТОП ВСЁ"}
         if kinds:
             lines += ["", "🤖 Автомод за период: " + ", ".join(f"{names[k]} {n}" + (f" ({st})" if st not in ('sent', 'dry_run', 'ok') else "") for (k, st), n in sorted(kinds.items()))]
         errs = sum(1 for x in log if x["status"] == "error")

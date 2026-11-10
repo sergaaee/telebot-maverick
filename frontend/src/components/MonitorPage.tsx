@@ -8,7 +8,7 @@ import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
 
 const KIND_NAMES: Record<string, string> = {
-  open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS',
+  open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS', close_sl: 'закрытие по стопу расчёта',
   test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', limit_add: 'лимитка добора', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
