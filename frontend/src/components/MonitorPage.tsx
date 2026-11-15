@@ -6,10 +6,11 @@ import { HELP } from '../helpTexts';
 import type { AutoLogItem, ExchangeAccount, ExchangeInfo, ExchangeName, ExchangeOverrides, ExchangePosition, MonitorEntry, MonitorLeg, MonitorResponse } from '../types';
 import { Card as StatCard } from './StatsPanel';
 import Help from './Help';
+import ImportConfigs from './ImportConfigs';
 
 const KIND_NAMES: Record<string, string> = {
   open: 'вход', add: 'добор', move_stop: 'стоп → БУ', close_weekend: 'закрытие к концу недели', close_reverse: 'закрытие по развороту', close_ds: 'закрытие по DS', close_sl: 'закрытие по стопу расчёта', manual_close: 'ручное закрытие',
-  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', limit_add: 'лимитка добора', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
+  test_position: 'тестовая позиция', test_close: 'закрытие тестовой', auto_toggle: 'переключение автомода', config_import: 'конфиг добавлен с сайта', auto_off_all: 'автомод выключен везде', pause: 'пауза конфига', resume: 'конфиг возобновлён', config_removed: 'конфиг удалён', exchange_cfg: 'настройки конфига для биржи', exchange_disconnected: 'счёт биржи отключён', exchange_connected: 'счёт биржи подключён', limit_entry: 'лимитный вход', limit_add: 'лимитка добора', cancel_entry: 'снят ожидающий вход', protect: 'стоп и тейки', sl_sync: 'стоп по метрикам (поставить / снять)',
 };
 const STATUS_NAMES: Record<string, string> = { dry_run: 'симуляция', sent: 'отправлено', error: 'ошибка', info: '' };
 
@@ -752,6 +753,7 @@ export default function MonitorPage() {
         <button type="button" className="ghost" disabled={!anyAuto} onClick={() => void offAll()}>⛔ Выключить автомод везде</button><Help text={HELP.auto_off_all} />
         <button type="button" className="danger" data-testid="panic" onClick={() => void panic()}>🚨 СТОП ВСЁ</button><Help text={HELP.panic} />
       </div>
+      <ImportConfigs onDone={() => void load()} />
       <BotStatus bot={data?.bot} anyAuto={anyAuto} />
       <ExchangeBanner info={data?.exchange} all={data?.exchanges} />
       {err && <div className="banner error">{err}</div>}
@@ -771,7 +773,7 @@ export default function MonitorPage() {
         <ExchangeBlock key={n} name={n} state={ex[n] ?? null} error={exErr[n] ?? null} moreHl={n === 'hyperliquid' ? hlSlots - 1 : 0} onDisconnect={() => void disconnect(n)} onClosePosition={(p, share) => void closePos(n, p, share)} />
       ))}
       {!data && !err && <div className="empty">Загрузка…</div>}
-      {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Отправьте конфиг боту в Telegram (файлом или текстом) — он появится здесь.</div>}
+      {data && entries.length === 0 && <div className="empty">У вас пока нет конфигов бота. Добавьте конфиг кнопкой «➕ Добавить конфиг» выше (вставьте JSON или выберите файл) или отправьте его боту в Telegram — он появится здесь.</div>}
       <div className="mon-list">
         {entries.map((e) => (
           <section key={e.config_id ?? e.name} className="mon-card" data-testid="mon-card" data-name={e.title ?? e.name}>

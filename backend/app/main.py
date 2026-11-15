@@ -19,7 +19,7 @@ from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
 from .schemas import BacktestParams, MonteCarloRequest, WalkForwardRequest
-from . import exporter, portfolio, portfolio_guards, watchdog
+from . import botconfigs, exporter, portfolio, portfolio_guards, watchdog
 from .watchdog import Watchdog
 from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
@@ -370,6 +370,27 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     def _own(request, config_id):
         return _guard(own_config, db, request.state.user["id"], config_id)
+
+    @app.post("/api/monitor/configs/import")
+    def monitor_import(request: Request, body: dict = Body(...)):
+        """Добавить конфиги бота прямо с сайта (то же, что отправить их боту в Telegram). text — JSON: один конфиг, «голый» объект параметров, список или пакет {"configs": [...]}
+        (до 30 штук); name — имя (только если конфиг один; иначе берётся из JSON или строится из источника и актива); replace=true — конфиг с таким же именем заменяется (его автомод и состояние расчёта
+        начинаются заново), иначе новый получает свободное имя. -> {added: [{id, name, created, ignored}], errors: [{name, error}]}; 422, если не принят ни один."""
+        text, name, replace = body.get("text"), body.get("name"), body.get("replace", False)
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(422, "Пришлите JSON конфига в поле text")
+        if len(text) > 2_000_000:
+            raise HTTPException(413, "Слишком большой файл конфигов (максимум 2 МБ)")
+        if name is not None and not isinstance(name, str) or not isinstance(replace, bool):
+            raise HTTPException(422, "name — строка, replace — true или false")
+        try:
+            added, errors = botconfigs.import_configs(db, request.state.user["id"], text, s.defaults, s.sources, (name or "").strip()[:60] or None, replace=replace)
+        except botconfigs.ConfigError as e:
+            raise HTTPException(422, str(e))
+        if not added:
+            raise HTTPException(422, "Не принято: " + "; ".join(f"{x['name']}: {x['error']}" for x in errors))
+        db.add_auto_log(request.state.user["id"], added[0]["id"], "config_import", None, None, "info", {"configs": [x["id"] for x in added], "errors": len(errors), "replace": replace, "source": "web"})
+        return {"added": added, "errors": errors}
 
     @app.get("/api/monitor/configs/{config_id}")
     def monitor_detail(config_id: int, request: Request):

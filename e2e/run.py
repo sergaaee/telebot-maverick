@@ -10,6 +10,7 @@
 Код возврата 0 — все проверки прошли.
 """
 import csv
+import json
 import os
 import random
 import shutil
@@ -1148,6 +1149,56 @@ def scenario(pg, base, state_url):
     back = pf_json()
     check("«Весь период»: итог как до выбора периода", back["period"] is None and back["trades"] == base_pf["trades"] and "вся история" in pg.get_by_test_id("pf-period-note").inner_text() and pg.get_by_test_id("pf-period-reset").count() == 0)
     pg.get_by_test_id("tab-strategies").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=15000)
+    # --- добавление конфигов бота через интерфейс (без Telegram)
+    pg.locator("[data-testid=mon-card]").first.wait_for(timeout=30000)
+    n_cards = lambda: pg.locator("[data-testid=mon-card]").count()
+    n0 = n_cards()
+    first_id = pg.evaluate("""() => fetch('/api/monitor', {method: 'POST', headers: {'content-type': 'application/json', 'x-maverick': '1'}, body: '{}'}).then(r => r.json()).then(j => j.entries[0].config_id)""")
+    exported = pg.evaluate("(id) => fetch('/api/monitor/configs/' + id + '/export', {headers: {'x-maverick': '1'}}).then(r => r.json())", first_id)
+    bare = json.dumps({"format": "maverick-config", "version": 1, "tf": exported["tf"], "params": exported["params"]})
+    check("добавление конфига: кнопка «➕ Добавить конфиг» со «?», форма свёрнута", pg.get_by_test_id("cfg-add-open").is_visible() and pg.get_by_test_id("cfg-add").locator(".help").count() == 1 and pg.get_by_test_id("cfg-add-text").count() == 0)
+    pg.get_by_test_id("cfg-add-open").click()
+    check("форма добавления: поле текста, выбор файлов, имя, «заменить»; «Добавить» недоступна без данных", pg.get_by_test_id("cfg-add-text").is_visible() and pg.get_by_test_id("cfg-add-file").count() == 1 and pg.get_by_test_id("cfg-add-name").is_visible()
+          and not pg.get_by_test_id("cfg-add-replace").is_checked() and pg.get_by_test_id("cfg-add-submit").is_disabled())
+    pg.get_by_test_id("cfg-add-text").fill("это не json"); pg.get_by_test_id("cfg-add-submit").click(); pg.get_by_test_id("cfg-add-result").wait_for(timeout=15000)
+    check("неверный текст: понятная ошибка, конфиг не создан, введённое не стёрто", "❌" in pg.get_by_test_id("cfg-add-result").inner_text() and "JSON" in pg.get_by_test_id("cfg-add-result").inner_text() and n_cards() == n0 and pg.get_by_test_id("cfg-add-text").input_value() == "это не json")
+    pg.get_by_test_id("cfg-add-text").fill(bare); pg.get_by_test_id("cfg-add-name").fill("Импорт-тест"); pg.get_by_test_id("cfg-add-submit").click()
+    pg.locator("[data-testid=mon-card][data-name='Импорт-тест']").wait_for(timeout=30000)
+    added = E2E_DB.find_config(tid, "Импорт-тест")
+    check("конфиг добавлен через сайт: карточка в списке, запись у пользователя, форма очищена, автомод выключен",
+          "➕ добавлен" in pg.get_by_test_id("cfg-add-result").inner_text() and n_cards() == n0 + 1 and added is not None and added["params"]["sl_pct"] == exported["params"]["sl_pct"] and pg.get_by_test_id("cfg-add-text").input_value() == ""
+          and not any(c.get_by_test_id("mon-auto").locator("input").nth(0).is_checked() for c in pg.locator("[data-testid=mon-card][data-name='Импорт-тест']").all()))
+    pg.get_by_test_id("cfg-add-text").fill(bare); pg.get_by_test_id("cfg-add-name").fill("Импорт-тест"); pg.get_by_test_id("cfg-add-submit").click()
+    pg.locator("[data-testid=mon-card][data-name='Импорт-тест 2']").wait_for(timeout=30000)
+    check("то же имя без «заменить»: новый конфиг получает номер, старый не тронут", n_cards() == n0 + 2 and E2E_DB.find_config(tid, "Импорт-тест")["id"] == added["id"])
+    E2E_DB.update_config(added["id"], baseline=True, last_ts=777)
+    pg.get_by_test_id("cfg-add-text").fill(json.dumps({"format": "maverick-config", "tf": exported["tf"], "params": {**exported["params"], "sl_pct": 33}})); pg.get_by_test_id("cfg-add-name").fill("Импорт-тест")
+    pg.get_by_test_id("cfg-add-replace").check(); pg.once("dialog", lambda d: d.accept()); pg.get_by_test_id("cfg-add-submit").click()
+    pg.get_by_test_id("cfg-add-result").get_by_text("♻️ заменён").wait_for(timeout=30000)
+    rep = E2E_DB.find_config(tid, "Импорт-тест")
+    check("«заменить»: конфиг с тем же именем перезаписан (параметры новые, состояние расчёта сброшено), новых карточек нет", rep["id"] == added["id"] and rep["params"]["sl_pct"] == 33 and not rep["baseline"] and n_cards() == n0 + 2)
+    pg.get_by_test_id("cfg-add-replace").uncheck()
+    pg.get_by_test_id("cfg-add-file").set_input_files([{"name": "my-strategy.json", "mimeType": "application/json", "buffer": bare.encode()},
+                                                         {"name": "maverick-config_2.json", "mimeType": "application/json", "buffer": json.dumps({"name": "Из второго файла", "params": exported["params"]}).encode()}])
+    pg.get_by_test_id("cfg-add-files").wait_for(timeout=5000); pg.get_by_test_id("cfg-add-submit").click()
+    pg.locator("[data-testid=mon-card][data-name='Из второго файла']").wait_for(timeout=30000)
+    check("несколько файлов за раз: имя берётся из имени файла или из поля name внутри", pg.locator("[data-testid=mon-card][data-name='my-strategy']").count() == 1 and n_cards() == n0 + 4 and pg.get_by_test_id("cfg-add-files").count() == 0)
+    pg.get_by_test_id("cfg-add-text").fill(json.dumps({"configs": [{"name": "Пакет-1", "params": exported["params"]}, {"name": "Пакет-плохой", "params": {**exported["params"], "sl_pct": -5}}]})); pg.get_by_test_id("cfg-add-submit").click()
+    pg.locator("[data-testid=mon-card][data-name='Пакет-1']").wait_for(timeout=30000)
+    check("пакет: хороший конфиг принят, плохой назван с причиной", "Пакет-плохой" in pg.get_by_test_id("cfg-add-result").inner_text() and "❌" in pg.get_by_test_id("cfg-add-result").inner_text() and E2E_DB.find_config(tid, "Пакет-плохой") is None)
+    # со страницы бэктеста: «➕ В мониторинг» кладёт текущие параметры как конфиг
+    pg.get_by_test_id("nav-backtest").click(); pg.wait_for_selector("table.trades tbody tr", timeout=30000)
+    pg.once("dialog", lambda d: d.accept("Из бэктеста")); pg.get_by_test_id("cfg-to-monitor").click()
+    pg.locator(".src-info", has_text="Добавлено в мониторинг").wait_for(timeout=30000)
+    fb = E2E_DB.find_config(tid, "Из бэктеста")
+    check("страница бэктеста: «➕ В мониторинг» добавляет текущие параметры конфигом бота (без периода дат)", fb is not None and fb["params"].get("date_from") is None and fb["params"].get("date_to") is None and fb["params"]["symbol"])
+    for nm in ("Импорт-тест", "Импорт-тест 2", "my-strategy", "Из второго файла", "Пакет-1", "Из бэктеста"):
+        c_ = E2E_DB.find_config(tid, nm)
+        if c_:
+            E2E_DB.remove_config(c_["id"])
+    pg.get_by_test_id("nav-monitor").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=15000)
+    pg.locator("[data-testid=mon-card]").first.wait_for(timeout=30000)
+    check("после проверки тестовые конфиги убраны, остальное на месте", n_cards() == n0 and all(E2E_DB.find_config(tid, nm) is None for nm in ("Импорт-тест", "Импорт-тест 2", "my-strategy", "Из второго файла", "Пакет-1", "Из бэктеста")))
     pg.get_by_test_id("nav-backtest").click(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(500)
     check("возврат к бэктесту: параметры на месте, мониторинг не загружен", pg.locator("aside.params").is_visible() and pg.get_by_test_id("monitor-page").count() == 0 and not pg.url.endswith("monitor.html"))
 
@@ -1264,7 +1315,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 6, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 7, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

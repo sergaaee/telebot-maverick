@@ -14,7 +14,7 @@ from app import portfolio_guards
 from app.db import EXCHANGES, HL_SLOTS, DbError, hl_slot, is_hl
 
 from . import formatting as fm
-from .configs import ConfigError, default_name, parse_configs, validate
+from .configs import ConfigError, import_configs
 from app.core import backtest
 from app import digest as digest_mod, exporter, manage
 from app.monitor import cached_result
@@ -171,27 +171,16 @@ class SignalService:
     # ---------------- импорт конфигов ----------------
     def import_text(self, chat, user, text, name_hint):
         try:
-            items = parse_configs(text, name_hint)
+            done, bad = import_configs(self.db, user["id"], text, self.s.defaults, self.s.sources, name_hint, replace=True)      # одноимённый конфиг заменяется («обновлён»)
         except ConfigError as e:
             self.send(chat, f"❌ {esc(str(e))}")
             return
-        added, errors = [], []
-        for it in items:
-            try:
-                params, ignored = validate(it["params"], self.s.defaults)
-                if params["source"] not in self.s.sources:
-                    raise ConfigError(f"источник «{params['source']}» не настроен у бота (доступны: {', '.join(self.s.sources)})")
-            except ConfigError as e:
-                errors.append(f"{esc(it['name'] or default_name(it['params']))}: {esc(str(e))}")
-                continue
-            name = (it["name"] or default_name(params))[:60]
-            existing = self.db.find_config(user["id"], name) if it["name"] else None
-            if not existing:
-                name = self.db.unique_config_name(user["id"], name)
-            cfg, created = self.db.add_config(user["id"], name, params, it["tf"])
-            self._fp.pop(cfg["id"], None)
-            added.append(f"{'➕' if created else '♻️ обновлён'} <b>#{cfg['id']} {esc(cfg['name'])}</b>"
-                         + (f" <i>(пропущены поля: {esc(', '.join(ignored[:6]))})</i>" if ignored else ""))
+        added = []
+        for it in done:
+            self._fp.pop(it["id"], None)
+            added.append(f"{'➕' if it['created'] else '♻️ обновлён'} <b>#{it['id']} {esc(it['name'])}</b>"
+                         + (f" <i>(пропущены поля: {esc(', '.join(it['ignored'][:6]))})</i>" if it["ignored"] else ""))
+        errors = [f"{esc(x['name'])}: {esc(x['error'])}" for x in bad]
         out = []
         if added:
             out.append("Принято:\n" + "\n".join(added) + "\n\nСчитаю статистику и пришлю карточку конфига…")

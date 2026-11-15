@@ -246,3 +246,6 @@ a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
 .mon-closer { display: inline-flex; gap: .3rem; align-items: center; } .mon-closer select { width: auto; }
 .pf-guard-input { width: 64px; } .pf-cards .pf-wide { grid-column: span 2; } .pf-cards .card-value.small { font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
 .mon-test select[data-testid="pf-compound"] { min-width: 190px; } .mon-test input[type="date"] { width: auto; }
+
+.mon-import { display: flex; flex-direction: column; gap: 6px; } .mon-import-form { max-width: 760px; } .mon-import-form input[type=text] { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 4px 7px; font: inherit; width: 240px; }
+.mon-import-result { display: flex; flex-direction: column; gap: 2px; }
