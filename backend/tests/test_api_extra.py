@@ -48,14 +48,14 @@ def test_portfolio_exports_digest_panic(auth_env):
 def test_portfolio_prefs_exclude_and_common_deposit(auth_env):
     db = auth_env
     alice, a, b = two_users(db)
-    assert a.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None, "sizing": {}, "compound": None}
+    assert a.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None, "sizing": {}, "compound": None, "margin_cap_pct": None, "side_pause": None, "date_from": None, "date_to": None}
     assert a.put("/api/portfolio/prefs", json={"total_deposit": -5}, headers=H_).status_code == 422
     assert a.put("/api/portfolio/prefs", json={"total_deposit": "много"}, headers=H_).status_code == 422
     assert a.put("/api/portfolio/prefs", json={"exclude": "1"}, headers=H_).status_code == 422
-    assert a.put("/api/portfolio/prefs", json={"total_deposit": 1000, "exclude": [2]}, headers=H_).json() == {"exclude": [2], "total_deposit": 1000.0, "sizing": {}, "compound": None}
-    assert b.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None, "sizing": {}, "compound": None}                  # настройки у каждого пользователя свои
+    assert a.put("/api/portfolio/prefs", json={"total_deposit": 1000, "exclude": [2]}, headers=H_).json() == {"exclude": [2], "total_deposit": 1000.0, "sizing": {}, "compound": None, "margin_cap_pct": None, "side_pause": None, "date_from": None, "date_to": None}
+    assert b.get("/api/portfolio/prefs").json() == {"exclude": [], "total_deposit": None, "sizing": {}, "compound": None, "margin_cap_pct": None, "side_pause": None, "date_from": None, "date_to": None}                  # настройки у каждого пользователя свои
     r = a.post("/api/portfolio", headers=H_).json()
-    assert r["settings"] == {"exclude": [2], "total_deposit": 1000.0, "sizing": {}, "compound": None} and r["portfolio"]["joint"] and r["portfolio"]["deposit"] == 1000.0
+    assert r["settings"] == {"exclude": [2], "total_deposit": 1000.0, "sizing": {}, "compound": None, "margin_cap_pct": None, "side_pause": None, "date_from": None, "date_to": None} and r["portfolio"]["joint"] and r["portfolio"]["deposit"] == 1000.0
     assert [i["included"] for i in r["items"]] == [True, False]
     assert a.put("/api/portfolio/prefs", json={"total_deposit": None}, headers=H_).json()["total_deposit"] is None
     r2 = a.post("/api/portfolio", headers=H_).json()

@@ -657,11 +657,29 @@ export interface WalkForward {
   verdict: string;
 }
 
-export interface PfItem { id: number; name: string; symbol: string | null; paused: boolean; included: boolean; error: string | null; trade_pct?: number; leverage?: number; cfg_trade_pct?: number; cfg_leverage?: number; overridden?: boolean; liq_sim?: boolean; compound?: boolean; cfg_compound?: boolean; deposit?: number; trades?: number; winrate?: number | null; profit_factor?: number | null; total_usd?: number | null; return_pct?: number | null; sharpe?: number | null; max_dd_usd?: number; max_dd_pct?: number; max_dd_real_pct?: number | null; max_dd_real_usd?: number | null; curve?: [number, number][] }
+export interface PfItem { id: number; name: string; symbol: string | null; paused: boolean; included: boolean; error: string | null; trade_pct?: number; leverage?: number; cfg_trade_pct?: number; cfg_leverage?: number; overridden?: boolean; liq_sim?: boolean; compound?: boolean; cfg_compound?: boolean; deposit?: number; trades?: number; winrate?: number | null; profit_factor?: number | null; total_usd?: number | null; return_pct?: number | null; sharpe?: number | null; max_dd_usd?: number; max_dd_pct?: number; max_dd_real_pct?: number | null; max_dd_real_usd?: number | null; curve?: [number, number][]; skipped_margin?: number; skipped_pause?: number }
+
+/** Защита портфеля: пауза стороны после серии убытков — N убыточных закрытий за окно (ч) -> пауза (ч). */
+export interface SidePauseRule { losses: number; window_h: number; pause_h: number }
+
+/** Настройки портфеля пользователя (хранятся на сервере): период, отключённые стратегии, общий депозит, сложный процент, размеры «что если», защита. */
+export interface PortfolioPrefs {
+  exclude: number[]; total_deposit: number | null; compound: boolean | null; sizing: Record<string, { trade_pct?: number; leverage?: number }>;
+  margin_cap_pct: number | null; side_pause: SidePauseRule | null; date_from: string | null; date_to: string | null;
+}
+
+export interface PortfolioGuardsResult {
+  margin_cap_pct: number | null; side_pause: SidePauseRule | null; skipped: { margin: number; margin_add: number; side_pause: number }; skipped_total: number;
+  pauses: { side: 'long' | 'short'; from_ts: number; until_ts: number }[]; pauses_n: { long: number; short: number };
+  last_skipped: { ts: number; id: number; side: 'long' | 'short'; reason: 'margin' | 'margin_add' | 'side_pause'; name: string | null }[];
+}
+
 export interface Portfolio {
   items: PfItem[];
-  portfolio: { strategies: number; deposit: number; joint: boolean; total_usd: number; return_pct: number | null; max_dd_usd: number; max_dd_pct: number; max_dd_real_usd: number | null; max_dd_real_pct: number | null; min_equity_usd: number | null; max_dd_real_ts: number | null; curve: [number, number][]; trades: number; best: string | null; worst: string | null; peak_margin: number; peak_margin_pct: number | null; peak_margin_ts: number | null };
+  portfolio: { strategies: number; deposit: number; balance: number; joint: boolean; total_usd: number; return_pct: number | null; max_dd_usd: number; max_dd_pct: number; max_dd_real_usd: number | null; max_dd_real_pct: number | null; min_equity_usd: number | null; max_dd_real_ts: number | null; curve: [number, number][]; trades: number; best: string | null; worst: string | null;
+    peak_margin: number; peak_margin_pct: number | null; peak_margin_ts: number | null; peak_util_pct: number; peak_util_ts: number | null; peak_util_margin: number; peak_util_balance: number;
+    period: { date_from: string | null; date_to: string | null; from_ts: number | null; to_ts: number | null; open_at_end: number } | null; guards: PortfolioGuardsResult | null };
   correlation: { ids: number[]; names: string[]; matrix: (number | null)[][]; days: number | null; note: string | null };
-  exposure: { symbols: { asset: string; long: number; short: number; net: number; gross: number; margin: number; configs: { name: string; side: string }[] }[]; gross: number; net: number; margin: number; leverage: number | null; margin_pct: number | null; warnings: string[]; real?: { equity: number; gross: number; leverage: number | null } };
-  settings: { exclude: number[]; total_deposit: number | null; compound: boolean | null; sizing: Record<string, { trade_pct?: number; leverage?: number }> };
+  exposure: { symbols: { asset: string; long: number; short: number; net: number; gross: number; margin: number; configs: { name: string; side: string }[] }[]; gross: number; net: number; margin: number; balance: number; leverage: number | null; margin_pct: number | null; warnings: string[]; real?: { equity: number; gross: number; leverage: number | null } };
+  settings: PortfolioPrefs;
 }

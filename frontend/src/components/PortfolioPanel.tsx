@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getDigest, getPortfolio, savePortfolioPrefs, setDigest, setSizing } from '../api';
-import { fmtPct, fmtPf, fmtTs, fmtUsd, signClass } from '../format';
+import { fmtMoney, fmtPct, fmtPf, fmtTs, fmtUsd, signClass } from '../format';
 import { HELP } from '../helpTexts';
-import type { PfItem, Portfolio } from '../types';
+import type { PfItem, Portfolio, PortfolioPrefs } from '../types';
 import Help from './Help';
 import PortfolioChart, { PALETTE, type CurveLine } from './PortfolioChart';
 
@@ -38,12 +38,22 @@ export default function PortfolioPanel() {
   const [digest, setDigestState] = useState<{ mode: string; telegram: boolean; hour_utc: number } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [depInput, setDepInput] = useState('');
+  const [capIn, setCapIn] = useState('');                                                       // защита портфеля: черновики полей (применяются кнопкой)
+  const [pauseOn, setPauseOn] = useState(false);
+  const [pauseN, setPauseN] = useState('6');
+  const [pauseW, setPauseW] = useState('24');
+  const [pauseH, setPauseH] = useState('24');
 
   const load = useCallback(async () => {
     try {
       const r = await getPortfolio();
       setPf(r);
       setDepInput((cur) => (document.activeElement?.id === 'pf-total-deposit' ? cur : r.settings.total_deposit != null ? String(r.settings.total_deposit) : ''));
+      if (!document.activeElement?.closest('[data-testid="pf-guards"]')) {
+        setCapIn(r.settings.margin_cap_pct != null ? String(r.settings.margin_cap_pct) : '');
+        setPauseOn(r.settings.side_pause != null);
+        if (r.settings.side_pause) { setPauseN(String(r.settings.side_pause.losses)); setPauseW(String(r.settings.side_pause.window_h)); setPauseH(String(r.settings.side_pause.pause_h)); }
+      }
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -64,7 +74,7 @@ export default function PortfolioPanel() {
     }
   };
 
-  const savePrefs = async (patch: { exclude?: number[]; total_deposit?: number | null; compound?: boolean | null; sizing?: Record<string, { trade_pct?: number; leverage?: number }> }) => {
+  const savePrefs = async (patch: Partial<PortfolioPrefs>) => {
     try {
       await savePortfolioPrefs(patch);
       setMsg(null);
@@ -104,6 +114,19 @@ export default function PortfolioPanel() {
     if (depInput.trim() === '') { void savePrefs({ total_deposit: null }); return; }
     if (!Number.isFinite(v) || v <= 0) { setErr('Общий депозит — число больше 0'); return; }
     void savePrefs({ total_deposit: v });
+  };
+
+  const applyGuards = () => {
+    const cap = capIn.trim().replace(',', '.');
+    const capV = cap === '' ? null : Number(cap);
+    if (capV != null && (!Number.isFinite(capV) || capV <= 0 || capV > 1000)) { setErr('Лимит занятой маржи — число от 0 до 1000 (% баланса) или пусто (выключено)'); return; }
+    let sp: PortfolioPrefs['side_pause'] = null;
+    if (pauseOn) {
+      const n = Number(pauseN.replace(',', '.')), w = Number(pauseW.replace(',', '.')), h = Number(pauseH.replace(',', '.'));
+      if (!Number.isInteger(n) || n < 1 || !(w > 0 && w <= 720) || !(h > 0 && h <= 720)) { setErr('Пауза стороны: убыточных закрытий — целое от 1, окно и пауза — часы от 0 до 720'); return; }
+      sp = { losses: n, window_h: w, pause_h: h };
+    }
+    void savePrefs({ margin_cap_pct: capV, side_pause: sp }).then(() => setMsg('Защита портфеля сохранена: те же правила применяет автоторговля'));
   };
 
   const ok = pf?.items.filter((i) => i.included && !i.error && i.curve && i.curve.length) ?? [];
@@ -146,6 +169,29 @@ export default function PortfolioPanel() {
         </select>
         <span className="muted small">{pf?.portfolio.joint ? `Все стратегии торгуют с одного счёта ${fmtUsd(pf.portfolio.deposit)}: размер каждой сделки считается от общего баланса` : 'Сейчас у каждой стратегии депозит из её конфига; в портфеле они складываются'}</span>
       </div>
+      <div className="mon-test" data-testid="pf-period">
+        <b>Период</b><Help text={HELP.pf_period} />
+        <label className="small">с <input type="date" value={pf?.settings.date_from ?? ''} onChange={(e) => void savePrefs({ date_from: e.target.value || null })} aria-label="Начало периода расчёта" data-testid="pf-date-from" disabled={!pf} /></label>
+        <label className="small">по <input type="date" value={pf?.settings.date_to ?? ''} onChange={(e) => void savePrefs({ date_to: e.target.value || null })} aria-label="Конец периода расчёта" data-testid="pf-date-to" disabled={!pf} /></label>
+        {(pf?.settings.date_from || pf?.settings.date_to) && <button type="button" className="ghost" onClick={() => void savePrefs({ date_from: null, date_to: null })} data-testid="pf-period-reset">Весь период</button>}
+        <span className="muted small" data-testid="pf-period-note">{pf?.portfolio.period
+          ? `Позиции, открытые ${pf.portfolio.period.date_from ? `с ${pf.portfolio.period.date_from}` : ''}${pf.portfolio.period.date_to ? ` по ${pf.portfolio.period.date_to}` : ''}; размеры — от депозита на начало периода${pf.portfolio.period.open_at_end ? `; не закрыто к концу: ${pf.portfolio.period.open_at_end} (считаются открытыми)` : ''}`
+          : 'вся история'}</span>
+      </div>
+      <div className="mon-test" data-testid="pf-guards">
+        <b>Защита портфеля</b><Help text={HELP.pf_guards} />
+        <label className="small">лимит занятой маржи<Help text={HELP.pf_margin_cap} /> <input className="pf-guard-input" inputMode="decimal" placeholder="выкл" value={capIn} onChange={(e) => setCapIn(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') applyGuards(); }} aria-label="Лимит занятой маржи, % баланса" data-testid="pf-cap" /> <span className="muted">% баланса</span></label>
+        <span className="mon-sep" />
+        <label className="small"><input type="checkbox" checked={pauseOn} onChange={(e) => setPauseOn(e.target.checked)} data-testid="pf-pause-on" /> пауза стороны после серии убытков<Help text={HELP.pf_side_pause} /></label>
+        {pauseOn && (
+          <span className="small" data-testid="pf-pause-fields">после <input className="pf-guard-input" inputMode="numeric" value={pauseN} onChange={(e) => setPauseN(e.target.value)} aria-label="Сколько убыточных закрытий запускают паузу" data-testid="pf-pause-n" /> убыточных закрытий за{' '}
+            <input className="pf-guard-input" inputMode="decimal" value={pauseW} onChange={(e) => setPauseW(e.target.value)} aria-label="Окно, часов" data-testid="pf-pause-w" /> ч — пауза{' '}
+            <input className="pf-guard-input" inputMode="decimal" value={pauseH} onChange={(e) => setPauseH(e.target.value)} aria-label="Длительность паузы, часов" data-testid="pf-pause-h" /> ч</span>
+        )}
+        <button type="button" className="ghost" onClick={applyGuards} disabled={!pf} data-testid="pf-guards-apply">Применить</button>
+        <span className="muted small">те же правила — в автоторговле (бот)</span>
+      </div>
       {err && <div className="banner error">{err}</div>}
       {!pf && !err && <div className="empty">Загрузка…</div>}
       {pf && (
@@ -154,14 +200,31 @@ export default function PortfolioPanel() {
             <div className="card"><div className="card-label">Стратегий в портфеле</div><div className="card-value">{pf.portfolio.strategies}</div></div>
             <div className="card"><div className="card-label">Результат (расчёт)</div><div className={`card-value ${signClass(pf.portfolio.total_usd)}`}>{fmtUsd(pf.portfolio.total_usd)}</div></div>
             <div className="card"><div className="card-label">К сумме депозитов</div><div className={`card-value ${signClass(pf.portfolio.return_pct ?? 0)}`}>{pf.portfolio.return_pct == null ? '–' : fmtPct(pf.portfolio.return_pct, 1)}</div></div>
-            <div className="card" data-testid="pf-dd" title={`С учётом открытых позиций по рыночной цене${pf.portfolio.max_dd_real_ts ? `, самый глубокий провал: ${fmtTs(pf.portfolio.max_dd_real_ts)}` : ''}. Только по закрытым сделкам: ${pf.portfolio.max_dd_pct.toFixed(1)}% от депозита (${fmtUsd(pf.portfolio.max_dd_usd)})`}>
+            <div className="card" data-testid="pf-dd" title={`С учётом открытых позиций по рыночной цене${pf.portfolio.max_dd_real_ts ? `, самый глубокий провал: ${fmtTs(pf.portfolio.max_dd_real_ts)}` : ''}. Только по закрытым сделкам: ${pf.portfolio.max_dd_pct.toFixed(1)}% от пика капитала.`}>
               <div className="card-label">Макс. просадка (с позициями) <Help text={HELP.pf_dd_real} /></div>
               <div className="card-value neg">{(pf.portfolio.max_dd_real_pct ?? pf.portfolio.max_dd_pct).toFixed(1)}%</div>
-              <div className="muted small">{pf.portfolio.max_dd_real_usd != null ? `${fmtUsd(pf.portfolio.max_dd_real_usd)} · по закрытым ${pf.portfolio.max_dd_pct.toFixed(1)}%` : 'по закрытым сделкам'}</div>
+              <div className="muted small">{pf.portfolio.max_dd_real_usd != null ? `${fmtMoney(pf.portfolio.max_dd_real_usd)} · по закрытым ${pf.portfolio.max_dd_pct.toFixed(1)}% от пика` : `по закрытым сделкам, от пика капитала`}</div>
             </div>
-            <div className="card"><div className="card-label">{pf.portfolio.joint ? 'Общий депозит' : 'Сумма депозитов'}</div><div className="card-value">{fmtUsd(pf.portfolio.deposit)}</div></div>
-            <div className="card" title={pf.portfolio.peak_margin_ts ? `пик: ${fmtTs(pf.portfolio.peak_margin_ts)}` : undefined}><div className="card-label">Пик занятой маржи</div><div className={`card-value ${(pf.portfolio.peak_margin_pct ?? 0) > 100 ? 'neg' : ''}`}>{pf.portfolio.peak_margin_pct == null ? '–' : `${pf.portfolio.peak_margin_pct.toFixed(0)}%`}</div></div>
-            <div className="card"><div className="card-label">Лучшая / худшая</div><div className="card-value small">{pf.portfolio.best ?? '–'} / {pf.portfolio.worst ?? '–'}</div></div>
+            <div className="card"><div className="card-label">{pf.portfolio.joint ? 'Общий депозит' : 'Сумма депозитов'}</div><div className="card-value">{fmtMoney(pf.portfolio.deposit)}</div></div>
+            <div className="card" data-testid="pf-balance"><div className="card-label">Баланс по расчёту</div><div className="card-value">{fmtMoney(pf.portfolio.balance)}</div><div className="muted small">депозит + закрытые результаты</div></div>
+            <div className="card" data-testid="pf-util" title={pf.portfolio.peak_util_ts ? `пик: ${fmtTs(pf.portfolio.peak_util_ts)}` : undefined}>
+              <div className="card-label">Пик занятой маржи <Help text={HELP.pf_util} /></div>
+              <div className={`card-value ${pf.portfolio.peak_util_pct > 100 ? 'neg' : ''}`}>{pf.portfolio.peak_util_ts == null ? '–' : `${pf.portfolio.peak_util_pct.toFixed(0)}% баланса`}</div>
+              <div className="muted small">{pf.portfolio.peak_util_ts == null ? 'позиций нет' : `${fmtMoney(pf.portfolio.peak_util_margin)} при балансе ${fmtMoney(pf.portfolio.peak_util_balance)}`}</div>
+            </div>
+            <div className="card pf-wide"><div className="card-label">Лучшая / худшая</div><div className="card-value small">{pf.portfolio.best ?? '–'} / {pf.portfolio.worst ?? '–'}</div></div>
+            {pf.portfolio.guards && (
+              <>
+                <div className="card" data-testid="pf-skipped" title="Входы, которые защита портфеля не пропустила в расчёте">
+                  <div className="card-label">Пропущено защитой</div><div className="card-value">{pf.portfolio.guards.skipped_total}</div>
+                  <div className="muted small">по марже {pf.portfolio.guards.skipped.margin + pf.portfolio.guards.skipped.margin_add} · по паузе {pf.portfolio.guards.skipped.side_pause}</div>
+                </div>
+                {pf.portfolio.guards.side_pause && (
+                  <div className="card" data-testid="pf-pauses"><div className="card-label">Пауз сторон</div><div className="card-value">лонг {pf.portfolio.guards.pauses_n.long} · шорт {pf.portfolio.guards.pauses_n.short}</div>
+                    <div className="muted small">{`${pf.portfolio.guards.side_pause.losses} убытков за ${pf.portfolio.guards.side_pause.window_h} ч → пауза ${pf.portfolio.guards.side_pause.pause_h} ч`}</div></div>
+                )}
+              </>
+            )}
           </div>
           {lines.length ? <PortfolioChart lines={lines} /> : <div className="empty small">Нет закрытых сделок у выбранных стратегий</div>}
           <div className="table-wrap mon-legs pf-table"><table>
@@ -173,7 +236,7 @@ export default function PortfolioPanel() {
                   <td><i className="pf-dot" style={{ background: i.included ? colorOf(i.id) : 'transparent' }} /> {i.name}{i.paused ? ' (пауза)' : !i.included && !i.error ? ' (не учитывается)' : ''}</td><td>{(i.symbol ?? '–').split('/')[0]}</td>
                   {i.error ? <td colSpan={9} className="bad-text small">{i.error}</td> : (
                     <>
-                      <td>{i.trades}</td><td>{i.winrate != null ? `${i.winrate.toFixed(0)}%` : '–'}</td><td>{i.profit_factor == null ? (i.trades ? '∞' : '–') : fmtPf(i.profit_factor)}</td>
+                      <td title={i.skipped_margin || i.skipped_pause ? `пропущено защитой портфеля: по марже ${i.skipped_margin ?? 0}, по паузе стороны ${i.skipped_pause ?? 0}` : undefined}>{i.trades}{i.skipped_margin || i.skipped_pause ? <span className="muted small"> (−{(i.skipped_margin ?? 0) + (i.skipped_pause ?? 0)})</span> : null}</td><td>{i.winrate != null ? `${i.winrate.toFixed(0)}%` : '–'}</td><td>{i.profit_factor == null ? (i.trades ? '∞' : '–') : fmtPf(i.profit_factor)}</td>
                       <td className={signClass(i.total_usd ?? 0)}>{fmtUsd(i.total_usd ?? 0)}</td><td className={signClass(i.return_pct ?? 0)}>{i.return_pct != null ? fmtPct(i.return_pct, 1) : '–'}</td>
                       <td className="nowrap"><SizeInput item={i} field="trade_pct" onCommit={(p) => setSize(i.id, p)} /></td>
                       <td className="nowrap"><SizeInput item={i} field="leverage" onCommit={(p) => setSize(i.id, p)} />
@@ -195,16 +258,16 @@ export default function PortfolioPanel() {
               <thead><tr><th>Актив</th><th>Лонг</th><th>Шорт</th><th>Нетто</th><th>Маржа</th><th>Кто</th></tr></thead>
               <tbody>
                 {pf.exposure.symbols.map((s) => (
-                  <tr key={s.asset}><td>{s.asset}</td><td className="pos">{fmtUsd(s.long)}</td><td className="neg">{fmtUsd(s.short)}</td><td className={signClass(s.net)}>{fmtUsd(s.net)}</td><td>{fmtUsd(s.margin)}</td>
+                  <tr key={s.asset}><td>{s.asset}</td><td className="pos">{fmtMoney(s.long)}</td><td className="neg">{fmtMoney(s.short)}</td><td className={signClass(s.net)}>{fmtUsd(s.net)}</td><td>{fmtMoney(s.margin)}</td>
                     <td className="muted small">{s.configs.map((c) => `${c.name} (${c.side === 'long' ? 'лонг' : 'шорт'})`).join(', ')}</td></tr>
                 ))}
               </tbody>
             </table></div>
           )}
           <div className="muted small">
-            Всего: объём {fmtUsd(pf.exposure.gross)}, маржа {fmtUsd(pf.exposure.margin)}{pf.exposure.leverage != null && <>, плечо портфеля {pf.exposure.leverage.toFixed(2)}×</>}
-            {pf.exposure.margin_pct != null && <> ({pf.exposure.margin_pct.toFixed(0)}% суммы депозитов)</>}
-            {pf.exposure.real && <> · на бирже: капитал {fmtUsd(pf.exposure.real.equity, 2)}, объём позиций {fmtUsd(pf.exposure.real.gross)}{pf.exposure.real.leverage != null && <>, плечо {pf.exposure.real.leverage.toFixed(2)}×</>}</>}
+            Всего: объём {fmtMoney(pf.exposure.gross)}, маржа {fmtMoney(pf.exposure.margin)}{pf.exposure.leverage != null && <>, плечо портфеля {pf.exposure.leverage.toFixed(2)}× от баланса</>}
+            {pf.exposure.margin_pct != null && <> ({pf.exposure.margin_pct.toFixed(0)}% баланса по расчёту {fmtMoney(pf.exposure.balance)})</>}
+            {pf.exposure.real && <> · на бирже: капитал {fmtMoney(pf.exposure.real.equity, 2)}, объём позиций {fmtMoney(pf.exposure.real.gross)}{pf.exposure.real.leverage != null && <>, плечо {pf.exposure.real.leverage.toFixed(2)}×</>}</>}
           </div>
 
           <h3>Корреляция дневных результатов <Help text={HELP.pf_corr} /></h3>
