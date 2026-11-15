@@ -1104,6 +1104,49 @@ def scenario(pg, base, state_url):
     check("выбор сложного процента запомнился на сервере, конфиги не тронуты", pg.get_by_test_id("pf-compound").input_value() == "off" and E2E_DB.find_config(tid, "Переименован")["params"].get("compound", True) is True)
     pg.get_by_test_id("pf-compound").select_option("cfg"); pg.wait_for_timeout(2500)
     check("«как в конфигах» возвращает прежний результат", res_txt() == r_cfg)
+    # --- защита портфеля, период, исправленные карточки маржи / просадки
+    pt = lambda: pg.get_by_test_id("portfolio-page").inner_text().replace("\u00a0", " ")
+    util_card = pg.get_by_test_id("pf-util").inner_text().replace("\u00a0", " ")
+    check("портфель: пик занятой маржи — доля БАЛАНСА («% баланса», маржа при балансе), у карточки «?»; депозит и баланс без знака «+»",
+          "% баланса" in util_card and "при балансе" in util_card and pg.get_by_test_id("pf-util").locator(".help").count() == 1 and not any(pg.get_by_test_id("portfolio-page").locator(".card").nth(i).locator(".card-value").inner_text().strip().startswith("+") for i in (4, 5)) and "от пика" in pg.get_by_test_id("pf-dd").inner_text(),
+          f"util={util_card!r} help={pg.get_by_test_id('pf-util').locator('.help').count()} balance={pg.get_by_test_id('pf-balance').inner_text()!r} dd={pg.get_by_test_id('pf-dd').inner_text()!r}")
+    check("портфель: есть строки «Период» и «Защита портфеля» с «?», защита выключена, период — вся история",
+          pg.get_by_test_id("pf-period").locator(".help").count() == 1 and pg.get_by_test_id("pf-guards").locator(".help").count() >= 3 and pg.get_by_test_id("pf-cap").input_value() == "" and not pg.get_by_test_id("pf-pause-on").is_checked()
+          and "вся история" in pg.get_by_test_id("pf-period-note").inner_text() and pg.get_by_test_id("pf-skipped").count() == 0)
+    pf_json = lambda: pg.evaluate("""() => fetch('/api/portfolio', {method: 'POST', headers: {'x-maverick': '1'}}).then(r => r.json()).then(j => ({trades: j.portfolio.trades, total: j.portfolio.total_usd, curve: j.portfolio.curve.map(p => p[0]), period: j.portfolio.period, guards: j.portfolio.guards}))""")
+    base_pf = pf_json()
+    # лимит маржи: очень маленький — часть входов пропускается, видно в карточке; настройка хранится на сервере
+    pg.get_by_test_id("pf-cap").fill("1"); pg.get_by_test_id("pf-guards-apply").click(); pg.get_by_test_id("pf-skipped").wait_for(timeout=15000)
+    capped = pf_json()
+    check("лимит занятой маржи: часть входов пропущена (карточка «Пропущено защитой»), результат пересчитан", capped["trades"] < base_pf["trades"] and capped["guards"]["margin_cap_pct"] == 1.0 and capped["guards"]["skipped"]["margin"] > 0
+          and str(capped["guards"]["skipped_total"]) in pg.get_by_test_id("pf-skipped").inner_text(), f"{base_pf['trades']} -> {capped['trades']}")
+    pg.reload(); pg.get_by_test_id("tab-portfolio").click(); pg.get_by_test_id("portfolio-page").get_by_text("Стратегий в портфеле").wait_for(timeout=60000); pg.wait_for_timeout(800)
+    check("лимит запомнился на сервере (поле заполнено после перезагрузки)", pg.get_by_test_id("pf-cap").input_value() == "1")
+    pg.get_by_test_id("pf-cap").fill(""); pg.get_by_test_id("pf-pause-on").check()
+    check("при включении паузы стороны появляются поля (по умолчанию 6 убытков за 24 ч, пауза 24 ч)", pg.get_by_test_id("pf-pause-n").input_value() == "6" and pg.get_by_test_id("pf-pause-w").input_value() == "24" and pg.get_by_test_id("pf-pause-h").input_value() == "24")
+    pg.get_by_test_id("pf-pause-n").fill("2"); pg.get_by_test_id("pf-pause-w").fill("48"); pg.get_by_test_id("pf-pause-h").fill("48"); pg.get_by_test_id("pf-guards-apply").click(); pg.get_by_test_id("pf-pauses").wait_for(timeout=15000)
+    paused = pf_json()
+    check("пауза стороны: сработала в расчёте (карточка «Пауз сторон»), лимит маржи выключен", paused["guards"]["side_pause"] == {"losses": 2, "window_h": 48.0, "pause_h": 48.0} and paused["guards"]["margin_cap_pct"] is None and paused["guards"]["skipped"]["side_pause"] > 0
+          and "48" in pg.get_by_test_id("pf-pauses").inner_text(), str(paused["guards"]["skipped"]))
+    pg.get_by_test_id("pf-pause-n").fill("0"); pg.get_by_test_id("pf-guards-apply").click(); pg.wait_for_timeout(800)
+    check("неверное значение паузы отклоняется с понятной ошибкой, настройка не меняется", pg.locator(".banner.error").count() >= 1 and pf_json()["guards"]["side_pause"]["losses"] == 2)
+    pg.get_by_test_id("pf-pause-on").uncheck(); pg.get_by_test_id("pf-guards-apply").click(); pg.wait_for_timeout(2000)
+    check("защита выключается: карточек пропусков нет, итог как до включения", pg.get_by_test_id("pf-skipped").count() == 0 and pf_json()["trades"] == base_pf["trades"] and abs(pf_json()["total"] - base_pf["total"]) < 1e-6)
+    # период «с даты по дату»
+    mid_ms = base_pf["curve"][len(base_pf["curve"]) // 2]
+    mid_day = pg.evaluate("(ms) => new Date(ms).toISOString().slice(0, 10)", mid_ms)
+    pg.get_by_test_id("pf-date-from").fill(mid_day); pg.wait_for_timeout(2500)
+    part = pf_json()
+    check("период «с даты»: считаются только позиции с этой даты (сделок меньше, подпись периода, кнопка «Весь период»)", 0 < part["trades"] < base_pf["trades"] and part["period"]["date_from"] == mid_day and mid_day in pg.get_by_test_id("pf-period-note").inner_text()
+          and pg.get_by_test_id("pf-period-reset").count() == 1 and min(part["curve"]) >= mid_ms - 86_400_000 * 2, f"{base_pf['trades']} -> {part['trades']}")
+    pg.get_by_test_id("pf-date-to").fill(mid_day); pg.wait_for_timeout(2500)
+    one_day = pf_json()
+    check("период «с даты по дату» (один день): сделок не больше, чем за «с даты»", one_day["trades"] <= part["trades"] and one_day["period"]["date_to"] == mid_day)
+    pg.get_by_test_id("pf-date-from").fill("2099-01-01"); pg.wait_for_timeout(1500)
+    check("неверный период (начало позже конца) отклоняется с ошибкой, прежний период остался", pg.locator(".banner.error").count() >= 1 and pf_json()["period"]["date_from"] == mid_day)
+    pg.get_by_test_id("pf-period-reset").click(); pg.wait_for_timeout(2500)
+    back = pf_json()
+    check("«Весь период»: итог как до выбора периода", back["period"] is None and back["trades"] == base_pf["trades"] and "вся история" in pg.get_by_test_id("pf-period-note").inner_text() and pg.get_by_test_id("pf-period-reset").count() == 0)
     pg.get_by_test_id("tab-strategies").click(); pg.get_by_test_id("monitor-page").wait_for(timeout=15000)
     pg.get_by_test_id("nav-backtest").click(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(500)
     check("возврат к бэктесту: параметры на месте, мониторинг не загружен", pg.locator("aside.params").is_visible() and pg.get_by_test_id("monitor-page").count() == 0 and not pg.url.endswith("monitor.html"))
@@ -1221,7 +1264,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 5, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 6, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

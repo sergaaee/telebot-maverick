@@ -3,6 +3,7 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +19,7 @@ from .history_sync import HistorySync
 from .jobs import JobManager
 from .markets import MarketsCache, MarketsError, ccxt_swap_symbols, normalize_symbol
 from .schemas import BacktestParams, MonteCarloRequest, WalkForwardRequest
-from . import exporter, portfolio, watchdog
+from . import exporter, portfolio, portfolio_guards, watchdog
 from .watchdog import Watchdog
 from .monitor import cached_result, evaluate_entry
 from .service import ParamError, run_backtest, run_montecarlo
@@ -439,6 +440,16 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
     def auto_off(request: Request):
         return {"disabled": auto_off_all(db, request.state.user["id"])}
 
+    def _pf_date(v):
+        """Дата периода портфеля «ГГГГ-ММ-ДД» или None (мусор — тоже None)."""
+        if not isinstance(v, str):
+            return None
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return v
+
     def _pf_prefs(uid):
         p = db.get_pref(uid, "portfolio", {}) or {}
         ex = [int(x) for x in p.get("exclude", []) if isinstance(x, int)]
@@ -449,8 +460,10 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
                 e = {n: float(v[n]) for n in ("trade_pct", "leverage") if isinstance(v.get(n), (int, float)) and not isinstance(v.get(n), bool)}
                 if e:
                     sz[str(int(k))] = e
+        g = portfolio_guards.normalize(p)
         return {"exclude": ex, "total_deposit": float(td) if isinstance(td, (int, float)) and td > 0 else None, "sizing": sz,
-                "compound": p.get("compound") if isinstance(p.get("compound"), bool) else None}
+                "compound": p.get("compound") if isinstance(p.get("compound"), bool) else None, "margin_cap_pct": g["margin_cap_pct"], "side_pause": g["side_pause"],
+                "date_from": _pf_date(p.get("date_from")), "date_to": _pf_date(p.get("date_to"))}
 
     @app.get("/api/portfolio/prefs")
     def portfolio_prefs(request: Request):
@@ -458,7 +471,8 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
 
     @app.put("/api/portfolio/prefs")
     def portfolio_prefs_put(request: Request, body: dict = Body(...)):
-        """Какие стратегии учитывать в портфеле и общий депозит (null — у каждой свой). Хранится у пользователя на сервере."""
+        """Период расчёта (date_from / date_to — «ГГГГ-ММ-ДД», null — без границы), какие стратегии учитывать в портфеле, общий депозит (null — у каждой свой), сложный процент, размеры «что если» и защита портфеля: лимит занятой маржи (margin_cap_pct, % баланса)
+        и пауза стороны после серии убытков (side_pause: losses, window_h, pause_h); null — выключено. Хранится у пользователя на сервере, те же правила применяет автоторговля."""
         uid = request.state.user["id"]
         cur = _pf_prefs(uid)
         if "exclude" in body:
@@ -474,6 +488,20 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             if body["compound"] is not None and not isinstance(body["compound"], bool):
                 raise HTTPException(422, "compound: true (включить сложный процент для всех), false (выключить для всех) или null (как в конфигах)")
             cur["compound"] = body["compound"]
+        for k in ("date_from", "date_to"):
+            if k in body:
+                if body[k] is not None and _pf_date(body[k]) is None:
+                    raise HTTPException(422, "Дата периода — «ГГГГ-ММ-ДД» или null (без границы)")
+                cur[k] = body[k]
+        if cur.get("date_from") and cur.get("date_to") and cur["date_from"] > cur["date_to"]:
+            raise HTTPException(422, "Начало периода позже конца")
+        try:
+            if "margin_cap_pct" in body:
+                cur["margin_cap_pct"] = portfolio_guards.validate_cap(body["margin_cap_pct"])
+            if "side_pause" in body:
+                cur["side_pause"] = portfolio_guards.validate_side_pause(body["side_pause"])
+        except ValueError as e:
+            raise HTTPException(422, str(e))
         if "sizing" in body:
             raw = body["sizing"]
             if not isinstance(raw, dict):
@@ -512,7 +540,8 @@ def create_app(settings: "Settings | None" = None, markets: "MarketsCache | None
             except Exception:                      # биржа недоступна — её в блоке «реальная биржа» нет
                 continue
             real = one if real is None else {"equity": real["equity"] + one["equity"], "positions": real["positions"] + one["positions"]}
-        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"], sizing=prefs["sizing"], compound=prefs["compound"])
+        return portfolio.build_portfolio(rows, real, exclude=prefs["exclude"], total_deposit=prefs["total_deposit"], sizing=prefs["sizing"], compound=prefs["compound"],
+                                         guards={"margin_cap_pct": prefs["margin_cap_pct"], "side_pause": prefs["side_pause"]}, date_from=prefs["date_from"], date_to=prefs["date_to"])
 
     @app.get("/api/export/{kind}.csv")
     def export_csv(kind: str, request: Request, config_id: int | None = Query(None), exchange: str = Query("hyperliquid")):

@@ -10,6 +10,7 @@ import threading
 import time
 from html import escape as esc
 
+from app import portfolio_guards
 from app.db import EXCHANGES, HL_SLOTS, DbError, hl_slot, is_hl
 
 from . import formatting as fm
@@ -1154,6 +1155,10 @@ class SignalService:
             if st == "error":                               # встречная позиция не закрылась — открывать новую поверх неё нельзя
                 self._open_failed(cfg, sig, add, f"не удалось закрыть встречную позицию: {r.get('error')}", ex)
                 return
+        why = self._guard_reason(cfg, sig, add, ad, ex, margin)                         # защита портфеля: лимит занятой маржи и пауза стороны (настройки — страница «Портфель»)
+        if why:
+            self._skip_open(cfg, p, sig, add, ad, why, retry=False, ex=ex)
+            return
         if p.get("entry_limit_pct") and (not add or p.get("entry_limit_adds")):       # вход (и, если включено, добор) — лимиткой / по ходу цены, а не по рынку
             self._place_entry_order(cfg, p, sig, ad, base, sz, notional, margin, ex, add=add)
             return
@@ -1173,6 +1178,62 @@ class SignalService:
                                                                            if p.get("sl_market") else
                                                                            f"🔓 {self._name(cfg, ex)}: {'добор' if add else 'вход'} выполнен БЕЗ стопа — метрики сильны (настройка «не ставить SL, пока метрики сильны»). "
                                                                            "Стоп встанет, когда метрики остынут; пока его нет, убыток по позиции на бирже не ограничен.")
+
+    # ---------------- защита портфеля ----------------
+    def _guard_reason(self, cfg, sig, add, ad, ex, margin):
+        """Правила защиты портфеля (portfolio_guards; те же, что в расчёте на странице «Портфель») для нового входа / добора на бирже ex. -> причина отказа или None.
+        Лимит занятой маржи: маржа открытых позиций счёта вместе с новым входом не больше заданной доли капитала на бирже (нет данных счёта — не блокируем). Пауза стороны: за последние
+        window_h часов закрылось не меньше N убыточных позиций той же стороны (по расчёту стратегий портфеля, по всем активам) — новая позиция не открывается, сторона стоит pause_h часов;
+        доборы к открытой позиции паузой не блокируются. Лимитка / «вход по ходу», поставленные раньше, не перепроверяются."""
+        g = portfolio_guards.normalize(self.db.get_pref(cfg["user_id"], "portfolio", {}) or {})
+        cap, rule = g["margin_cap_pct"], g["side_pause"]
+        if rule and not add:
+            why = self._side_pause_reason(cfg["user_id"], sig["side"], rule)
+            if why:
+                return why
+        if cap and ad.real and margin:
+            try:
+                acc = ad.account()
+            except Exception as e:
+                log.warning("защита портфеля: не удалось получить счёт %s: %s", ex, e)
+                return None
+            eq, used = acc.get("equity"), acc.get("used")
+            if eq and used is not None and used + margin > cap / 100 * eq + 1e-9:
+                return (f"лимит занятой маржи портфеля: уже занято {fm.num(used, 2)} $ + новый {'добор' if add else 'вход'} {fm.num(margin, 2)} $ = {fm.num(used + margin, 2)} $ — "
+                        f"это {100 * (used + margin) / eq:.0f}% капитала {fm.num(eq, 2)} $, лимит {cap:g}% (страница «Портфель» → защита портфеля)")
+        return None
+
+    def _side_pause_reason(self, uid, side, rule):
+        key = f"pfpause:{uid}:{side}"
+        now = self.clock()
+        until = float(self.db.get_meta(key, 0) or 0)
+        if now < until:
+            return f"пауза {'лонгов' if side == 'long' else 'шортов'} после серии убытков — до {fm.ts_str(int(until * 1000))[11:]} UTC (страница «Портфель» → защита портфеля)"
+        n = portfolio_guards.losing_closes(self._portfolio_closed(uid), side, now * 1000, rule["window_h"])
+        if n >= rule["losses"]:
+            self.db.set_meta(key, now + rule["pause_h"] * 3600)
+            return (f"{n} убыточных закрытий {'лонга' if side == 'long' else 'шорта'} за {rule['window_h']:g} ч (порог {rule['losses']}) — новые {'лонги' if side == 'long' else 'шорты'} "
+                    f"на паузе {rule['pause_h']:g} ч (страница «Портфель» → защита портфеля)")
+        return None
+
+    def _portfolio_closed(self, uid):
+        """Закрытые позиции стратегий пользователя по расчёту: [(время закрытия мс, сторона, результат)]. Считаются стратегии с включённым автомодом «открывать» (где-либо),
+        не на паузе и не отключённые из портфеля на странице «Портфель»; позиция закрыта, когда закрыты все её ноги."""
+        excl = set((self.db.get_pref(uid, "portfolio", {}) or {}).get("exclude") or [])
+        out = []
+        for c in self.db.list_configs(uid):
+            if c["paused"] or not c["any_open"] or c["id"] in excl:
+                continue
+            try:
+                trades = self.engine.evaluate(c["params"])["trades"]
+            except Exception:
+                log.warning("защита портфеля: не удалось посчитать %s", c["name"])
+                continue
+            groups = {}
+            for t in trades:
+                groups.setdefault(t.get("group"), []).append(t)
+            out += portfolio_guards.positions_closed(groups)
+        return out
 
     def _catch_up(self, cfg, res, chat):
         """Автомод включён при включённой опции «догнать сигнал»: входим по ПОСЛЕДНЕМУ сигналу, если он свеж (не старше age_min минут), по расчёту позиция по нему ещё открыта

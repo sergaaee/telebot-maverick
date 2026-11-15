@@ -91,7 +91,7 @@ def test_common_deposit_sizes_every_trade_from_the_shared_balance():
 def test_common_deposit_warns_when_margin_does_not_fit():
     big = [srow(i, f"S{i}", [leg(0, 10, 1.0)], trade_pct=60.0, leverage=2.0) for i in (1, 2)]           # две стратегии по 60% маржи на один депозит
     r = build_portfolio(big, total_deposit=1000.0)
-    assert r["portfolio"]["peak_margin_pct"] == 120.0 and any("пик одновременно занятой маржи" in w for w in r["exposure"]["warnings"])
+    assert r["portfolio"]["peak_margin_pct"] == 120.0 and any("доля занятой маржи доходила до 120%" in w for w in r["exposure"]["warnings"])
 
 
 def test_excluded_strategies_are_left_out_of_every_calculation():

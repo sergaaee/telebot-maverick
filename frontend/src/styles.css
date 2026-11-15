@@ -244,3 +244,5 @@ a.ghost { text-decoration: none; display: inline-flex; align-items: center; }
 .pf-table { max-height: 520px; } .pf-table td, .pf-table th { white-space: nowrap; } .mon-num.changed { border-color: var(--accent); color: var(--accent); } .mini-btn { padding: 0 6px; font-size: 11px; margin-left: 2px; }
 .mon-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 6px; }
 .mon-closer { display: inline-flex; gap: .3rem; align-items: center; } .mon-closer select { width: auto; }
+.pf-guard-input { width: 64px; } .pf-cards .pf-wide { grid-column: span 2; } .pf-cards .card-value.small { font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.mon-test select[data-testid="pf-compound"] { min-width: 190px; } .mon-test input[type="date"] { width: auto; }
