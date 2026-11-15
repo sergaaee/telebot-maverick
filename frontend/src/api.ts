@@ -138,6 +138,12 @@ export const renameConfig = (id: number, name: string) =>
 
 export const deleteConfig = (id: number) => request<{ ok: boolean }>(`/api/monitor/configs/${id}`, { method: 'DELETE' });
 
+export interface ImportedConfig { id: number; name: string; created: boolean; ignored: string[] }
+export interface ImportConfigsResult { added: ImportedConfig[]; errors: { name: string; error: string }[] }
+/** Добавить конфиги бота с сайта: text — JSON (один конфиг, список или пакет); name — имя (для одного конфига); replace — заменить конфиг с тем же именем. */
+export const importBotConfigs = (text: string, opts: { name?: string; replace?: boolean } = {}) =>
+  request<ImportConfigsResult>('/api/monitor/configs/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, name: opts.name?.trim() || null, replace: !!opts.replace }) });
+
 export const exportBotConfig = (id: number) => request<Record<string, unknown>>(`/api/monitor/configs/${id}/export`);
 
 export const setAuto = (configId: number, patch: { open?: boolean; manage?: boolean; base?: 'config' | 'account' }, exchange: ExchangeName = 'hyperliquid') =>

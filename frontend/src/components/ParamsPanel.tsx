@@ -3,6 +3,7 @@ import { fmtDate } from '../format';
 import { HELP, type HelpKey } from '../helpTexts';
 import { MAX_TPS, fillRemainder, resizeTps, sumShares, validateTps } from '../tps';
 import type { AssetInfo, Job, Only, Params, Side, SourceInfo, TfMode, TpLevel } from '../types';
+import { importBotConfigs } from '../api';
 import { configFileName, exportConfig } from '../configIO';
 import Help from './Help';
 
@@ -166,6 +167,18 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
     }
     setTimeout(() => setCfgMsg(null), 4000);
   };
+  const toMonitor = async () => {
+    const n = window.prompt('Имя конфига в мониторинге. Бот начнёт считать по нему сигналы (текущие параметры, без периода дат); автомод у нового конфига выключен.', `${p.source}-${p.symbol.split('/')[0]}`);
+    if (n === null) return;
+    try {
+      const r = await importBotConfigs(exportConfig({ ...p, date_from: null, date_to: null }, tfMode), { name: n });
+      const a = r.added[0];
+      setCfgMsg(`Добавлено в мониторинг: #${a.id} ${a.name}${a.ignored.length ? ` (пропущены поля: ${a.ignored.slice(0, 4).join(', ')})` : ''}. Откройте страницу «Мониторинг».`);
+    } catch (e) {
+      setCfgMsg(`Не добавлено: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setTimeout(() => setCfgMsg(null), 9000);
+  };
   const applyCfg = () => {
     const err = onImportConfig(cfgText);
     setCfgError(err);
@@ -205,6 +218,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         <button type="button" className="ghost" onClick={download}>⬇ Скачать конфиг</button>
         <button type="button" className="ghost" onClick={() => void copy()}>Копировать</button>
         <button type="button" className="ghost" onClick={() => setCfgOpen(!cfgOpen)}>⬆ Загрузить…</button>
+        <button type="button" className="ghost" onClick={() => void toMonitor()} title="Добавить эти параметры как конфиг бота (мониторинг и автоторговля)" data-testid="cfg-to-monitor">➕ В мониторинг</button>
         <Help text={HELP.config_io} />
       </div>
       {cfgMsg && <div className="src-info">{cfgMsg}</div>}
