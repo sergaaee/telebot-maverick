@@ -344,15 +344,19 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       <Section title="Лонг: Deep ≥" help="groupLong">
         <Num label="Local ≥" help="local_min" value={p.local_min} onChange={num('local_min')} />
         <Num label="Scalp ≥" help="scalp_min" value={p.scalp_min} onChange={num('scalp_min')} />
+        <Num label="Scalp ≤ (верхняя граница)" help="long_scalp_max" value={p.long_scalp_max} placeholder="без границы" onChange={(v) => set('long_scalp_max', v)} />
         <Num label="Global ≥" help="global_min" value={p.global_min} placeholder="выкл" onChange={num('global_min')} />
         <Num label="Закрыть лонг при Scalp ≤" help="exit_long_ds" value={p.exit_long_ds} placeholder="выкл" onChange={(v) => set('exit_long_ds', v)} />
+        <Num label="Закрыть лонг при Scalp ≥" help="exit_long_ds_max" value={p.exit_long_ds_max} placeholder="выкл" onChange={(v) => set('exit_long_ds_max', v)} />
       </Section>
 
       <Section title="Шорт: Deep ≤" help="groupShort">
         <Num label="Local ≤" help="short_local_max" value={p.short_local_max} onChange={num('short_local_max')} />
         <Num label="Scalp ≤" help="short_scalp_max" value={p.short_scalp_max} onChange={num('short_scalp_max')} />
+        <Num label="Scalp ≥ (нижняя граница)" help="short_scalp_min" value={p.short_scalp_min} placeholder="без границы" onChange={(v) => set('short_scalp_min', v)} />
         <Num label="Global ≤" help="short_global_max" value={p.short_global_max} placeholder="выкл" onChange={num('short_global_max')} />
         <Num label="Закрыть шорт при Scalp ≥" help="exit_short_ds" value={p.exit_short_ds} placeholder="выкл" onChange={(v) => set('exit_short_ds', v)} />
+        <Num label="Закрыть шорт при Scalp ≤" help="exit_short_ds_min" value={p.exit_short_ds_min} placeholder="выкл" onChange={(v) => set('exit_short_ds_min', v)} />
       </Section>
 
       <Section title="Выход и издержки" help="groupExit">

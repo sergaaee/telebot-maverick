@@ -67,6 +67,10 @@ class BacktestParams(BaseModel):
     friday_close_before_min: Optional[float] = Field(None, ge=0, le=720, description="закрыть позицию в пятницу за столько минут до закрытия Нью-Йорка (и не открывать позиции за столько минут до него)")
     exit_long_ds: Optional[float] = Field(None, ge=-10, le=10, description="закрыть ЛОНГ, когда в новом отчёте DS (Scalp) не выше этого значения; пусто — не закрывать по DS. Не зависит от порога входа")
     exit_short_ds: Optional[float] = Field(None, ge=-10, le=10, description="закрыть ШОРТ, когда в новом отчёте DS (Scalp) не ниже этого значения; пусто — не закрывать по DS. Не зависит от порога входа")
+    long_scalp_max: Optional[float] = Field(None, ge=-10, le=10, description="верхняя граница DS (Scalp) для входа в ЛОНГ: диапазон «scalp_min … long_scalp_max»; при DS выше лонг не открывается (экстремум); пусто — без верхней границы")
+    short_scalp_min: Optional[float] = Field(None, ge=-10, le=10, description="нижняя граница DS (Scalp) для входа в ШОРТ: диапазон «short_scalp_min … short_scalp_max»; при DS ниже шорт не открывается (экстремум); пусто — без нижней границы")
+    exit_long_ds_max: Optional[float] = Field(None, ge=-10, le=10, description="закрыть ЛОНГ, когда в новом отчёте DS (Scalp) не ниже этого значения («экстремум» сверху); пусто — не закрывать. Не зависит от порога входа")
+    exit_short_ds_min: Optional[float] = Field(None, ge=-10, le=10, description="закрыть ШОРТ, когда в новом отчёте DS (Scalp) не выше этого значения («экстремум» снизу); пусто — не закрывать. Не зависит от порога входа")
     signal_gap_h: Optional[float] = Field(None, ge=0, le=24 * 365, description="минимум часов между открытиями позиций")
     sl_hold_strong: Optional[bool] = None
     sl_market: Optional[bool] = Field(None, description="стоп-лосс по маркету: стоп-ордера нет; цена дошла до стопа — ждём следующий отчёт, и если метрики ниже порогов входа, а цена всё ещё за стопом, закрываем по рынку")

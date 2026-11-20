@@ -81,6 +81,14 @@ export interface Params {
   exit_long_ds: number | null;
   /** закрыть шорт, когда в новом отчёте DS (Scalp) не ниже значения; null — не закрывать по DS */
   exit_short_ds: number | null;
+  /** верхняя граница DS (Scalp) для входа в лонг (диапазон «Scalp ≥ … ≤ эта граница»); null — без границы */
+  long_scalp_max: number | null;
+  /** нижняя граница DS (Scalp) для входа в шорт; null — без границы */
+  short_scalp_min: number | null;
+  /** закрыть лонг, когда в новом отчёте DS (Scalp) не ниже значения («экстремум» сверху); null — не закрывать */
+  exit_long_ds_max: number | null;
+  /** закрыть шорт, когда в новом отчёте DS (Scalp) не выше значения («экстремум» снизу); null — не закрывать */
+  exit_short_ds_min: number | null;
   /** плечо доборов; null — как у первой ноги */
   pyramid_leverage: number | null;
   /** моделировать ликвидацию: касание цены ликвидации закрывает ногу с потерей всей маржи; поддерживающая маржа — % объёма */

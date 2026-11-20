@@ -824,14 +824,15 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
                       mstop=chk if sl_market else None)
 
 
-def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_global_max=None):
+def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_global_max=None, ds_range=None):
     """hold(d, ts_мс) -> выполняется ли СЕЙЧАС условие входа по последнему отчёту не позже ts_мс (для лонга — пороги лонга, для шорта — шорта).
     Пороги уже учитывают режим «только Local / только Scalp» (apply_only): лишняя метрика не участвует. Нет отчёта — не сильны."""
     rep_ts = [s[0] for s in signals]
     def sig(s):
         return {"local": s[1], "scalp": s[2], "global": s[7] if len(s) > 7 else None}
-    long_ok = [should_long(sig(s), local_min, scalp_min, global_min) for s in signals]
-    short_ok = [should_short(sig(s), *short, short_global_max) if short is not None else False for s in signals]
+    long_cap, short_floor = ds_range or (None, None)
+    long_ok = [should_long(sig(s), local_min, scalp_min, global_min, long_cap) for s in signals]
+    short_ok = [should_short(sig(s), *short, short_global_max, short_floor) if short is not None else False for s in signals]
 
     def hold(d, t):
         k = bisect_right(rep_ts, t) - 1
@@ -840,20 +841,21 @@ def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_
     return hold
 
 
-def ds_exit_checker(signals, long_ds=None, short_ds=None):
-    """exit(d, ts_мс) -> пора ли закрыть позицию по DS (Scalp) последнего отчёта не позже ts_мс: лонг закрывается, если DS <= long_ds, шорт — если DS >= short_ds.
-    Пороги выхода задаются отдельно от порогов входа. Порог не задан (None), нет отчёта или в нём нет DS — не закрывать. Без порогов rep_ts пуст (решений по отчётам нет)."""
+def ds_exit_checker(signals, long_ds=None, short_ds=None, long_hi=None, short_lo=None):
+    """exit(d, ts_мс) -> пора ли закрыть позицию по DS (Scalp) последнего отчёта не позже ts_мс.
+    Лонг закрывается, если DS <= long_ds (упал) или DS >= long_hi («экстремум» сверху); шорт — если DS >= short_ds (вырос) или DS <= short_lo («экстремум» снизу).
+    Пороги выхода задаются отдельно от порогов входа. Порог не задан (None), нет отчёта или в нём нет DS — по нему не закрывать. Без порогов rep_ts пуст (решений по отчётам нет)."""
     rep_ts = [s[0] for s in signals]
     ds = [s[2] for s in signals]
 
     def exit_(d, t):
-        thr = long_ds if d == 1 else short_ds
-        if thr is None:
+        lo, hi = (long_ds, long_hi) if d == 1 else (short_lo, short_ds)         # нижний и верхний пороги выхода: лонг — «≤ lo» или «≥ hi», шорт — «≤ lo» (экстремум) или «≥ hi»
+        if lo is None and hi is None:
             return False
         k = bisect_right(rep_ts, t) - 1
         v = ds[k] if k >= 0 else None
-        return v is not None and ((v <= thr) if d == 1 else (v >= thr))
-    exit_.rep_ts = rep_ts if (long_ds is not None or short_ds is not None) else []
+        return v is not None and ((lo is not None and v <= lo) or (hi is not None and v >= hi))
+    exit_.rep_ts = rep_ts if any(x is not None for x in (long_ds, short_ds, long_hi, short_lo)) else []
     return exit_
 
 

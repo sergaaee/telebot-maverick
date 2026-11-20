@@ -58,6 +58,34 @@ def effective_params(defaults: dict, p: BacktestParams) -> dict:
     return eff
 
 
+def _ds_range(eff, warnings):
+    """Диапазон DS (Scalp) для входа и «экстремум» для выхода -> (верхняя граница лонга, нижняя граница шорта) для генератора входов. Границы, не имеющие смысла при выбранной стороне и метрике, не применяются.
+    Пустой диапазон и противоречивые пороги выхода — ParamError; сочетания, при которых позиция закрывалась бы на следующем же отчёте, — предупреждение."""
+    side, only = eff["side"], eff.get("only")
+    scalp_on = only in (None, "scalp")                        # при «только Local / только Global» DS в условии входа не участвует
+    cap, floor = eff.get("long_scalp_max"), eff.get("short_scalp_min")
+    lx, sx, lxh, sxl = eff.get("exit_long_ds"), eff.get("exit_short_ds"), eff.get("exit_long_ds_max"), eff.get("exit_short_ds_min")
+    if side != "short":
+        if lx is not None and lxh is not None and lx >= lxh:
+            raise ParamError(f"Выход лонга: закрытие при DS ≤ {lx:g} и при DS ≥ {lxh:g} — пороги перекрываются, лонг закрывался бы при любом DS")
+        if scalp_on and cap is not None and eff.get("scalp_min") is not None and cap < eff["scalp_min"]:
+            raise ParamError(f"Диапазон DS для лонга пустой: от {eff['scalp_min']:g} до {cap:g} — верхняя граница ниже нижней")
+        if lxh is not None and scalp_on and eff.get("scalp_min") is not None and lxh <= eff["scalp_min"]:
+            warnings.append(f"Выход лонга по DS ≥ {lxh:g} не выше порога входа DS ≥ {eff['scalp_min']:g}: лонг закрывается уже на следующем отчёте после входа")
+        elif lxh is not None and scalp_on and (cap is None or cap > lxh):
+            warnings.append(f"Выход лонга по DS ≥ {lxh:g}, а вход разрешён и при DS " + ("выше" if cap is None else f"до {cap:g}") + f": лонг, открытый при DS от {lxh:g}, закроется на следующем отчёте — задайте верхнюю границу входа «до {lxh:g}»")
+    if side != "long":
+        if sx is not None and sxl is not None and sxl >= sx:
+            raise ParamError(f"Выход шорта: закрытие при DS ≥ {sx:g} и при DS ≤ {sxl:g} — пороги перекрываются, шорт закрывался бы при любом DS")
+        if scalp_on and floor is not None and eff.get("short_scalp_max") is not None and floor > eff["short_scalp_max"]:
+            raise ParamError(f"Диапазон DS для шорта пустой: от {floor:g} до {eff['short_scalp_max']:g} — нижняя граница выше верхней")
+        if sxl is not None and scalp_on and eff.get("short_scalp_max") is not None and sxl >= eff["short_scalp_max"]:
+            warnings.append(f"Выход шорта по DS ≤ {sxl:g} не ниже порога входа DS ≤ {eff['short_scalp_max']:g}: шорт закрывается уже на следующем отчёте после входа")
+        elif sxl is not None and scalp_on and (floor is None or floor < sxl):
+            warnings.append(f"Выход шорта по DS ≤ {sxl:g}, а вход разрешён и при DS " + ("ниже" if floor is None else f"от {floor:g}") + f": шорт, открытый при DS до {sxl:g}, закроется на следующем отчёте — задайте нижнюю границу входа «от {sxl:g}»")
+    return (cap if (scalp_on and side != "short") else None, floor if (scalp_on and side != "long") else None)
+
+
 def _filters(eff):
     extra = {}
     if eff.get("cooldown_h"):
@@ -521,18 +549,20 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     wk_entry, wk_close, wk_before = tradingweek.options(eff)
     week = {"before_min": wk_before, "no_entry": wk_entry, "close": wk_close} if (wk_entry or wk_close) else None
     lx, sx = eff.get("exit_long_ds"), eff.get("exit_short_ds")
-    dsx = backtest.ds_exit_checker(sigs, lx, sx) if (lx is not None or sx is not None) else None
+    lxh, sxl = eff.get("exit_long_ds_max"), eff.get("exit_short_ds_min")                 # «экстремум» DS: лонг закрывается при DS ≥ lxh, шорт — при DS ≤ sxl
+    dsx = backtest.ds_exit_checker(sigs, lx, sx, lxh, sxl) if any(x is not None for x in (lx, sx, lxh, sxl)) else None
+    ds_range = _ds_range(eff, warnings)
     if lx is not None and eff["side"] != "short" and eff.get("scalp_min") is not None and lx >= eff["scalp_min"] and eff["only"] != "local":
         warnings.append(f"Выход лонга по DS ≤ {lx:g} не ниже порога входа DS ≥ {eff['scalp_min']:g}: лонг, открытый при DS от {eff['scalp_min']:g} до {lx:g}, закроется уже на следующем отчёте")
     if sx is not None and eff["side"] != "long" and eff.get("short_scalp_max") is not None and sx <= eff["short_scalp_max"] and eff["only"] != "local":
         warnings.append(f"Выход шорта по DS ≥ {sx:g} не выше порога входа DS ≤ {eff['short_scalp_max']:g}: шорт, открытый при DS от {sx:g} до {eff['short_scalp_max']:g}, закроется уже на следующем отчёте")
     lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
     pend = []
-    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est)     # все подтверждённые сигналы (с пропущенными)
+    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est, ds_range=ds_range)     # все подтверждённые сигналы (с пропущенными)
     events = [e for e in confirmed if allow(*e)] if allow else confirmed
     levels = backtest.normalize_tps(tps)
     sl_market = bool(eff.get("sl_market"))
-    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm) if (eff.get("sl_hold_strong") or sl_market) else None
+    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm, ds_range) if (eff.get("sl_hold_strong") or sl_market) else None
     entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0,
                    "adds": bool(eff.get("entry_limit_adds") and pyramid)} if eff.get("entry_limit_pct") else None
     if eff.get("entry_limit_adds") and not (eff.get("entry_limit_pct") and pyramid):
@@ -617,7 +647,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
 
     rep = {s[0]: s for s in sigs}
-    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
+    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm, ds_range) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
     at = _metrics_at([s[0] for s in sigs_all], sigs_all, hold_chk)
     out_trades = [_trade_out(i, t, rep, at) for i, t in enumerate(trades, 1)]
 

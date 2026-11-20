@@ -135,6 +135,14 @@ def config_summary(cfg, result=None):
         bits.append(f"закрыть лонг при DS ≤ {p['exit_long_ds']:g}")
     if p.get("exit_short_ds") is not None:
         bits.append(f"закрыть шорт при DS ≥ {p['exit_short_ds']:g}")
+    if p.get("exit_long_ds_max") is not None:
+        bits.append(f"закрыть лонг при DS ≥ {p['exit_long_ds_max']:g} (экстремум)")
+    if p.get("exit_short_ds_min") is not None:
+        bits.append(f"закрыть шорт при DS ≤ {p['exit_short_ds_min']:g} (экстремум)")
+    if p.get("long_scalp_max") is not None:
+        bits.append(f"лонг только при DS ≤ {p['long_scalp_max']:g}")
+    if p.get("short_scalp_min") is not None:
+        bits.append(f"шорт только при DS ≥ {p['short_scalp_min']:g}")
     if p.get("liquidation_sim"):
         bits.append(f"ликвидация {p.get('maint_margin_pct', 0.5):g}%")
     if p.get("entry_limit_pct"):

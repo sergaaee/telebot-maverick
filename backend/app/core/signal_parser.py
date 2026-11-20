@@ -18,16 +18,20 @@ def parse_signal(text: str) -> Optional[dict]:
     return {"local": local, "scalp": scalp, "global": _find("Deep Global", text)}
 
 
-def should_long(sig: dict, local_min: float, scalp_min: float, global_min: Optional[float] = None) -> bool:
+def should_long(sig: dict, local_min: float, scalp_min: float, global_min: Optional[float] = None, scalp_max: Optional[float] = None) -> bool:
     """Условие лонга. global_min=None — Deep Global не учитывается; задан — нужен отчёт с Deep Global не ниже порога (нет значения — условие не выполнено)."""
     if global_min is not None and not (sig.get("global") is not None and sig["global"] >= global_min):
+        return False
+    if scalp_max is not None and sig["scalp"] > scalp_max:          # верхняя граница диапазона DS: выше — «экстремум», лонг не открываем
         return False
     return sig["local"] >= local_min and sig["scalp"] >= scalp_min
 
 
-def should_short(sig: dict, local_max: float, scalp_max: float, global_max: Optional[float] = None) -> bool:
-    """Условие шорта; global_max — то же для Deep Global (не выше порога)."""
+def should_short(sig: dict, local_max: float, scalp_max: float, global_max: Optional[float] = None, scalp_min: Optional[float] = None) -> bool:
+    """Условие шорта; global_max — то же для Deep Global (не выше порога). scalp_min — нижняя граница диапазона DS: ниже — «экстремум», шорт не открываем (None — без границы)."""
     if global_max is not None and not (sig.get("global") is not None and sig["global"] <= global_max):
+        return False
+    if scalp_min is not None and sig["scalp"] < scalp_min:
         return False
     return sig["local"] <= local_max and sig["scalp"] <= scalp_max
 
