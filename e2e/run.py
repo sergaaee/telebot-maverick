@@ -836,6 +836,30 @@ def scenario(pg, base, state_url):
     ds_l.locator("input").fill(""); ds_s.locator("input").fill("")
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
     check("очистка полей выключает закрытие по DS", pg.locator("table.trades tbody tr .tag-DS").count() == 0)
+    # диапазон DS для входа и «экстремум» для выхода (зеркальные поля: верхняя граница лонга, нижняя граница шорта, закрытие при экстремуме)
+    cap_l, floor_s = field(pg, "Scalp ≤ (верхняя граница)"), field(pg, "Scalp ≥ (нижняя граница)")
+    ex_hi, ex_lo = field(pg, "Закрыть лонг при Scalp ≥"), field(pg, "Закрыть шорт при Scalp ≤")
+    check("диапазон DS и экстремум: четыре поля пусты (выкл), у каждого «?»", all(f.locator("input").input_value() == "" and f.locator(".help").count() == 1 for f in (cap_l, floor_s, ex_hi, ex_lo)))
+    smin = cfg6["params"]["scalp_min"]
+    rng = lambda body: pg.evaluate("""(b) => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify(b)}).then(async r => ({status: r.status, j: await r.json()})).then(({status, j}) => ({status, detail: j.detail ?? null,
+        n: (j.trades || []).length, longs: (j.trades || []).filter(t => t.side === 'long').length, ds: (j.trades || []).filter(t => t.reason === 'DS').length, warn: j.warnings || [], params: j.params || null}))""", body)
+    r_base, r_cap = rng({}), rng({"long_scalp_max": smin})
+    check("API: верхняя граница входа лонга сужает диапазон до одной точки — лонговых входов меньше, остальное считается", r_base["status"] == r_cap["status"] == 200 and r_base["longs"] > 0 and r_cap["longs"] < r_base["longs"] and r_cap["params"]["long_scalp_max"] == smin, f"{r_base['longs']} -> {r_cap['longs']}")
+    r_ex = rng({"exit_long_ds_max": smin})
+    check("API: закрытие лонга при экстремуме (DS ≥ порога) даёт сделки с меткой DS и предупреждение о входе выше порога", r_ex["status"] == 200 and r_ex["ds"] > 0 and any("Выход лонга по DS ≥" in w for w in r_ex["warn"]), str(r_ex["ds"]))
+    check("API: согласованные граница входа и порог выхода — без предупреждения; пустой диапазон — отказ с понятным текстом",
+          not any("Выход лонга по DS ≥" in w for w in rng({"long_scalp_max": smin + 0.5, "exit_long_ds_max": smin + 0.5})["warn"]) and rng({"long_scalp_max": smin - 1})["status"] == 422 and "пустой" in rng({"long_scalp_max": smin - 1})["detail"])
+    ex_hi.locator("input").fill(str(smin)); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    check("поле «Закрыть лонг при Scalp ≥» из интерфейса: в таблице сделок появились закрытия DS", pg.locator("table.trades tbody tr .tag-DS").count() > 0)
+    cap_l.locator("input").fill(str(smin)); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3500)
+    with pg.expect_download() as dl7:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg7 = _json.loads(Path(dl7.value.path()).read_text(encoding="utf-8"))
+    check("в скачанном конфиге новые поля с введёнными значениями", cfg7["params"]["long_scalp_max"] == smin and cfg7["params"]["exit_long_ds_max"] == smin and cfg7["params"]["short_scalp_min"] is None and cfg7["params"]["exit_short_ds_min"] is None)
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(old_cfg))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("старый конфиг без этих полей: диапазон и экстремум выключены (поля пусты)", all(f.locator("input").input_value() == "" for f in (cap_l, floor_s, ex_hi, ex_lo)) and pg.locator("table.trades tbody tr .tag-DS").count() == 0)
 
     # --- страница мониторинга: все стратегии пользователя, подробности по клику, управление, автомод и тестовая позиция $1
     pg.wait_for_timeout(1500)                                         # состояние интерфейса сохраняется с задержкой 600 мс
@@ -1315,7 +1339,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 7, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 9, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

@@ -25,6 +25,8 @@ SAMPLES = 64
 
 # параметры, которые не влияют на сделки до расчёта размера позиции и топ-коинов — смена депозита и т.п. не сбрасывает снимок
 IGNORED = {"deposit", "compound", "funding_apr", "funding_period_h", "funding_mode"}
+# параметры, появившиеся позже: пока они не заданы (None), в ключ не входят — снимки конфигов, где их нет, остаются годными, а не считаются заново
+OFF_WHEN_NONE = {"long_scalp_max", "short_scalp_min", "exit_long_ds_max", "exit_short_ds_min"}
 
 
 def enabled():
@@ -32,7 +34,7 @@ def enabled():
 
 
 def make_key(eff, source_id, liq_id, symbol):
-    p = {k: v for k, v in eff.items() if k not in IGNORED and not k.startswith("top_")}
+    p = {k: v for k, v in eff.items() if k not in IGNORED and not k.startswith("top_") and not (k in OFF_WHEN_NONE and v is None)}
     p.update(_src=source_id, _liq=liq_id, _sym=symbol)
     return hashlib.sha1(json.dumps(p, sort_keys=True, default=str).encode()).hexdigest()
 

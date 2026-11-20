@@ -79,16 +79,18 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     return out, hit
 
 
-def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None):
-    """global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует.
+def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None, ds_range=None):
+    """ds_range — необязательный диапазон DS (Scalp): (верхняя граница для лонга, нижняя граница для шорта); None в элементе — без границы. Выше верхней границы лонг не открывается, ниже нижней — шорт.
+    global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует.
     pending — список, в который добавляются (ts, d, waiting): отчёты, где серия УЖЕ подтверждена, но вход ждёт фильтр; waiting = {"cool": …, "liq": …} с цифрами:
     чего не хватает (откат метрики / ликвидации). Фильтр тренда применяется снаружи (service), здесь его нет.
     state — необязательный словарь для докладывания новых отчётов: на выходе в нём лежит снимок состояния после последнего отчёта (state["n"] — сколько отчётов
     обработано); если на входе в нём уже есть снимок (и первые state["n"] отчётов не изменились — это проверяет вызывающий), обрабатываются только отчёты после него,
     а результат тот же, что при расчёте с нуля: каждый отчёт зависит только от предыдущих."""
-    sides = [(1, lambda s: should_long(s, local_min, scalp_min, global_min))]
+    long_cap, short_floor = ds_range or (None, None)
+    sides = [(1, lambda s: should_long(s, local_min, scalp_min, global_min, long_cap))]
     if short is not None:
-        sides.append((-1, lambda s: should_short(s, *short, short_global_max)))
+        sides.append((-1, lambda s: should_short(s, *short, short_global_max, short_floor)))
     st = {d: {"streak": 0, "ext": None, "prev": None, "dec": 0} for d, _ in sides}
     window = {1: deque(), -1: deque()}   # монотонная очередь для скользящего максимума
     past = {1: [], -1: []}               # отсортированные прошлые значения ликвидаций

@@ -320,8 +320,8 @@ class MonitorUI:
             p = e.get("params") or {}
             tps = " / ".join(f"{t['pct']:g}%×{t['share']:g}" for t in p.get("tps", []))
             body = (f"⚙️ {title}\n{esc(str(p.get('source')))} · {esc(str(p.get('symbol')))} · сторона {p.get('side')} · метрика {p.get('only') or 'Local+Scalp'}\n"
-                    f"Лонг: DL ≥ {p.get('local_min')} · DS ≥ {p.get('scalp_min')}" + (f" · DG ≥ {p['global_min']}" if p.get("global_min") is not None else "") + "\n"
-                    f"Шорт: DL ≤ {p.get('short_local_max')} · DS ≤ {p.get('short_scalp_max')}" + (f" · DG ≤ {p['short_global_max']}" if p.get("short_global_max") is not None else "") + "\n"
+                    f"Лонг: DL ≥ {p.get('local_min')} · DS ≥ {p.get('scalp_min')}" + (f" и ≤ {p['long_scalp_max']:g}" if p.get("long_scalp_max") is not None else "") + (f" · DG ≥ {p['global_min']}" if p.get("global_min") is not None else "") + "\n"
+                    f"Шорт: DL ≤ {p.get('short_local_max')} · DS ≤ {p.get('short_scalp_max')}" + (f" и ≥ {p['short_scalp_min']:g}" if p.get("short_scalp_min") is not None else "") + (f" · DG ≤ {p['short_global_max']}" if p.get("short_global_max") is not None else "") + "\n"
                     f"Подтверждение {p.get('confirm')} · остывание "
                     + (f"откат {p['cool_drop']}" if p.get("cool_drop") is not None else f"{p['cool_declines']} подряд" if p.get("cool_declines") is not None else "выкл")
                     + f" · ликвидации {'вкл' if p.get('liq_hours') is not None else 'выкл'} · тренд {'вкл' if p.get('trend_enabled') else 'выкл'}\n"
