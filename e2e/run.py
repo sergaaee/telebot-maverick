@@ -414,8 +414,8 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Фильтр: тренд (EMA)").click() if "▸" in pg.get_by_role("button", name="Фильтр: тренд (EMA)").inner_text() else None
     field(pg, "торговать только по тренду").locator("input").check()
     emas = pg.locator(".ema-row input")
-    check("предложены EMA 20/50/100/200, по умолчанию 50 и 200", pg.locator(".ema-row label").all_inner_texts() == ["20", "50", "100", "200"] and [emas.nth(i).is_checked() for i in range(4)] == [False, True, False, True])
-    emas.nth(3).uncheck(); emas.nth(0).check()
+    check("предложены EMA 5/10/20/50/100/200, по умолчанию 50 и 200", pg.locator(".ema-row label").all_inner_texts() == ["5", "10", "20", "50", "100", "200"] and [emas.nth(i).is_checked() for i in range(6)] == [False, False, False, True, False, True])
+    emas.nth(5).uncheck(); emas.nth(2).check()                       # 200 выкл, 20 вкл
     n_before = rows.count()
     pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
     chip = pg.locator(".chip", has_text="тренд:")
@@ -423,9 +423,16 @@ def scenario(pg, base, state_url):
     api_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({trend_enabled: true, trend_emas: [20, 50], trend_tf: '1h'})}).then(r => r.json())""")
     base_t = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({trend_enabled: false})}).then(r => r.json())""")
     check("API: с трендом сделок не больше, отсечённые сигналы помечены", len(api_t["trades"]) <= len(base_t["trades"]) and api_t["trend"]["blocked"] > 0 and not any(s["taken"] and s["trend_blocked"] for s in api_t["signals"]), str(api_t["trend"]))
+    # короткие EMA 5 и 10: выбираются в интерфейсе, расчёт идёт, быстрый фильтр режет не меньше, чем медленный (цена должна быть выше/ниже ВСЕХ выбранных)
+    emas.nth(2).uncheck(); emas.nth(3).uncheck(); emas.nth(0).check(); emas.nth(1).check()
+    pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    chip5 = pg.locator(".chip", has_text="тренд:")
+    api_f = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({trend_enabled: true, trend_emas: [5, 10], trend_tf: '1h'})}).then(r => r.json()).then(j => ({trades: j.trades.length, trend: j.trend, ok: j.trades.length >= 0}))""")
+    api_bad = pg.evaluate("""() => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({trend_enabled: true, trend_emas: [7]})}).then(r => r.status)""")
+    check("EMA 5 и 10: расчёт идёт, чип «тренд» виден, API принимает 5 и 10 и отвергает прочие периоды", chip5.count() == 1 and api_f["trend"]["enabled"] and api_f["trades"] <= len(base_t["trades"]) and api_bad == 422, str(api_f["trend"]))
     emas.nth(0).uncheck(); emas.nth(1).uncheck()
     check("без выбранных EMA запуск заблокирован", pg.get_by_role("button", name="Исправьте тейки").is_disabled() or pg.locator("button.run").is_disabled())
-    emas.nth(1).check(); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(2500)
+    emas.nth(3).check(); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(2500)
 
     # --- депозит, доля на сделку, плечо, Шарп
     check("в статистике есть коэффициент Шарпа", pg.locator(".card-label", has_text="Коэф. Шарпа").count() == 1 and pg.locator(".card-label", has_text="Коэф. Шарпа").locator("xpath=following-sibling::div[1]").inner_text() != "")
@@ -462,7 +469,7 @@ def scenario(pg, base, state_url):
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
     toast_txt = " ".join(pg.locator(".toast").all_inner_texts())
     check("конфиг применён: поля обновились", num(pg, "Плечо").input_value() == "3" and num(pg, "Стоп-лосс").first.input_value() == "9"
-          and pg.locator(".tp-row").count() >= 2 and [pg.locator(".ema-row input").nth(i).is_checked() for i in range(4)] == [True, False, True, False])
+          and pg.locator(".tp-row").count() >= 2 and [pg.locator(".ema-row input").nth(i).is_checked() for i in range(6)] == [False, False, True, False, True, False])
     check("уведомление: актив не найден, неизвестное поле пропущено", "NOPE/USDT:USDT" in toast_txt and "bogus_field" in toast_txt, toast_txt[:200])
     check("актив остался текущим, бэктест пересчитан", field(pg, "Актив").locator("select").input_value() == "BTC/USDT:USDT" and pg.locator("table.trades tbody tr").count() > 0)
     # вернуть исходные значения этого теста
@@ -1339,7 +1346,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 9, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 10, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

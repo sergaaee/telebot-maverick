@@ -76,7 +76,7 @@ class BacktestParams(BaseModel):
     sl_market: Optional[bool] = Field(None, description="стоп-лосс по маркету: стоп-ордера нет; цена дошла до стопа — ждём следующий отчёт, и если метрики ниже порогов входа, а цена всё ещё за стопом, закрываем по рынку")
     # торговля только по тренду (EMA на таймфрейме trend_tf)
     trend_enabled: Optional[bool] = None
-    trend_emas: Optional[list[Literal[20, 50, 100, 200]]] = Field(None, min_length=1, max_length=4)
+    trend_emas: Optional[list[Literal[5, 10, 20, 50, 100, 200]]] = Field(None, min_length=1, max_length=6)
     trend_tf: Optional[Literal["5m", "15m", "30m", "1h", "4h", "1d"]] = None
     # топ-коины
     top_enabled: Optional[bool] = None

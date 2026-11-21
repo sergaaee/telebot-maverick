@@ -23,6 +23,21 @@ def test_trend_up_and_down_no_lookahead():
     assert a(T0 + 60 * H, 1)                                    # закрылась
 
 
+def test_short_emas_5_and_10_warm_up_fast_and_react_before_the_slow_ones():
+    end = lambda k: T0 + (k + 1) * H                                                                # момент закрытия свечи k
+    up = _c([100 + i for i in range(30)])
+    allow = build_trend(up, "1h", [5, 10])
+    assert not allow(end(8), 1) and allow(end(10), 1) and not allow(end(10), -1)                    # прогрев — по самой длинной EMA (10 свечей), а не по 200
+    bounce = _c([100 + i for i in range(80)] + [179 - 3 * i for i in range(10)])                     # долгий рост, потом откат на 3 за свечу
+    fast, slow = build_trend(bounce, "1h", [5, 10]), build_trend(bounce, "1h", [20, 50])
+    assert fast(end(80), 1) and slow(end(80), 1)                                                    # на вершине обе пары за лонг
+    assert not fast(end(81), 1) and slow(end(81), 1)                                                # первая свеча отката: быстрые EMA уже против лонга, медленные ещё нет
+    assert fast(end(82), -1) and not slow(end(82), -1) and slow(end(82), 1)                         # быстрые разрешают шорт, медленные всё ещё лонг
+    assert slow(end(87), -1) and not slow(end(87), 1)                                               # медленные догоняют позже
+    both = build_trend(bounce, "1h", [5, 10, 20, 50])
+    assert both(end(80), 1) and not both(end(82), 1) and not both(end(82), -1)                      # вместе: цена должна быть по одну сторону от ВСЕХ
+
+
 def test_trend_aggregates_minutes():
     m = [(T0 + i * M, 100 + i / 60, 0, 0, 100 + i / 60) for i in range(60 * 30)]     # 30 часов минуток, рост
     allow = build_trend(m, "1h", [20])
@@ -40,6 +55,10 @@ def test_api_trend_filter(client):  # noqa: F811
     assert all(not s["taken"] for s in j["signals"] if s["trend_blocked"])
     assert sum(s["trend_blocked"] for s in j["signals"]) == j["trend"]["blocked"]
     assert client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": [30]}).status_code == 422
+    assert client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": [7]}).status_code == 422                       # допустимы только 5, 10, 20, 50, 100, 200
+    fast = client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": [5, 10], "trend_tf": "5m"})
+    assert fast.status_code == 200 and fast.json()["trend"]["enabled"]
+    assert client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": [5, 10, 20, 50, 100, 200], "trend_tf": "5m"}).status_code == 200
     assert client.post("/api/backtest", json={"trend_enabled": True, "trend_emas": []}).status_code == 422
     assert client.post("/api/backtest", json={"trend_enabled": True, "trend_tf": "2h"}).status_code == 422
 
