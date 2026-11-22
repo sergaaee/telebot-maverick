@@ -6,6 +6,8 @@ export interface TpLevel {
   share: number;
 }
 export type Only = 'local' | 'scalp' | 'global' | null;
+/** режим входа: deep — по порогам Deep; coin_index — только лонг по монете из блока Top Coin отчёта (только бэктест) */
+export type EntryMode = 'deep' | 'coin_index';
 
 /** Параметры, как их отдаёт и принимает бэкенд (fee/slip — доли, не проценты). */
 export interface Params {
@@ -81,6 +83,10 @@ export interface Params {
   exit_long_ds: number | null;
   /** закрыть шорт, когда в новом отчёте DS (Scalp) не ниже значения; null — не закрывать по DS */
   exit_short_ds: number | null;
+  /** режим входа; в старых сохранённых настройках поля нет — считается «deep» */
+  entry_mode: EntryMode;
+  /** режим coin_index: порог Coin Index (число справа от монеты в блоке Top Coin) */
+  coin_index_min: number | null;
   /** верхняя граница DS (Scalp) для входа в лонг (диапазон «Scalp ≥ … ≤ эта граница»); null — без границы */
   long_scalp_max: number | null;
   /** нижняя граница DS (Scalp) для входа в шорт; null — без границы */
@@ -348,6 +354,8 @@ export interface BacktestResult {
   monthly: { month: string; trades: number; pnl_usd: number; wins: number }[];
   top: TopSection;
   trend: { enabled: boolean; blocked: number; confirmed: number };
+  /** сводка режима Coin Index (null в обычном режиме): монета, порог, сколько отчётов с монетой и сколько проходят порог */
+  coin_index: { coin: string; min: number; reports: number; with_coin: number; passing: number; max: number | null; min_seen: number | null } | null;
 }
 
 export interface TopSkipped {

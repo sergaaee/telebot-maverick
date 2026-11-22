@@ -58,6 +58,36 @@ def effective_params(defaults: dict, p: BacktestParams) -> dict:
     return eff
 
 
+def _coin_index_entry(store, eff, source_id, symbol, sigs, warnings):
+    """Режим Coin Index: условие входа в лонг «выбранная монета есть в блоке Top Coin отчёта и её Coin Index не ниже порога» вместо порогов Deep.
+    -> (функция условия для генератора входов, сводка для интерфейса: монета, порог, сколько отчётов с монетой и сколько из них проходят порог).
+    Монета — основной актив бэктеста (symbol): ищутся отчёты, где она есть среди ВСЕХ строк блока, а не только в первой."""
+    cmin = eff.get("coin_index_min")
+    if cmin is None:
+        raise ParamError("Режим Coin Index: задайте порог «Coin Index ≥» (число справа от монеты в блоке Top Coin отчёта)")
+    coin = topcoins.coin_key(symbol)
+    if not coin:
+        raise ParamError("Режим Coin Index: не удалось определить монету по активу " + str(symbol))
+    try:
+        rows = store.coin_rows(source_id)
+    except FileNotFoundError as e:
+        raise ParamError(str(e))
+    value = {}                                                      # время отчёта -> Coin Index выбранной монеты (при повторе в блоке — наибольший)
+    for ts, lst in rows.items():
+        vals = [v for c, v in lst if c == coin]
+        if vals:
+            value[ts] = max(vals)
+    mine = [value[s[0]] for s in sigs if s[0] in value]
+    passing = [v for v in mine if v >= cmin]
+    info = {"coin": coin, "min": cmin, "reports": len(sigs), "with_coin": len(mine), "passing": len(passing),
+            "max": max(mine) if mine else None, "min_seen": min(mine) if mine else None}
+    if not mine:
+        warnings.append(f"Режим Coin Index: монета {coin} ни разу не встречается в блоке Top Coin отчётов выбранного источника (за выбранный период) — входов не будет")
+    elif not passing:
+        warnings.append(f"Режим Coin Index: монета {coin} есть в {len(mine)} отчётах, но её Coin Index ни разу не достигает {cmin:g} (максимум {max(mine):g}) — входов не будет")
+    return (lambda s: value.get(s["ts"], -math.inf) >= cmin), info
+
+
 def _ds_range(eff, warnings):
     """Диапазон DS (Scalp) для входа и «экстремум» для выхода -> (верхняя граница лонга, нижняя граница шорта) для генератора входов. Границы, не имеющие смысла при выбранной стороне и метрике, не применяются.
     Пустой диапазон и противоречивые пороги выхода — ParamError; сочетания, при которых позиция закрывалась бы на следующем же отчёте, — предупреждение."""
@@ -494,6 +524,14 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     if not candles:
         raise ParamError("В выбранном диапазоне дат нет свечей")
 
+    eff_in = eff                                                      # что прислал пользователь — в ответе параметры показываются как есть
+    long_pred, coin_info = None, None
+    if eff.get("entry_mode") == "coin_index":
+        long_pred, coin_info = _coin_index_entry(store, eff, source_id, symbol, sigs, warnings)
+        if eff.get("top_enabled"):
+            warnings.append("Режим Coin Index: «Топ-коины» отключены — сделки идут по выбранной монете")
+        eff = {**eff, "side": "long", "only": None, "top_enabled": False, "global_min": None, "short_global_max": None}       # только лонг; пороги Deep и режим «метрика» не участвуют
+
     extra, liq, cool = _filters(eff)
     if liq and not any(s[3] is not None for s in sigs):
         raise ParamError("Для фильтра ликвидаций нет данных: выберите «Ликвидации из» источник, где они есть")
@@ -551,18 +589,20 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     lx, sx = eff.get("exit_long_ds"), eff.get("exit_short_ds")
     lxh, sxl = eff.get("exit_long_ds_max"), eff.get("exit_short_ds_min")                 # «экстремум» DS: лонг закрывается при DS ≥ lxh, шорт — при DS ≤ sxl
     dsx = backtest.ds_exit_checker(sigs, lx, sx, lxh, sxl) if any(x is not None for x in (lx, sx, lxh, sxl)) else None
-    ds_range = _ds_range(eff, warnings)
-    if lx is not None and eff["side"] != "short" and eff.get("scalp_min") is not None and lx >= eff["scalp_min"] and eff["only"] != "local":
+    ds_range = None if long_pred else _ds_range(eff, warnings)           # границы DS для входа — только в обычном режиме
+    if long_pred:
+        pass                                                        # предупреждения о порогах входа по DS ниже к режиму Coin Index не относятся
+    elif lx is not None and eff["side"] != "short" and eff.get("scalp_min") is not None and lx >= eff["scalp_min"] and eff["only"] != "local":
         warnings.append(f"Выход лонга по DS ≤ {lx:g} не ниже порога входа DS ≥ {eff['scalp_min']:g}: лонг, открытый при DS от {eff['scalp_min']:g} до {lx:g}, закроется уже на следующем отчёте")
-    if sx is not None and eff["side"] != "long" and eff.get("short_scalp_max") is not None and sx <= eff["short_scalp_max"] and eff["only"] != "local":
+    if not long_pred and sx is not None and eff["side"] != "long" and eff.get("short_scalp_max") is not None and sx <= eff["short_scalp_max"] and eff["only"] != "local":
         warnings.append(f"Выход шорта по DS ≥ {sx:g} не выше порога входа DS ≤ {eff['short_scalp_max']:g}: шорт, открытый при DS от {sx:g} до {eff['short_scalp_max']:g}, закроется уже на следующем отчёте")
     lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
     pend = []
-    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est, ds_range=ds_range)     # все подтверждённые сигналы (с пропущенными)
+    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est, ds_range=ds_range, long_pred=long_pred)     # все подтверждённые сигналы (с пропущенными)
     events = [e for e in confirmed if allow(*e)] if allow else confirmed
     levels = backtest.normalize_tps(tps)
     sl_market = bool(eff.get("sl_market"))
-    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm, ds_range) if (eff.get("sl_hold_strong") or sl_market) else None
+    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm, ds_range, long_pred) if (eff.get("sl_hold_strong") or sl_market) else None
     entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0,
                    "adds": bool(eff.get("entry_limit_adds") and pyramid)} if eff.get("entry_limit_pct") else None
     if eff.get("entry_limit_adds") and not (eff.get("entry_limit_pct") and pyramid):
@@ -647,7 +687,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
 
     rep = {s[0]: s for s in sigs}
-    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm, ds_range) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
+    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm, ds_range, long_pred) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
     at = _metrics_at([s[0] for s in sigs_all], sigs_all, hold_chk)
     out_trades = [_trade_out(i, t, rep, at) for i, t in enumerate(trades, 1)]
 
@@ -676,7 +716,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
     top = _top_section(store, eff, confirmed, rep, available_fn, now_ms, warnings, at)
     src = store.source(source_id)
     return _clean({
-        "params": eff,
+        "params": eff_in,
         "symbol": symbol,
         "source": {"id": src.id, "label": src.label, "liq_source": liq_id if liq_id and liq_id != source_id else None},
         "warnings": warnings,
@@ -703,6 +743,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         "monthly": list(monthly.values()),
         "top": top,
         "trend": {"enabled": bool(allow), "blocked": trend_blocked, "confirmed": len(confirmed)},
+        "coin_index": coin_info,
     })
 
 

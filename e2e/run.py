@@ -867,6 +867,48 @@ def scenario(pg, base, state_url):
     pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(old_cfg))
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
     check("старый конфиг без этих полей: диапазон и экстремум выключены (поля пусты)", all(f.locator("input").input_value() == "" for f in (cap_l, floor_s, ex_hi, ex_lo)) and pg.locator("table.trades tbody tr .tag-DS").count() == 0)
+    # --- режим входа «Coin Index монеты»: лонг по выбранной монете в отчётах, где она есть в блоке Top Coin (только бэктест)
+    cx = lambda body: pg.evaluate("""(b) => fetch('/api/backtest', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify(b)}).then(async r => ({status: r.status, j: await r.json()})).then(({status, j}) => ({status, detail: j.detail ?? null,
+        n: (j.trades || []).length, shorts: (j.trades || []).filter(t => t.side === 'short').length, warn: j.warnings || [], ci: j.coin_index ?? null, top: j.top ? j.top.enabled : null}))""", body)
+    mode = pg.get_by_test_id("entry-mode")
+    tid_ = E2E_DB.check_login("tester", USER_PASS)["id"]
+    dbg = lambda: f"mode={mode.input_value()} help={field(pg, 'Вход по').locator('.help').count()} side={field(pg, 'Сторона').count()} local={field(pg, 'Local ≥').count()} short={pg.get_by_role('button', name='Шорт: Deep ≤').count()} note={pg.get_by_test_id('coin-mode-note').count()}"
+    check("режим входа: по умолчанию «Deep», видны сторона, метрика, пороги лонга и шорта; у выбора «?»", mode.input_value() == "deep" and field(pg, "Вход по").locator(".help").count() == 1 and field(pg, "Сторона").count() >= 1
+          and field(pg, "Local ≥").count() >= 1 and pg.get_by_role("button", name="Шорт: Deep ≤").count() == 1 and pg.get_by_test_id("coin-mode-note").count() == 0, dbg())
+    deep_n = cx({"source": "binance"})
+    c_all = cx({"source": "binance", "entry_mode": "coin_index", "coin_index_min": 1, "confirm": 1, "side": "short", "top_enabled": True})
+    c_none = cx({"source": "binance", "entry_mode": "coin_index", "coin_index_min": 1.5, "confirm": 1})
+    check("API: монета BTC (вторая строка блока, 1.02) проходит порог 1 в каждом отчёте — только лонги, пороги Deep и сторона не используются, топ-коины отключены",
+          c_all["status"] == 200 and c_all["n"] > 0 and c_all["shorts"] == 0 and c_all["ci"]["coin"] == "BTC" and c_all["ci"]["with_coin"] == c_all["ci"]["passing"] >= c_all["ci"]["reports"] - 1 and c_all["top"] is False and any("«Топ-коины» отключены" in w for w in c_all["warn"]), str(c_all["ci"]))
+    check("API: порог выше максимума (1.02) — входов нет, предупреждение называет максимум; обычный режим не изменился", c_none["status"] == 200 and c_none["n"] == 0 and any("ни разу не достигает" in w and "1.02" in w for w in c_none["warn"]) and c_none["ci"]["passing"] == 0 and deep_n["ci"] is None and deep_n["n"] > 0, str(c_none["warn"]))
+    check("API: без порога — понятный отказ", cx({"source": "binance", "entry_mode": "coin_index"})["status"] == 422 and "Coin Index" in cx({"source": "binance", "entry_mode": "coin_index"})["detail"])
+    side_n, metric_n = field(pg, "Сторона").count(), field(pg, "Метрика").count()               # такие же подписи есть и у других полей (топ-коины, остывание) — сравниваем «было / стало»
+    mode.select_option("coin_index")
+    check("режим Coin Index: поле «Coin Index ≥» с «?» и пояснение; сторона, метрика, пороги Deep и шорт скрыты, выход по DS остался",
+          field(pg, "Coin Index ≥").locator(".help").count() == 1 and pg.get_by_test_id("coin-mode-note").is_visible() and "BTC" in pg.get_by_test_id("coin-mode-note").inner_text()
+          and field(pg, "Сторона").count() == side_n - 1 and field(pg, "Метрика").count() == metric_n - 1 and field(pg, "Local ≥").count() == 0 and pg.get_by_role("button", name="Шорт: Deep ≤").count() == 0
+          and field(pg, "Закрыть лонг при Scalp ≤").count() == 1 and field(pg, "Закрыть лонг при Scalp ≥").count() == 1, dbg())
+    num(pg, "Coin Index ≥").fill("1"); num(pg, "Подтверждение, отчётов").fill("1")
+    pg.get_by_role("button", name="Запустить").click(); pg.get_by_test_id("coin-index-chip").wait_for(timeout=30000); pg.wait_for_timeout(1500)
+    chip_txt = pg.get_by_test_id("coin-index-chip").inner_text()
+    check("запуск в режиме Coin Index: над графиком сводка (монета, порог, отчётов с монетой), в таблице есть сделки",
+          "BTC" in chip_txt and "≥ 1" in chip_txt and "проходят порог" in chip_txt and pg.locator("table.trades tbody tr").count() > 0, chip_txt)
+    pg.wait_for_timeout(1500)
+    pg.reload(); pg.wait_for_selector("table.trades tbody tr", timeout=30000); pg.wait_for_timeout(800)
+    check("режим и порог запомнились на сервере (после перезагрузки)", pg.get_by_test_id("entry-mode").input_value() == "coin_index" and num(pg, "Coin Index ≥").input_value() == "1")
+    with pg.expect_download() as dl8:
+        pg.get_by_role("button", name="Скачать конфиг").click()
+    cfg8 = _json.loads(Path(dl8.value.path()).read_text(encoding="utf-8"))
+    check("в скачанном конфиге режим и порог", cfg8["params"]["entry_mode"] == "coin_index" and cfg8["params"]["coin_index_min"] == 1)
+    n_cfg = len(E2E_DB.list_configs(tid_))
+    pg.get_by_test_id("cfg-to-monitor").click(); pg.locator(".src-info", has_text="только в бэктесте").wait_for(timeout=10000)
+    check("«В мониторинг» в этом режиме: понятный отказ, конфиг не создан", len(E2E_DB.list_configs(tid_)) == n_cfg)
+    imp = pg.evaluate("""(t) => fetch('/api/monitor/configs/import', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({text: t})}).then(async r => ({status: r.status, detail: (await r.json()).detail}))""", _json.dumps(cfg8))
+    check("импорт такого конфига в мониторинг через API отклоняется (лайв пока не поддерживается)", imp["status"] == 422 and "только в бэктесте" in imp["detail"] and len(E2E_DB.list_configs(tid_)) == n_cfg, str(imp))
+    pg.get_by_role("button", name="Загрузить…").click()
+    pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(old_cfg))
+    pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
+    check("старый конфиг без поля режима: «Deep», все пороги на месте, сводки Coin Index нет", pg.get_by_test_id("entry-mode").input_value() == "deep" and field(pg, "Local ≥").count() == 1 and pg.get_by_test_id("coin-index-chip").count() == 0)
 
     # --- страница мониторинга: все стратегии пользователя, подробности по клику, управление, автомод и тестовая позиция $1
     pg.wait_for_timeout(1500)                                         # состояние интерфейса сохраняется с задержкой 600 мс
@@ -1346,7 +1388,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 10, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 13, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

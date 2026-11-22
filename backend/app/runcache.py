@@ -35,6 +35,9 @@ def enabled():
 
 def make_key(eff, source_id, liq_id, symbol):
     p = {k: v for k, v in eff.items() if k not in IGNORED and not k.startswith("top_") and not (k in OFF_WHEN_NONE and v is None)}
+    if (eff.get("entry_mode") or "deep") == "deep":                 # обычный режим: поля режима Coin Index в ключ не входят (старые снимки остаются годными)
+        p.pop("entry_mode", None)
+        p.pop("coin_index_min", None)
     p.update(_src=source_id, _liq=liq_id, _sym=symbol)
     return hashlib.sha1(json.dumps(p, sort_keys=True, default=str).encode()).hexdigest()
 

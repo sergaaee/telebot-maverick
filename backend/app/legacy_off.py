@@ -1,5 +1,5 @@
 """Конфиги, сохранённые до появления некоторых возможностей, не содержат их полей: такие поля считаются ВЫКЛЮЧЕННЫМИ (а не берутся из умолчаний .env),
 чтобы результат старого конфига не менялся. Новые конфиги при загрузке фиксируют все поля явно. Общий список для бота и мониторинга."""
 LEGACY_OFF = {"pyramid_enabled": False, "pyramid_avg": False, "signal_gap_h": 0.0, "sl_hold_strong": False, "sl_market": False, "pyramid_move_pct": 0.0, "pyramid_move_dir": "any",
-              "pyramid_leverage": None, "liquidation_sim": False, "weekdays_only": False, "friday_close_before_min": 0.0, "exit_long_ds": None, "exit_short_ds": None, "long_scalp_max": None, "short_scalp_min": None, "exit_long_ds_max": None, "exit_short_ds_min": None,
+              "pyramid_leverage": None, "liquidation_sim": False, "weekdays_only": False, "friday_close_before_min": 0.0, "exit_long_ds": None, "exit_short_ds": None, "entry_mode": "deep", "coin_index_min": None, "long_scalp_max": None, "short_scalp_min": None, "exit_long_ds_max": None, "exit_short_ds_min": None,
               "global_min": None, "short_global_max": None, "entry_limit_pct": 0.0, "entry_limit_dir": "pullback", "entry_limit_ttl_h": 4.0, "entry_limit_adds": False, "funding_apr": 0.0, "funding_period_h": 8, "funding_mode": "signed"}

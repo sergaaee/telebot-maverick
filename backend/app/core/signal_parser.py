@@ -54,6 +54,27 @@ def parse_liquidation(text: str) -> Optional[dict]:
     return {"long": float(m.group(1).replace(",", ".")), "short": float(m.group(2).replace(",", "."))} if m else None
 
 
+def parse_top_coins(text: str, limit: int = 30) -> list:
+    """ВСЕ строки блока Top Coin (он же «Coin Index»): 'TIA-USD | 10.12' -> [{'coin': 'TIA-USD', 'value': 10.12}, ...] в порядке отчёта. Блок кончается на первой строке не в формате «монета | число»;
+    разделитель-«тире» под заголовком пропускается. Нет блока — пустой список."""
+    m = re.search(r"(?:top\s*coin|coin\s*index)[^\n]*\n", text or "", re.IGNORECASE)
+    if not m:
+        return []
+    rows, skipped = [], 0
+    for line in text[m.end():].splitlines():
+        s = line.strip()
+        row = re.match(rf"^([A-Za-z0-9._-]+)\s*\|\s*{_NUM}", s)
+        if row:
+            rows.append({"coin": row.group(1).upper(), "value": float(row.group(2).replace(",", "."))})
+            if len(rows) >= limit:
+                break
+        elif rows or (s and skipped >= 2):
+            break                                                   # блок кончился (или перед ним слишком много постороннего)
+        elif s:
+            skipped += 1                                            # разделитель под заголовком
+    return rows
+
+
 def parse_top_coin(text: str) -> Optional[dict]:
     """Топ-коин отчёта — первая строка блока Top Coin: 'TIA-USD      | 10.12' -> {'coin': 'TIA-USD', 'value': 10.12}.
     Встречаются разные написания тикера: TIA-USD (Coinbase), BANKUSDT (Binance)."""
