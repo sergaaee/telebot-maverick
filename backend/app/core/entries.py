@@ -79,8 +79,9 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     return out, hit
 
 
-def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None, ds_range=None, long_pred=None):
+def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None, ds_range=None, long_pred=None, gate=None):
     """ds_range — необязательный диапазон DS (Scalp): (верхняя граница для лонга, нижняя граница для шорта); None в элементе — без границы. Выше верхней границы лонг не открывается, ниже нижней — шорт.
+    gate — необязательный дополнительный фильтр для обеих сторон («И»): функция от отчёта {local, scalp, global, ts} -> bool (режим «Deep + Coin Index»: монета есть в блоке Top Coin с нужным значением).
     long_pred — необязательное СВОЁ условие входа в лонг вместо порогов Deep (режим Coin Index): функция от отчёта {local, scalp, global, ts} -> bool; шорт в этом режиме задаёт вызывающий (short=None).
     global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует.
     pending — список, в который добавляются (ts, d, waiting): отчёты, где серия УЖЕ подтверждена, но вход ждёт фильтр; waiting = {"cool": …, "liq": …} с цифрами:
@@ -92,6 +93,8 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
     sides = [(1, long_pred or (lambda s: should_long(s, local_min, scalp_min, global_min, long_cap)))]
     if short is not None:
         sides.append((-1, lambda s: should_short(s, *short, short_global_max, short_floor)))
+    if gate is not None:
+        sides = [(d, (lambda s, f=f: f(s) and gate(s))) for d, f in sides]
     st = {d: {"streak": 0, "ext": None, "prev": None, "dec": 0} for d, _ in sides}
     window = {1: deque(), -1: deque()}   # монотонная очередь для скользящего максимума
     past = {1: [], -1: []}               # отсортированные прошлые значения ликвидаций

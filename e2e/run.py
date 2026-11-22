@@ -909,6 +909,28 @@ def scenario(pg, base, state_url):
     pg.get_by_label("Конфиг для загрузки").fill(_json.dumps(old_cfg))
     pg.get_by_role("button", name="Применить и запустить").click(); pg.wait_for_timeout(3500)
     check("старый конфиг без поля режима: «Deep», все пороги на месте, сводки Coin Index нет", pg.get_by_test_id("entry-mode").input_value() == "deep" and field(pg, "Local ≥").count() == 1 and pg.get_by_test_id("coin-index-chip").count() == 0)
+    # --- третий режим: «Deep + Coin Index монеты» — обычные пороги Deep (обе стороны) И монета из блока Top Coin этого же отчёта
+    dc_all = cx({"source": "binance", "entry_mode": "deep_coin", "coin_index_min": 1})
+    dc_none = cx({"source": "binance", "entry_mode": "deep_coin", "coin_index_min": 1.5})
+    check("API: Deep + Coin Index при пороге, который BTC (1.02) проходит в каждом отчёте, даёт сделки обычного Deep (обе стороны остаются); сводка называет режим",
+          dc_all["status"] == 200 and dc_all["n"] > 0 and abs(dc_all["n"] - deep_n["n"]) <= 1 and abs(dc_all["shorts"] - deep_n["shorts"]) <= 1 and dc_all["ci"]["mode"] == "deep_coin"
+          and dc_all["ci"]["deep_reports"] > 0 and dc_all["ci"]["deep_with_coin"] >= dc_all["ci"]["deep_reports"] - 1, f"{deep_n['n']} -> {dc_all['n']} {dc_all['ci']}")
+    check("API: порог выше максимума монеты (1.5 при 1.02) — входов нет, предупреждение с максимумом", dc_none["status"] == 200 and dc_none["n"] == 0 and any("ни разу не достигает" in w and "1.02" in w for w in dc_none["warn"]), str(dc_none["warn"]))
+    mode.select_option("deep_coin")
+    check("«Deep + Coin Index»: поле «Coin Index ≥» с «?», пояснение; сторона, метрика и пороги Deep на месте (в отличие от режима «Coin Index монеты»)",
+          field(pg, "Coin Index ≥").locator(".help").count() == 1 and pg.get_by_test_id("coin-mode-note").is_visible() and "Deep" in pg.get_by_test_id("coin-mode-note").inner_text()
+          and field(pg, "Сторона").count() == side_n and field(pg, "Метрика").count() == metric_n and field(pg, "Local ≥").count() == 1 and pg.get_by_role("button", name="Шорт: Deep ≤").count() == 1, dbg())
+    num(pg, "Coin Index ≥").fill("1")
+    pg.get_by_role("button", name="Запустить").click(); pg.get_by_test_id("coin-index-chip").wait_for(timeout=30000); pg.wait_for_timeout(1500)
+    chip3 = pg.get_by_test_id("coin-index-chip").inner_text()
+    check("запуск в режиме Deep + Coin Index: сводка над графиком называет режим и считает отчёты, где Deep подходит, в таблице есть сделки",
+          chip3.startswith("Deep + Coin Index BTC ≥ 1") and "Deep подходит в" in chip3 and pg.locator("table.trades tbody tr").count() > 0, chip3)
+    pg.get_by_test_id("cfg-to-monitor").click(); pg.locator(".src-info", has_text="только в бэктесте").wait_for(timeout=10000)
+    cfg9 = pg.evaluate("""() => ({entry_mode: 'deep_coin', coin_index_min: 1})""")
+    imp3 = pg.evaluate("""(t) => fetch('/api/monitor/configs/import', {method:'POST', headers:{'content-type':'application/json','x-maverick':'1'}, body: JSON.stringify({text: t})}).then(async r => ({status: r.status, detail: (await r.json()).detail}))""", _json.dumps({"format": "maverick-config", "params": {**cfg8["params"], **cfg9}}))
+    check("«В мониторинг» и импорт конфига в режиме Deep + Coin Index отклоняются (только бэктест), конфиг не создан", imp3["status"] == 422 and "только в бэктесте" in imp3["detail"] and len(E2E_DB.list_configs(tid_)) == n_cfg, str(imp3))
+    mode.select_option("deep"); pg.get_by_role("button", name="Запустить").click(); pg.wait_for_timeout(3000)
+    check("возврат к «Deep»: поле порога и сводка Coin Index исчезли", field(pg, "Coin Index ≥").count() == 0 and pg.get_by_test_id("coin-index-chip").count() == 0 and pg.get_by_test_id("coin-mode-note").count() == 0)
 
     # --- страница мониторинга: все стратегии пользователя, подробности по клику, управление, автомод и тестовая позиция $1
     pg.wait_for_timeout(1500)                                         # состояние интерфейса сохраняется с задержкой 600 мс
@@ -1388,7 +1410,7 @@ def main():
             scenario(pg, f"http://127.0.0.1:{fp}", f"http://127.0.0.1:{fp}/api/ui-state")
             expected = [e for e in errors if "status of 422" in e]      # браузер логирует отказ API: две намеренно неверные попытки добавить актив, запрос «только Global» без порогов и доля входа больше 100%
             other = [e for e in errors if e not in expected and "status of 401" not in e]      # 401 — проверки доступа без входа и неверный пароль (намеренно)
-            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 13, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
+            check("в консоли браузера нет неожиданных ошибок", not other and len(expected) == 14, f"ожидаемых 422: {len(expected)}\n" + "\n".join(other)[:3000])
             b.close()
     finally:
         for pr in procs:                      # npx запускает node дочерним процессом — гасим всю группу, иначе он остаётся висеть

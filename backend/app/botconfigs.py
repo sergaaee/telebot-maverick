@@ -73,8 +73,8 @@ def validate(params, defaults):
         msgs = [f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()[:6]]
         raise ConfigError("Неверные параметры — " + "; ".join(msgs)) from None
     eff = effective_params(defaults, p)
-    if eff.get("entry_mode") == "coin_index":
-        raise ConfigError("Режим входа Coin Index пока работает только в бэктесте: в мониторинг и автоторговлю такой конфиг добавить нельзя (поставьте режим «Deep»)")
+    if eff.get("entry_mode") in ("coin_index", "deep_coin"):
+        raise ConfigError("Режимы входа с Coin Index («Coin Index монеты», «Deep + Coin Index») пока работают только в бэктесте: в мониторинг и автоторговлю такой конфиг добавить нельзя (поставьте режим «Deep»)")
     # tps в effective_params уже списки словарей; null допустим только у необязательных параметров
     return {k: v for k, v in eff.items()}, ignored
 

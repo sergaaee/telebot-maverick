@@ -51,19 +51,20 @@ def _candles(n, step=0.0004, base=100.0):
     return rows
 
 
-def _history(path, btc):
-    """Отчёты каждые 30 минут; Deep везде «плохой» (лонг по порогам не откроется). btc: {номер отчёта: Coin Index BTC}; в каждом отчёте есть ещё SOL."""
+def _history(path, btc, deep=None):
+    """Отчёты каждые 30 минут; Deep везде «плохой» (лонг по порогам не откроется), кроме номеров из deep = {номер: (Local, Scalp)}. btc: {номер отчёта: Coin Index BTC}; в каждом отчёте есть ещё SOL."""
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["id", "date_utc", "deep_global", "deep_local", "deep_scalp", "liq_long_k", "liq_short_k", "text"])
         for i in range(40):
             text = "Top Coin\n————————————————\nSOL-USD      | 9.00\n" + (f"BTC-USD | {btc[i]}\n" if i in btc else "")
             ts = T0 + i * H // 2
-            w.writerow([i + 1, datetime.fromtimestamp(ts / 1000, timezone.utc).isoformat(), 1.0, 0.5, 0.4, 10.0, 20.0, text])
+            loc, sc = (deep or {}).get(i, (0.5, 0.4))
+            w.writerow([i + 1, datetime.fromtimestamp(ts / 1000, timezone.utc).isoformat(), 1.0, loc, sc, 10.0, 20.0, text])
 
 
-def make_client(tmp_path, monkeypatch, btc):
-    _history(tmp_path / "history.csv", btc)
+def make_client(tmp_path, monkeypatch, btc, deep=None):
+    _history(tmp_path / "history.csv", btc, deep)
     cache = tmp_path / "cache"
     cache.mkdir()
     with open(backtest.cache_path("binanceusdm", SYM, "1m", str(cache)), "w", newline="") as f:
@@ -160,3 +161,74 @@ def test_cache_key_changes_only_in_the_new_mode_and_bot_import_is_refused(client
         validate({"symbol": SYM, "entry_mode": "coin_index", "coin_index_min": 5}, d)
     from app.legacy_off import LEGACY_OFF
     assert LEGACY_OFF["entry_mode"] == "deep" and LEGACY_OFF["coin_index_min"] is None
+
+
+# ---------------------------------------------------------------- третий режим: Deep + Coin Index
+
+DEEP_UP, DEEP_DOWN = (2.0, 2.5), (0.0, 0.0)           # Local / Scalp: условие лонга и шорта по порогам из окружения фикстуры (лонг 1.65 / 2.0, шорт 0.05 / 0.05)
+
+
+@pytest.fixture()
+def client3(tmp_path, monkeypatch):
+    # Deep-лонг в отчётах 3, 4, 5, 20, 21, 22, 30; Deep-шорт в 35 и 36; BTC в блоке: 3 (12), 4 (4), 20 (15), 21 (11), 22 (2), 30 (10), 35 (12) — в отчётах 5 и 36 его нет
+    deep = {**{i: DEEP_UP for i in (3, 4, 5, 20, 21, 22, 30)}, **{i: DEEP_DOWN for i in (35, 36)}}
+    return make_client(tmp_path, monkeypatch, {3: 12.0, 4: 4.0, 20: 15.0, 21: 11.0, 22: 2.0, 30: 10.0, 35: 12.0}, deep)
+
+
+def sig_idx(r):
+    return [(round((x["ts"] - T0) / (H // 2)), x["side"]) for x in r["signals"]]
+
+
+def test_deep_coin_requires_both_deep_thresholds_and_the_coin(client3):
+    s, deep = post(client3)
+    assert s == 200 and sig_idx(deep) == [(i, "long") for i in (3, 4, 5, 20, 21, 22, 30)] + [(35, "short"), (36, "short")]          # обычный режим: только Deep
+    s, r = post(client3, entry_mode="deep_coin", coin_index_min=10)
+    assert s == 200 and sig_idx(r) == [(3, "long"), (20, "long"), (21, "long"), (30, "long"), (35, "short")]                          # плюс монета BTC ≥ 10 в этом же отчёте
+    ci = r["coin_index"]
+    assert (ci["mode"], ci["coin"], ci["min"], ci["reports"], ci["with_coin"], ci["passing"]) == ("deep_coin", "BTC", 10, 40, 7, 5) and (ci["deep_reports"], ci["deep_with_coin"]) == (9, 5)
+    assert r["params"]["entry_mode"] == "deep_coin" and r["params"]["side"] == "both"                                                  # сторона и пороги Deep действуют как обычно
+    s, lo = post(client3, entry_mode="deep_coin", coin_index_min=10, side="long")
+    assert sig_idx(lo) == [(3, "long"), (20, "long"), (21, "long"), (30, "long")] and lo["stats"]["short"]["trades"] == 0               # «только лонг» из обычных настроек работает и тут
+    s, hi = post(client3, entry_mode="deep_coin", coin_index_min=10.01)
+    assert sig_idx(hi) == [(3, "long"), (20, "long"), (21, "long"), (35, "short")]                                                     # порог включается: 10.00 не проходит при 10.01
+
+
+def test_deep_coin_confirmation_and_thresholds_use_the_same_rules_as_deep(client3):
+    s, two = post(client3, entry_mode="deep_coin", coin_index_min=10, confirm=2)
+    assert s == 200 and sig_idx(two) == [(21, "long")]                                                                                # два отчёта подряд, в обоих Deep и монета; 3 — один, 22 — монета не проходит
+    s, thr = post(client3, entry_mode="deep_coin", coin_index_min=10, scalp_min=3.0)                                                  # порог Deep выше значений — входов нет, даже если монета подходит
+    assert s == 200 and [x for x in sig_idx(thr) if x[1] == "long"] == [] and thr["coin_index"]["deep_with_coin"] == 1               # остался только шорт 35
+    s, none = post(client3, entry_mode="deep_coin", coin_index_min=999)
+    assert s == 200 and none["trades"] == [] and any("ни разу не достигает" in w for w in none["warnings"])
+    s, miss = post(client3, entry_mode="deep_coin")
+    assert s == 422 and "Deep + Coin Index" in miss["detail"]
+
+
+def test_deep_coin_blocks_when_deep_passes_only_where_the_coin_fails(tmp_path, monkeypatch):
+    c = make_client(tmp_path, monkeypatch, {3: 20.0, 10: 20.0}, {i: DEEP_UP for i in (5, 6)})                                          # монета сильная в 3 и 10, а Deep — в 5 и 6
+    s, r = post(c, entry_mode="deep_coin", coin_index_min=10)
+    assert s == 200 and r["trades"] == [] and r["coin_index"]["deep_reports"] == 2 and r["coin_index"]["deep_with_coin"] == 0
+    assert any("ни в одном из них монета BTC не проходит" in w for w in r["warnings"])
+
+
+def test_gate_in_entries_and_strong_checker_applies_to_both_sides():
+    sigs = [(T0 + i * H // 2, 2.0, 2.5, 10.0, 20.0) for i in range(4)] + [(T0 + (4 + i) * H // 2, 0.0, 0.0, 10.0, 20.0) for i in range(2)]
+    ok = {sigs[1][0], sigs[2][0], sigs[5][0]}
+    gate = lambda s: s["ts"] in ok
+    got = entries(sigs, 1.0, 2.0, confirm=1, short=(0.5, 0.5), gate=gate)
+    assert got == [(sigs[1][0], 1), (sigs[2][0], 1), (sigs[5][0], -1)]                                                                 # фильтр действует и на лонг, и на шорт
+    hold = backtest.strong_checker(sigs, 1.0, 2.0, (0.5, 0.5), gate=gate)
+    assert [hold(1, sigs[i][0]) for i in range(4)] == [False, True, True, False] and hold(-1, sigs[4][0]) is False and hold(-1, sigs[5][0]) is True
+    assert entries(sigs, 1.0, 2.0, confirm=1, short=(0.5, 0.5), gate=None) == [(sigs[i][0], 1) for i in range(4)] + [(sigs[4][0], -1), (sigs[5][0], -1)]
+
+
+def test_third_mode_cache_key_walk_forward_and_bot_import(client3):
+    eff = {"symbol": SYM, "sl_pct": 2.0}
+    key = make_key(eff, "src", None, SYM)
+    k_deep_coin = make_key({**eff, "entry_mode": "deep_coin", "coin_index_min": 5.0}, "src", None, SYM)
+    assert k_deep_coin != key and k_deep_coin != make_key({**eff, "entry_mode": "coin_index", "coin_index_min": 5.0}, "src", None, SYM)
+    from app.botconfigs import ConfigError, validate
+    with pytest.raises(ConfigError, match="только в бэктесте"):
+        validate({"symbol": SYM, "entry_mode": "deep_coin", "coin_index_min": 5}, load_settings().defaults)
+    w = client3.post("/api/walkforward", json={"entry_mode": "deep_coin", "coin_index_min": 10, "grid": [{"param": "sl_pct", "values": [1, 2]}], "train_days": 14, "test_days": 7})
+    assert "Coin Index" not in str(w.json().get("detail", ""))                                                                         # в этом режиме Deep-пороги используются, отказ про них не выдаётся

@@ -140,6 +140,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
   const liqSrc = p.liq_source ? sources.find((s) => s.id === p.liq_source) : src;
   const asset = assets.find((a) => a.symbol === p.symbol);
   const coin = p.entry_mode === 'coin_index';                      // режим Coin Index: пороги Deep и сторона не используются
+  const deepCoin = p.entry_mode === 'deep_coin';                   // режим «Deep + Coin Index»: обычные пороги Deep И условие по монете
   const downloading = (sym: string) => activeJobs.some((j) => j.symbol === sym);
   const [adding, setAdding] = useState(false);
   const [newSymbol, setNewSymbol] = useState('');
@@ -169,8 +170,8 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
     setTimeout(() => setCfgMsg(null), 4000);
   };
   const toMonitor = async () => {
-    if (coin) {
-      setCfgMsg('Режим Coin Index пока работает только в бэктесте — в мониторинг его добавить нельзя (переключите «Вход по» на Deep).');
+    if (coin || deepCoin) {
+      setCfgMsg('Режимы входа с Coin Index пока работают только в бэктесте — в мониторинг их добавить нельзя (переключите «Вход по» на Deep).');
       setTimeout(() => setCfgMsg(null), 9000);
       return;
     }
@@ -320,13 +321,15 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       <Section title="Режим">
         <label className="field col">
           <Label text="Вход по" help="entry_mode" />
-          <select className="wide" value={coin ? 'coin_index' : 'deep'} onChange={(e) => set('entry_mode', e.target.value as EntryMode)} data-testid="entry-mode">
+          <select className="wide" value={p.entry_mode ?? 'deep'} onChange={(e) => set('entry_mode', e.target.value as EntryMode)} data-testid="entry-mode">
             <option value="deep">Deep (Local / Scalp / Global)</option>
             <option value="coin_index">Coin Index монеты (только лонг)</option>
+            <option value="deep_coin">Deep + Coin Index монеты</option>
           </select>
         </label>
-        {coin && <Num label="Coin Index ≥" help="coin_index_min" value={p.coin_index_min} step={0.5} placeholder="например 10" onChange={(v) => set('coin_index_min', v)} />}
+        {(coin || deepCoin) && <Num label="Coin Index ≥" help="coin_index_min" value={p.coin_index_min} step={0.5} placeholder="например 10" onChange={(v) => set('coin_index_min', v)} />}
         {coin && <div className="src-info" data-testid="coin-mode-note">Монета — выбранный актив ({p.symbol.split('/')[0]}): входим в лонг в отчётах, где она есть в блоке Top Coin с Coin Index не ниже порога. Пороги Deep не используются.</div>}
+        {deepCoin && <div className="src-info" data-testid="coin-mode-note">Вход — когда выполнены пороги Deep (как обычно, обе стороны) И выбранный актив ({p.symbol.split('/')[0]}) есть в блоке Top Coin этого же отчёта с Coin Index не ниже порога.</div>}
         {!coin && (
           <label className="field">
             <Label text="Сторона" help="side" />

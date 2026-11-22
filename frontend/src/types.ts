@@ -6,8 +6,8 @@ export interface TpLevel {
   share: number;
 }
 export type Only = 'local' | 'scalp' | 'global' | null;
-/** режим входа: deep — по порогам Deep; coin_index — только лонг по монете из блока Top Coin отчёта (только бэктест) */
-export type EntryMode = 'deep' | 'coin_index';
+/** режим входа: deep — по порогам Deep; coin_index — только лонг по монете из блока Top Coin отчёта; deep_coin — пороги Deep И монета из блока Top Coin (два последних — только бэктест) */
+export type EntryMode = 'deep' | 'coin_index' | 'deep_coin';
 
 /** Параметры, как их отдаёт и принимает бэкенд (fee/slip — доли, не проценты). */
 export interface Params {
@@ -355,7 +355,7 @@ export interface BacktestResult {
   top: TopSection;
   trend: { enabled: boolean; blocked: number; confirmed: number };
   /** сводка режима Coin Index (null в обычном режиме): монета, порог, сколько отчётов с монетой и сколько проходят порог */
-  coin_index: { coin: string; min: number; reports: number; with_coin: number; passing: number; max: number | null; min_seen: number | null } | null;
+  coin_index: { mode: EntryMode; coin: string; min: number; reports: number; with_coin: number; passing: number; max: number | null; min_seen: number | null; deep_reports: number | null; deep_with_coin: number | null } | null;
 }
 
 export interface TopSkipped {
