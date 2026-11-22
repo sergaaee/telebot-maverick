@@ -824,7 +824,7 @@ def simulate(signals, candles, local_min, scalp_min, tp_pct, sl_pct, fee=0.00055
                       mstop=chk if sl_market else None)
 
 
-def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_global_max=None, ds_range=None, long_pred=None):
+def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_global_max=None, ds_range=None, long_pred=None, gate=None):
     """hold(d, ts_мс) -> выполняется ли СЕЙЧАС условие входа по последнему отчёту не позже ts_мс (для лонга — пороги лонга, для шорта — шорта).
     Пороги уже учитывают режим «только Local / только Scalp» (apply_only): лишняя метрика не участвует. Нет отчёта — не сильны."""
     rep_ts = [s[0] for s in signals]
@@ -833,6 +833,9 @@ def strong_checker(signals, local_min, scalp_min, short, global_min=None, short_
     long_cap, short_floor = ds_range or (None, None)
     long_ok = [(long_pred(sig(s)) if long_pred else should_long(sig(s), local_min, scalp_min, global_min, long_cap)) for s in signals]
     short_ok = [should_short(sig(s), *short, short_global_max, short_floor) if short is not None else False for s in signals]
+    if gate is not None:                                              # режим «Deep + Coin Index»: монета должна проходить и сейчас
+        long_ok = [ok and gate(sig(s)) for ok, s in zip(long_ok, signals)]
+        short_ok = [ok and gate(sig(s)) for ok, s in zip(short_ok, signals)]
 
     def hold(d, t):
         k = bisect_right(rep_ts, t) - 1

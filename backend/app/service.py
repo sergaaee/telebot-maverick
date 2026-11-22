@@ -12,6 +12,7 @@ from .core import equity as equity_mod
 from .core import funding as funding_mod
 from .core import tradingweek
 from .core.entries import entries
+from .core.signal_parser import should_long, should_short
 
 from . import runcache
 from .data import DataStore
@@ -59,15 +60,17 @@ def effective_params(defaults: dict, p: BacktestParams) -> dict:
 
 
 def _coin_index_entry(store, eff, source_id, symbol, sigs, warnings):
-    """Режим Coin Index: условие входа в лонг «выбранная монета есть в блоке Top Coin отчёта и её Coin Index не ниже порога» вместо порогов Deep.
+    """Режимы с Coin Index («coin_index» — вход только по монете, «deep_coin» — пороги Deep И монета): условие «выбранная монета есть в блоке Top Coin отчёта и её Coin Index не ниже порога».
     -> (функция условия для генератора входов, сводка для интерфейса: монета, порог, сколько отчётов с монетой и сколько из них проходят порог).
     Монета — основной актив бэктеста (symbol): ищутся отчёты, где она есть среди ВСЕХ строк блока, а не только в первой."""
+    mode = eff.get("entry_mode")
+    name = "Режим Coin Index" if mode == "coin_index" else "Режим «Deep + Coin Index»"
     cmin = eff.get("coin_index_min")
     if cmin is None:
-        raise ParamError("Режим Coin Index: задайте порог «Coin Index ≥» (число справа от монеты в блоке Top Coin отчёта)")
+        raise ParamError(f"{name}: задайте порог «Coin Index ≥» (число справа от монеты в блоке Top Coin отчёта)")
     coin = topcoins.coin_key(symbol)
     if not coin:
-        raise ParamError("Режим Coin Index: не удалось определить монету по активу " + str(symbol))
+        raise ParamError(f"{name}: не удалось определить монету по активу " + str(symbol))
     try:
         rows = store.coin_rows(source_id)
     except FileNotFoundError as e:
@@ -79,13 +82,25 @@ def _coin_index_entry(store, eff, source_id, symbol, sigs, warnings):
             value[ts] = max(vals)
     mine = [value[s[0]] for s in sigs if s[0] in value]
     passing = [v for v in mine if v >= cmin]
-    info = {"coin": coin, "min": cmin, "reports": len(sigs), "with_coin": len(mine), "passing": len(passing),
-            "max": max(mine) if mine else None, "min_seen": min(mine) if mine else None}
+    info = {"mode": mode, "coin": coin, "min": cmin, "reports": len(sigs), "with_coin": len(mine), "passing": len(passing),
+            "max": max(mine) if mine else None, "min_seen": min(mine) if mine else None, "deep_reports": None, "deep_with_coin": None}
     if not mine:
-        warnings.append(f"Режим Coin Index: монета {coin} ни разу не встречается в блоке Top Coin отчётов выбранного источника (за выбранный период) — входов не будет")
+        warnings.append(f"{name}: монета {coin} ни разу не встречается в блоке Top Coin отчётов выбранного источника (за выбранный период) — входов не будет")
     elif not passing:
-        warnings.append(f"Режим Coin Index: монета {coin} есть в {len(mine)} отчётах, но её Coin Index ни разу не достигает {cmin:g} (максимум {max(mine):g}) — входов не будет")
+        warnings.append(f"{name}: монета {coin} есть в {len(mine)} отчётах, но её Coin Index ни разу не достигает {cmin:g} (максимум {max(mine):g}) — входов не будет")
     return (lambda s: value.get(s["ts"], -math.inf) >= cmin), info
+
+
+def _deep_gate_counts(sigs, lm, sm, gm, sh, sgm, ds_range, gate):
+    """Режим «Deep + Coin Index»: в скольких отчётах выполняются пороги Deep (по одной из сторон) и в скольких из них монета ещё и проходит Coin Index — чтобы видеть, что именно отсекает фильтр монеты."""
+    cap, floor = ds_range or (None, None)
+    deep = both = 0
+    for s in sigs:
+        sg = {"local": s[1], "scalp": s[2], "global": s[7] if len(s) > 7 else None, "ts": s[0]}
+        if should_long(sg, lm, sm, gm, cap) or (sh is not None and should_short(sg, *sh, sgm, floor)):
+            deep += 1
+            both += bool(gate(sg))
+    return deep, both
 
 
 def _ds_range(eff, warnings):
@@ -525,12 +540,17 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         raise ParamError("В выбранном диапазоне дат нет свечей")
 
     eff_in = eff                                                      # что прислал пользователь — в ответе параметры показываются как есть
-    long_pred, coin_info = None, None
-    if eff.get("entry_mode") == "coin_index":
-        long_pred, coin_info = _coin_index_entry(store, eff, source_id, symbol, sigs, warnings)
+    long_pred, gate, coin_info = None, None, None
+    if eff.get("entry_mode") in ("coin_index", "deep_coin"):
+        coin_pred, coin_info = _coin_index_entry(store, eff, source_id, symbol, sigs, warnings)
         if eff.get("top_enabled"):
-            warnings.append("Режим Coin Index: «Топ-коины» отключены — сделки идут по выбранной монете")
-        eff = {**eff, "side": "long", "only": None, "top_enabled": False, "global_min": None, "short_global_max": None}       # только лонг; пороги Deep и режим «метрика» не участвуют
+            warnings.append("Режимы с Coin Index: «Топ-коины» отключены — сделки идут по выбранной монете")
+        if eff["entry_mode"] == "coin_index":
+            long_pred = coin_pred                                     # вместо порогов Deep; только лонг
+            eff = {**eff, "side": "long", "only": None, "top_enabled": False, "global_min": None, "short_global_max": None}       # пороги Deep и режим «метрика» не участвуют
+        else:
+            gate = coin_pred                                          # к порогам Deep (обе стороны, как в обычном режиме) добавляется условие по монете
+            eff = {**eff, "top_enabled": False}
 
     extra, liq, cool = _filters(eff)
     if liq and not any(s[3] is not None for s in sigs):
@@ -598,11 +618,15 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
         warnings.append(f"Выход шорта по DS ≥ {sx:g} не выше порога входа DS ≤ {eff['short_scalp_max']:g}: шорт, открытый при DS от {sx:g} до {eff['short_scalp_max']:g}, закроется уже на следующем отчёте")
     lm, sm, gm, sh, sgm = backtest.resolve_entry(long_min, scalp_min, glob_min, short, short_glob, eff["only"])
     pend = []
-    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est, ds_range=ds_range, long_pred=long_pred)     # все подтверждённые сигналы (с пропущенными)
+    if gate is not None:
+        coin_info["deep_reports"], coin_info["deep_with_coin"] = _deep_gate_counts(sigs, lm, sm, gm, sh, sgm, ds_range, gate)
+        if coin_info["deep_reports"] and not coin_info["deep_with_coin"] and coin_info["passing"]:
+            warnings.append(f"Режим «Deep + Coin Index»: пороги Deep выполняются в {coin_info['deep_reports']} отчётах, но ни в одном из них монета {coin_info['coin']} не проходит Coin Index ≥ {coin_info['min']:g} — входов не будет")
+    confirmed = entries(sigs, lm, sm, eff["confirm"], sh, liq, cool, gm, sgm, pending=pend, state=est, ds_range=ds_range, long_pred=long_pred, gate=gate)     # все подтверждённые сигналы (с пропущенными)
     events = [e for e in confirmed if allow(*e)] if allow else confirmed
     levels = backtest.normalize_tps(tps)
     sl_market = bool(eff.get("sl_market"))
-    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm, ds_range, long_pred) if (eff.get("sl_hold_strong") or sl_market) else None
+    hold = backtest.strong_checker(sigs, lm, sm, sh, gm, sgm, ds_range, long_pred, gate) if (eff.get("sl_hold_strong") or sl_market) else None
     entry_limit = {"pct": eff["entry_limit_pct"], "dir": eff.get("entry_limit_dir") or "pullback", "ttl_h": eff.get("entry_limit_ttl_h") or 4.0,
                    "adds": bool(eff.get("entry_limit_adds") and pyramid)} if eff.get("entry_limit_pct") else None
     if eff.get("entry_limit_adds") and not (eff.get("entry_limit_pct") and pyramid):
@@ -687,7 +711,7 @@ def run_backtest(store: DataStore, defaults: dict, params: BacktestParams, avail
             skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
 
     rep = {s[0]: s for s in sigs}
-    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm, ds_range, long_pred) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
+    hold_chk = backtest.strong_checker(sigs_all, lm, sm, sh, gm, sgm, ds_range, long_pred, gate) if (eff.get("sl_hold_strong") or eff.get("sl_market")) else None
     at = _metrics_at([s[0] for s in sigs_all], sigs_all, hold_chk)
     out_trades = [_trade_out(i, t, rep, at) for i, t in enumerate(trades, 1)]
 
