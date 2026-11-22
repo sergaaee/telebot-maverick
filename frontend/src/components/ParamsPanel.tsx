@@ -2,7 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { fmtDate } from '../format';
 import { HELP, type HelpKey } from '../helpTexts';
 import { MAX_TPS, fillRemainder, resizeTps, sumShares, validateTps } from '../tps';
-import type { AssetInfo, Job, Only, Params, Side, SourceInfo, TfMode, TpLevel } from '../types';
+import type { AssetInfo, EntryMode, Job, Only, Params, Side, SourceInfo, TfMode, TpLevel } from '../types';
 import { importBotConfigs } from '../api';
 import { configFileName, exportConfig } from '../configIO';
 import Help from './Help';
@@ -139,6 +139,7 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
   const src = sources.find((s) => s.id === p.source);
   const liqSrc = p.liq_source ? sources.find((s) => s.id === p.liq_source) : src;
   const asset = assets.find((a) => a.symbol === p.symbol);
+  const coin = p.entry_mode === 'coin_index';                      // режим Coin Index: пороги Deep и сторона не используются
   const downloading = (sym: string) => activeJobs.some((j) => j.symbol === sym);
   const [adding, setAdding] = useState(false);
   const [newSymbol, setNewSymbol] = useState('');
@@ -168,6 +169,11 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
     setTimeout(() => setCfgMsg(null), 4000);
   };
   const toMonitor = async () => {
+    if (coin) {
+      setCfgMsg('Режим Coin Index пока работает только в бэктесте — в мониторинг его добавить нельзя (переключите «Вход по» на Deep).');
+      setTimeout(() => setCfgMsg(null), 9000);
+      return;
+    }
     const n = window.prompt('Имя конфига в мониторинге. Бот начнёт считать по нему сигналы (текущие параметры, без периода дат); автомод у нового конфига выключен.', `${p.source}-${p.symbol.split('/')[0]}`);
     if (n === null) return;
     try {
@@ -312,23 +318,36 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
       </Section>
 
       <Section title="Режим">
-        <label className="field">
-          <Label text="Сторона" help="side" />
-          <select value={p.side} onChange={(e) => set('side', e.target.value as Side)}>
-            <option value="both">лонг + шорт</option>
-            <option value="long">только лонг</option>
-            <option value="short">только шорт</option>
+        <label className="field col">
+          <Label text="Вход по" help="entry_mode" />
+          <select className="wide" value={coin ? 'coin_index' : 'deep'} onChange={(e) => set('entry_mode', e.target.value as EntryMode)} data-testid="entry-mode">
+            <option value="deep">Deep (Local / Scalp / Global)</option>
+            <option value="coin_index">Coin Index монеты (только лонг)</option>
           </select>
         </label>
-        <label className="field">
-          <Label text="Метрика" help="only" />
-          <select value={p.only ?? ''} onChange={(e) => set('only', (e.target.value || null) as Only)}>
-            <option value="">Local и Scalp (+ Global, если задан)</option>
-            <option value="local">только Local</option>
-            <option value="scalp">только Scalp</option>
-            <option value="global">только Global</option>
-          </select>
-        </label>
+        {coin && <Num label="Coin Index ≥" help="coin_index_min" value={p.coin_index_min} step={0.5} placeholder="например 10" onChange={(v) => set('coin_index_min', v)} />}
+        {coin && <div className="src-info" data-testid="coin-mode-note">Монета — выбранный актив ({p.symbol.split('/')[0]}): входим в лонг в отчётах, где она есть в блоке Top Coin с Coin Index не ниже порога. Пороги Deep не используются.</div>}
+        {!coin && (
+          <label className="field">
+            <Label text="Сторона" help="side" />
+            <select value={p.side} onChange={(e) => set('side', e.target.value as Side)}>
+              <option value="both">лонг + шорт</option>
+              <option value="long">только лонг</option>
+              <option value="short">только шорт</option>
+            </select>
+          </label>
+        )}
+        {!coin && (
+          <label className="field">
+            <Label text="Метрика" help="only" />
+            <select value={p.only ?? ''} onChange={(e) => set('only', (e.target.value || null) as Only)}>
+              <option value="">Local и Scalp (+ Global, если задан)</option>
+              <option value="local">только Local</option>
+              <option value="scalp">только Scalp</option>
+              <option value="global">только Global</option>
+            </select>
+          </label>
+        )}
         <label className="field check">
           <input type="checkbox" checked={p.weekend_no_entry} onChange={(e) => setWeekend({ weekend_no_entry: e.target.checked })} data-testid="weekend-no-entry" />
           <Label text="не открывать позиции по сигналам в выходные" help="weekend_no_entry" />
@@ -341,23 +360,23 @@ export default function ParamsPanel({ params: p, sources, assets, activeJobs, on
         <Num label="Подтверждение, отчётов" help="confirm" value={p.confirm} step={1} onChange={(v) => set('confirm', Math.max(1, Math.round(v ?? 1)))} />
       </Section>
 
-      <Section title="Лонг: Deep ≥" help="groupLong">
-        <Num label="Local ≥" help="local_min" value={p.local_min} onChange={num('local_min')} />
-        <Num label="Scalp ≥" help="scalp_min" value={p.scalp_min} onChange={num('scalp_min')} />
-        <Num label="Scalp ≤ (верхняя граница)" help="long_scalp_max" value={p.long_scalp_max} placeholder="без границы" onChange={(v) => set('long_scalp_max', v)} />
-        <Num label="Global ≥" help="global_min" value={p.global_min} placeholder="выкл" onChange={num('global_min')} />
+      <Section title={coin ? 'Лонг: выход по DS' : 'Лонг: Deep ≥'} help="groupLong">
+        {!coin && <Num label="Local ≥" help="local_min" value={p.local_min} onChange={num('local_min')} />}
+        {!coin && <Num label="Scalp ≥" help="scalp_min" value={p.scalp_min} onChange={num('scalp_min')} />}
+        {!coin && <Num label="Scalp ≤ (верхняя граница)" help="long_scalp_max" value={p.long_scalp_max} placeholder="без границы" onChange={(v) => set('long_scalp_max', v)} />}
+        {!coin && <Num label="Global ≥" help="global_min" value={p.global_min} placeholder="выкл" onChange={num('global_min')} />}
         <Num label="Закрыть лонг при Scalp ≤" help="exit_long_ds" value={p.exit_long_ds} placeholder="выкл" onChange={(v) => set('exit_long_ds', v)} />
         <Num label="Закрыть лонг при Scalp ≥" help="exit_long_ds_max" value={p.exit_long_ds_max} placeholder="выкл" onChange={(v) => set('exit_long_ds_max', v)} />
       </Section>
 
-      <Section title="Шорт: Deep ≤" help="groupShort">
+      {!coin && <Section title="Шорт: Deep ≤" help="groupShort">
         <Num label="Local ≤" help="short_local_max" value={p.short_local_max} onChange={num('short_local_max')} />
         <Num label="Scalp ≤" help="short_scalp_max" value={p.short_scalp_max} onChange={num('short_scalp_max')} />
         <Num label="Scalp ≥ (нижняя граница)" help="short_scalp_min" value={p.short_scalp_min} placeholder="без границы" onChange={(v) => set('short_scalp_min', v)} />
         <Num label="Global ≤" help="short_global_max" value={p.short_global_max} placeholder="выкл" onChange={num('short_global_max')} />
         <Num label="Закрыть шорт при Scalp ≥" help="exit_short_ds" value={p.exit_short_ds} placeholder="выкл" onChange={(v) => set('exit_short_ds', v)} />
         <Num label="Закрыть шорт при Scalp ≤" help="exit_short_ds_min" value={p.exit_short_ds_min} placeholder="выкл" onChange={(v) => set('exit_short_ds_min', v)} />
-      </Section>
+      </Section>}
 
       <Section title="Выход и издержки" help="groupExit">
         <TpEditor tps={p.tps} be={p.be_after_tp1} onChange={(t, b) => onChange({ ...p, tps: t, be_after_tp1: b })} />

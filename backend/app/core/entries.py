@@ -79,8 +79,9 @@ def attach_liq(signals, liq_signals, max_age_h=3.0):
     return out, hit
 
 
-def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None, ds_range=None):
+def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool=None, global_min=None, short_global_max=None, pending=None, state=None, ds_range=None, long_pred=None):
     """ds_range — необязательный диапазон DS (Scalp): (верхняя граница для лонга, нижняя граница для шорта); None в элементе — без границы. Выше верхней границы лонг не открывается, ниже нижней — шорт.
+    long_pred — необязательное СВОЁ условие входа в лонг вместо порогов Deep (режим Coin Index): функция от отчёта {local, scalp, global, ts} -> bool; шорт в этом режиме задаёт вызывающий (short=None).
     global_min / short_global_max — необязательные пороги Deep Global для лонга (≥) и шорта (≤); None — метрика не участвует.
     pending — список, в который добавляются (ts, d, waiting): отчёты, где серия УЖЕ подтверждена, но вход ждёт фильтр; waiting = {"cool": …, "liq": …} с цифрами:
     чего не хватает (откат метрики / ликвидации). Фильтр тренда применяется снаружи (service), здесь его нет.
@@ -88,7 +89,7 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
     обработано); если на входе в нём уже есть снимок (и первые state["n"] отчётов не изменились — это проверяет вызывающий), обрабатываются только отчёты после него,
     а результат тот же, что при расчёте с нуля: каждый отчёт зависит только от предыдущих."""
     long_cap, short_floor = ds_range or (None, None)
-    sides = [(1, lambda s: should_long(s, local_min, scalp_min, global_min, long_cap))]
+    sides = [(1, long_pred or (lambda s: should_long(s, local_min, scalp_min, global_min, long_cap)))]
     if short is not None:
         sides.append((-1, lambda s: should_short(s, *short, short_global_max, short_floor)))
     st = {d: {"streak": 0, "ext": None, "prev": None, "dec": 0} for d, _ in sides}
@@ -107,7 +108,7 @@ def entries(signals, local_min, scalp_min, confirm=1, short=None, liq=None, cool
     for row in signals[start:]:
         sts, loc, scalp = row[:3]
         liqv = {1: row[3] if len(row) > 3 else None, -1: row[4] if len(row) > 4 else None}
-        sig = {"local": loc, "scalp": scalp, "global": row[7] if len(row) > 7 else None}
+        sig = {"local": loc, "scalp": scalp, "global": row[7] if len(row) > 7 else None, "ts": sts}
         m = sig[metric]
         thr, mx = {}, {}
         if liq:

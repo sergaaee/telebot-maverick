@@ -24,6 +24,15 @@ def split_coin(raw):
     return s
 
 
+def coin_key(raw):
+    """Название монеты для сравнения тикера из отчёта и символа биржи: 'TIA-USD' / 'TIA/USDT:USDT' -> 'TIA', '1000PEPE/USDT:USDT' и 'PEPEUSDT' -> 'PEPE' (пачки 1000/10000/1000000 отбрасываются)."""
+    base = split_coin(raw)
+    for pre in PREFIXES[1:][::-1]:                      # сначала самый длинный префикс
+        if base.startswith(pre) and len(base) > len(pre) and not base[len(pre)].isdigit():
+            return base[len(pre):]
+    return base
+
+
 def resolve_symbol(raw, available):
     """Тикер из отчёта -> бессрочный USDT-контракт биржи или None, если такого контракта нет."""
     base = split_coin(raw)

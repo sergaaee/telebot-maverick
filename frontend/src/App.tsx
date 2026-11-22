@@ -585,6 +585,7 @@ export default function App({ me, authEnabled, botUsername, onProfileChanged, on
             <span className="legend">
               <i className="dot up" /> лонг ▲ <i className="dot down" /> шорт ▼ · выход: <b className="pos">TP</b> <b className="neg">SL</b> <b className="rev">REV</b> <b className="neg">LIQ</b> <b className="muted">WKND</b> <b className="muted">DS</b> <b className="muted">{view === 'top' ? 'TIME' : 'OPEN'}</b>
             </span>
+            {result?.coin_index && view === 'main' && <span className="chip" data-testid="coin-index-chip" title="Режим Coin Index: вход в лонг по монете из блока Top Coin отчёта">Coin Index {result.coin_index.coin} ≥ {result.coin_index.min}: отчётов с монетой {result.coin_index.with_coin} из {result.coin_index.reports}, проходят порог {result.coin_index.passing}{result.coin_index.max != null ? ` · максимум ${result.coin_index.max}` : ''}</span>}
             {result?.trend?.enabled && view === 'main' && <span className="chip">тренд: отсечено {result.trend.blocked} из {result.trend.confirmed} сигналов</span>}
             {effTf?.truncated && <span className="chip warn">окно слишком широкое для {tfLabel(effTf.tf)} — показана последняя часть, приблизьте или возьмите ТФ крупнее</span>}
             {result?.signals_truncated && <span className="chip warn">сигналов слишком много, показаны первые 5000</span>}

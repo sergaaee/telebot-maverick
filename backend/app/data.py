@@ -28,6 +28,7 @@ class DataStore:
         self._raw = {}                  # id источника -> (mtime, [отчёты])
         self._sig = {}                  # (источник, источник ликвидаций) -> (ключ, данные)
         self._latest = {}               # id источника -> (mtime, последний отчёт)
+        self._coins = {}                # id источника -> (mtime, {время отчёта: [(монета, Coin Index)]})
         self._candles = {}              # символ -> (mtime, свечи, времена)
         self._extra = self._load_extra()  # активы, добавленные из интерфейса
 
@@ -69,6 +70,36 @@ class DataStore:
         with self._lock:
             self._sig[(source_id, liq_id)] = (key, merged)
         return merged
+
+    def coin_rows(self, source_id=None):
+        """Режим Coin Index: {время отчёта (мс): [(монета, значение)]} — ВСЕ строки блока Top Coin каждого отчёта источника (монета в нормальном виде: 'TIA-USD' -> 'TIA', '1000PEPE' -> 'PEPE').
+        Берётся из текста отчётов; отчёты без Deep Local / Scalp пропускаются так же, как при загрузке сигналов, поэтому времена совпадают. Кеш — по времени изменения файла."""
+        import csv
+
+        from .core.entries import _ts
+        from .core.signal_parser import parse_top_coins
+        from .core.topcoins import coin_key
+
+        source_id = source_id or self.s.default_source
+        src = self.source(source_id)
+        m = _mtime(src.file)
+        if m is None:
+            raise FileNotFoundError(f"Нет файла с историей источника «{src.label}»: {src.file}")
+        with self._lock:
+            c = self._coins.get(source_id)
+            if c and c[0] == m:
+                return c[1]
+        out = {}
+        with open(src.file, newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                if not r["deep_local"] or not r["deep_scalp"]:
+                    continue
+                rows = parse_top_coins(r.get("text") or "")
+                if rows:
+                    out[_ts(r["date_utc"])] = [(coin_key(x["coin"]), x["value"]) for x in rows]
+        with self._lock:
+            self._coins[source_id] = (m, out)
+        return out
 
     def latest(self, source_id):
         """Последний отчёт источника с метриками: время, DG/DL/DS, топ-коин и ликвидации (None, если отчётов нет)."""

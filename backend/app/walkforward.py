@@ -50,6 +50,8 @@ def run_walkforward(store, defaults, req: WalkForwardRequest, available_fn=None)
     base_kw["top_enabled"] = False                                   # топ-коины для подбора не нужны (и требуют скачивания свечей)
     if len({ax.param for ax in req.grid}) != len(req.grid):
         raise ParamError("Один и тот же параметр нельзя перебирать дважды")
+    if (base_kw.get("entry_mode") or defaults.get("entry_mode")) == "coin_index":
+        raise ParamError("Walk-forward подбирает пороги Deep (Local / Scalp / Global), а в режиме входа Coin Index они не используются — переключите режим на «Deep»")
     probe = run_backtest(store, defaults, BacktestParams(**base_kw), available_fn=available_fn, use_cache=False)
     first, last = probe["range"]["first_ts"] // DAY, probe["range"]["last_ts"] // DAY
     train, test = req.train_days, req.test_days
